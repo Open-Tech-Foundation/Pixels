@@ -1,0 +1,11 @@
+# name kind count level payload_bytes compressed_bytes
+# Produced by zlib (the reference implementation) so our inflate is checked
+# against a real encoder rather than against our own deflate.
+stored_level0 pattern 3000 0 3000 3011
+fixed_small text 1 9 45 52
+dynamic_text text 60 9 2700 74
+long_zero_run zeros 5000 9 5000 28
+overlapping_runs runs 200 9 1774 93
+high_entropy pattern 4096 9 4096 315
+empty zeros 0 6 0 8
+level1_text text 40 1 1800 71

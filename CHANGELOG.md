@@ -24,8 +24,12 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Added
-- ADR-0008 (crossbeam-deque for work stealing) and ADR-0009
-  (scheduler-inserted materialization at order-incompatible seams).
+- ADR-0008 (crossbeam-deque for work stealing), ADR-0009 (scheduler-inserted
+  materialization at order-incompatible seams) and ADR-0010 (own inflate and
+  deflate).
+- `otf-pixels-codec-png`: `Crc32`, `Adler32`, and a from-scratch DEFLATE
+  decompressor (`inflate_to`, `zlib_decompress`) per ADR-0010. Bounded output
+  makes decompression bombs a malformed-input error rather than an allocation.
 - `otf-pixels-core`: `TileCache`, a byte-budgeted LRU of graph intermediates
   keyed by `(NodeId, Region)`. Eviction bounds what the cache *retains*, never
   what a caller holds alive, so tiles need no pinning.

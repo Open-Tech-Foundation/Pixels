@@ -1,0 +1,17 @@
+[package]
+name = "otf-pixels-codec-png"
+description = "PNG codec for otf-pixels, implemented from scratch including DEFLATE."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+[dependencies]
+otf-pixels-core.workspace = true
+
+[lints]
+workspace = true

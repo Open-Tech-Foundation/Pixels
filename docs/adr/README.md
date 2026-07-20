@@ -21,6 +21,7 @@ than silent divergence — this replaces the previous DECISIONS.md practice.
 | [0007](0007-gpu-deferred-to-v2.md) | GPU compute deferred to v2, opt-in | Accepted |
 | [0008](0008-crossbeam-deque-for-work-stealing.md) | crossbeam-deque for work stealing | Accepted |
 | [0009](0009-scheduler-inserted-materialization.md) | Scheduler-inserted materialization at order-incompatible seams | Accepted |
+| [0010](0010-own-inflate-and-deflate.md) | Own inflate and deflate | Accepted |
 
 Deferred (no ADR yet, decide when reached): tile cache eviction policy
 details, fusion pass design, ICC pipeline, error taxonomy granularity.
