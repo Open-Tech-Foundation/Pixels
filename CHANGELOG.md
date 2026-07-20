@@ -7,6 +7,8 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- `otf-pixels` now evaluates pipelines with the tile scheduler instead of the
+  M1 whole-image evaluator. Rows still reach an encoder top to bottom.
 - `DecodedSource` now streams instead of materializing the whole image on
   first pull. It advances a forward-only decoder to the requested band and
   retains just that band as a rolling window, which is what makes constant
@@ -39,6 +41,15 @@ versioning: [SemVer](https://semver.org/).
 - `otf-pixels-core`: `Scheduler`, the demand-driven parallel tile evaluator,
   plus `evaluate_tiled` and `RunStats`. Output tiles are evaluated in parallel
   batches and delivered to the sink in order.
+- `NodePlan::cacheable`: only nodes demanded more than once (a shared prefix,
+  or one feeding a spatial op) are retained in the tile cache.
+- `Output::bytes_via_reference`, running a pipeline through the M1 evaluator so
+  the scheduler can be differentially tested against it.
+- `Output::threads` / `Output::scheduler_options` for tuning a run.
+- Builder setters on `Limits`, `PlanOptions` and `SchedulerOptions`, which are
+  `#[non_exhaustive]` and were otherwise unconfigurable downstream.
+- M2 exit-criterion tests and `benches/scaling.rs`, a std-only benchmark
+  reporting speedup and parallel efficiency across thread counts.
 - Project documentation: README, ARCHITECTURE, SPEC, ROADMAP, ADR-0001..0007.
 - Cargo workspace: `otf-pixels`, `otf-pixels-core`, `otf-pixels-ops`,
   `otf-pixels-codec-raw` (ADR-0006). No external dependencies.

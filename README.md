@@ -53,14 +53,21 @@ OS-backend gaps.
 
 ## Status
 
-**M1 — core skeleton — complete.** The workspace, op graph, codec traits,
-raw codec, geometry ops and the naive whole-image evaluator are in place and
-tested; see [ROADMAP.md](docs/ROADMAP.md) for what each milestone adds.
+**M2 — tile scheduler — complete.** The workspace, op graph, codec traits,
+raw codec, geometry ops, and the demand-driven parallel tile scheduler are in
+place and tested; see [ROADMAP.md](docs/ROADMAP.md) for what each milestone
+adds.
 
-The evaluator is deliberately naive — it exists as the correctness oracle M2's
-tile scheduler is diffed against. Until M2 lands, pipelines are evaluated
-whole-image, so the constant-memory guarantee is **not yet met**: what exists
-today is the API and the codec contracts that will meet it.
+Pipelines now stream: peak memory is bounded by tiles in flight, not by image
+size, and is verified against a ~100 MP synthetic source. The M1 whole-image
+evaluator is retained as the correctness oracle — the scheduler is diffed
+against it byte for byte across pipeline shapes, thread counts and tile sizes.
+
+Scaling is honest rather than flattering: forward-only sources are capped by
+their serial decode stage (ADR-0005), and today's ops are byte movement, so
+they saturate memory bandwidth before they saturate cores. `cargo bench
+--bench scaling` prints the numbers. M4's arithmetic kernels are where that
+range should widen.
 
 All v1 architecture decisions are recorded in [docs/adr/](docs/adr/).
 

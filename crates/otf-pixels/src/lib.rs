@@ -34,28 +34,35 @@
 //! it surfaces from [`Output::write`] or [`Output::bytes`]. Nothing is
 //! silently ignored, and no operation runs after a failed one.
 //!
-//! # M1 scope
+//! # Evaluation
 //!
-//! This milestone delivers the engine skeleton (ROADMAP M1): the raw codec,
-//! the geometry ops, and the naive whole-image evaluator that later milestones
-//! are tested against. Notably **not** here yet:
+//! Terminals run the pipeline on the demand-driven tile scheduler: output
+//! tiles are evaluated in parallel and delivered to the sink in order, with
+//! peak memory bounded by tiles in flight rather than image size. Tune it with
+//! [`Output::threads`] or [`Output::scheduler_options`].
+//!
+//! [`Output::bytes_via_reference`] runs the same pipeline through the M1
+//! whole-image evaluator instead. That path is slow and holds every
+//! intermediate in full, but it is obviously correct, so it is the oracle the
+//! scheduler is verified against.
+//!
+//! # Current scope
+//!
+//! Through ROADMAP M2. Notably **not** here yet:
 //!
 //! - `Image::open` and format sniffing, which arrive with the first codec that
 //!   has magic bytes to sniff (M3, PNG). Raw cannot be detected — only
 //!   requested — so there is nothing for it to dispatch on today.
-//! - The tile scheduler (M2). Until it lands, pipelines are evaluated
-//!   whole-image, so the constant-memory guarantee in SPEC §Guarantees 1 is
-//!   not yet met — only the API and codecs that will meet it.
 //! - `resize`, `rotate`, `modulate`, `convolve`, `composite` and the channel
 //!   ops (M4).
 
-use otf_pixels_core::{BufferSource, Op, Producer, TileBuf, evaluate_rows};
+use otf_pixels_core::{BufferSource, Op, Producer, Scheduler, TileBuf};
 use std::sync::Arc;
 
 pub use otf_pixels_core::{
     AccessPattern, ChannelLayout, ColorModel, Decoder, EncodeOptions, Encoder, ErrorCode, Format,
-    ImageDescriptor, Limit, Limits, Metadata, PixelFormat, PixelsError, Region, Result, Sink,
-    Source,
+    ImageDescriptor, Limit, Limits, Metadata, PixelFormat, PixelsError, PlanOptions, Region,
+    Result, RunStats, SchedulerOptions, Sink, Source, TileShape, evaluate as evaluate_reference,
 };
 pub use otf_pixels_ops::{Crop, Flip, Flop};
 
@@ -194,6 +201,7 @@ impl Image {
             image: self,
             format,
             options,
+            scheduler: SchedulerOptions::default(),
         }
     }
 
@@ -242,6 +250,7 @@ pub struct Output {
     image: Image,
     format: Format,
     options: EncodeOptions,
+    scheduler: SchedulerOptions,
 }
 
 impl Output {
@@ -255,6 +264,24 @@ impl Output {
     #[must_use]
     pub const fn options(&self) -> EncodeOptions {
         self.options
+    }
+
+    /// Run this pipeline on `threads` worker threads.
+    ///
+    /// Zero, the default, means one per available core. Setting it to one
+    /// gives a fully deterministic serial run, which is what the differential
+    /// tests against the reference evaluator use.
+    #[must_use]
+    pub const fn threads(mut self, threads: usize) -> Self {
+        self.scheduler.threads = threads;
+        self
+    }
+
+    /// Tune the scheduler directly.
+    #[must_use]
+    pub const fn scheduler_options(mut self, options: SchedulerOptions) -> Self {
+        self.scheduler = options;
+        self
     }
 
     /// Run the pipeline, streaming encoded bytes into `sink`.
@@ -274,8 +301,42 @@ impl Output {
         let descriptor = image.descriptor();
         let mut encoder = encoder_for(self.format, self.options)?;
         encoder.write_header(&descriptor, &mut sink)?;
-        evaluate_rows(&image, |_, row| encoder.write_row(row, &mut sink))?;
+
+        // The scheduler delivers tiles; an encoder wants whole rows in order.
+        let scheduler = Scheduler::new(self.scheduler)?;
+        let mut rows = RowAssembler::new(descriptor);
+        scheduler.run(&image, |region, tile| {
+            rows.accept(region, tile, &mut |row| encoder.write_row(row, &mut sink))
+        })?;
+        rows.finish(&mut |row| encoder.write_row(row, &mut sink))?;
         encoder.finish(&mut sink)
+    }
+
+    /// Run the pipeline through the **reference** evaluator instead of the
+    /// tile scheduler, collecting encoded bytes.
+    ///
+    /// The reference evaluator is single-threaded and whole-image: it holds
+    /// every intermediate in full, so it is slow and its memory scales with
+    /// the image. It exists because it is *obviously* correct, which makes it
+    /// the oracle the scheduler is verified against — the two must produce
+    /// byte-identical output for every pipeline (ROADMAP M2).
+    ///
+    /// Use it to verify, to debug a suspected scheduler bug, or where an image
+    /// is small and determinism matters more than throughput. Prefer
+    /// [`Output::bytes`] otherwise.
+    ///
+    /// # Errors
+    ///
+    /// As [`Output::bytes`].
+    pub fn bytes_via_reference(self) -> Result<Vec<u8>> {
+        let image = self.image.graph()?.clone();
+        let descriptor = image.descriptor();
+        let mut encoder = encoder_for(self.format, self.options)?;
+        let mut sink = Vec::with_capacity(descriptor.byte_len().unwrap_or_default());
+        encoder.write_header(&descriptor, &mut sink)?;
+        otf_pixels_core::evaluate_rows(&image, |_, row| encoder.write_row(row, &mut sink))?;
+        encoder.finish(&mut sink)?;
+        Ok(sink)
     }
 
     /// Run the pipeline, collecting encoded bytes into a [`Vec`].
@@ -295,6 +356,99 @@ impl Output {
         let mut buffer = Vec::with_capacity(hint);
         self.write(&mut buffer)?;
         Ok(buffer)
+    }
+}
+
+/// Reassembles scheduler tiles into whole rows for an encoder.
+///
+/// Sequential pipelines deliver full-width strips, so rows pass straight
+/// through untouched — the common case costs nothing. Where a spatial op puts
+/// the output on square tiles (ADR-0003), tiles arrive left-to-right within a
+/// band, and a row is only complete once its band is. Those are buffered one
+/// band at a time, so the cost is a band rather than an image.
+#[derive(Debug)]
+struct RowAssembler {
+    descriptor: ImageDescriptor,
+    /// The band being assembled, when tiles are narrower than the image.
+    band: Option<otf_pixels_core::TileBuf>,
+    /// Next row not yet emitted.
+    next_row: u32,
+}
+
+impl RowAssembler {
+    const fn new(descriptor: ImageDescriptor) -> Self {
+        Self {
+            descriptor,
+            band: None,
+            next_row: 0,
+        }
+    }
+
+    /// Take one tile, emitting whatever rows it completes.
+    fn accept(
+        &mut self,
+        region: Region,
+        tile: &otf_pixels_core::Tile<'_>,
+        emit: &mut impl FnMut(&[u8]) -> Result<()>,
+    ) -> Result<()> {
+        // Fast path: a full-width tile completes its own rows.
+        if region.width == self.descriptor.width && self.band.is_none() {
+            for y in region.y..region.y.saturating_add(region.height) {
+                let row = tile
+                    .row(y)
+                    .ok_or_else(|| PixelsError::graph(format!("output tile is missing row {y}")))?;
+                emit(row)?;
+                self.next_row = y.saturating_add(1);
+            }
+            return Ok(());
+        }
+
+        // Narrow tile: accumulate into a full-width band, flushing the
+        // previous one when a new band starts.
+        let band_region = Region::new(0, region.y, self.descriptor.width, region.height);
+        let starts_new_band = self
+            .band
+            .as_ref()
+            .is_none_or(|band| band.region().y != region.y);
+        if starts_new_band {
+            self.flush(emit)?;
+            self.band = Some(otf_pixels_core::TileBuf::zeroed(
+                band_region,
+                self.descriptor.pixel,
+            )?);
+        }
+        let Some(band) = self.band.as_mut() else {
+            return Err(PixelsError::graph("row band vanished"));
+        };
+        otf_pixels_core::copy_region(tile, &mut band.as_tile_mut()?, region)?;
+
+        // A band is complete once its rightmost column has arrived.
+        if region.right() >= u64::from(self.descriptor.width) {
+            self.flush(emit)?;
+        }
+        Ok(())
+    }
+
+    /// Emit any buffered band's rows and drop it.
+    fn flush(&mut self, emit: &mut impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
+        let Some(band) = self.band.take() else {
+            return Ok(());
+        };
+        let region = band.region();
+        let view = band.as_tile()?;
+        for y in region.y..region.y.saturating_add(region.height) {
+            let row = view
+                .row(y)
+                .ok_or_else(|| PixelsError::graph(format!("row band is missing row {y}")))?;
+            emit(row)?;
+            self.next_row = y.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// Emit anything still buffered at the end of a run.
+    fn finish(&mut self, emit: &mut impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
+        self.flush(emit)
     }
 }
 

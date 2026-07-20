@@ -62,6 +62,39 @@ pub struct SchedulerOptions {
     pub plan: PlanOptions,
 }
 
+impl SchedulerOptions {
+    /// Set the worker thread count; zero means one per core.
+    ///
+    /// `SchedulerOptions` is `#[non_exhaustive]`, so downstream crates cannot
+    /// use a struct literal; these setters are the only way to configure it.
+    #[must_use]
+    pub const fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads;
+        self
+    }
+
+    /// Set the tile cache byte budget.
+    #[must_use]
+    pub const fn with_cache_budget(mut self, bytes: usize) -> Self {
+        self.cache_budget = bytes;
+        self
+    }
+
+    /// Set how many output tiles are evaluated concurrently.
+    #[must_use]
+    pub const fn with_batch_tiles(mut self, tiles: usize) -> Self {
+        self.batch_tiles = tiles;
+        self
+    }
+
+    /// Set the tile shape negotiation options.
+    #[must_use]
+    pub const fn with_plan(mut self, plan: PlanOptions) -> Self {
+        self.plan = plan;
+        self
+    }
+}
+
 impl Default for SchedulerOptions {
     fn default() -> Self {
         Self {
@@ -157,8 +190,17 @@ impl Scheduler {
         let root = Arc::clone(image.node());
         let mut stats = RunStats::default();
 
+        // Which nodes are worth caching; see `NodePlan::cacheable`.
+        let cacheable: Arc<std::collections::HashSet<NodeId>> = Arc::new(
+            dependency_order(&root)
+                .iter()
+                .filter(|node| plan.node(node.id()).is_some_and(|p| p.cacheable))
+                .map(|node| node.id())
+                .collect(),
+        );
+
         // Phase 1: realize the nodes ADR-0009 marked, in dependency order.
-        let materialized = self.materialize(&root, &plan, &mut stats)?;
+        let materialized = self.materialize(&root, &plan, &cacheable, &mut stats)?;
 
         // Phase 2: stream output tiles in batches.
         let batch_size = if self.options.batch_tiles == 0 {
@@ -178,6 +220,7 @@ impl Scheduler {
                 cache: Arc::clone(&self.cache),
                 materialized: Arc::clone(&materialized),
                 sources: Arc::new(sources),
+                cacheable: Arc::clone(&cacheable),
             });
 
             // Evaluate the batch's tiles in parallel.
@@ -235,6 +278,7 @@ impl Scheduler {
         &self,
         root: &Arc<Node>,
         plan: &Plan,
+        cacheable: &Arc<std::collections::HashSet<NodeId>>,
         stats: &mut RunStats,
     ) -> Result<Arc<HashMap<NodeId, Arc<TileBuf>>>> {
         let mut materialized: HashMap<NodeId, Arc<TileBuf>> = HashMap::new();
@@ -249,6 +293,7 @@ impl Scheduler {
                 cache: Arc::clone(&self.cache),
                 materialized: Arc::new(materialized.clone()),
                 sources: Arc::new(HashMap::new()),
+                cacheable: Arc::clone(cacheable),
             };
             let whole = node.descriptor().region();
             let buffer = produce_uncached(&node, whole, &context)?;
@@ -301,10 +346,22 @@ struct Context {
     cache: Arc<TileCache>,
     materialized: Arc<HashMap<NodeId, Arc<TileBuf>>>,
     sources: Arc<HashMap<TileKey, Arc<TileBuf>>>,
+    /// Nodes whose tiles are worth retaining; see [`NodePlan::cacheable`].
+    ///
+    /// [`NodePlan::cacheable`]: crate::NodePlan::cacheable
+    cacheable: Arc<std::collections::HashSet<NodeId>>,
 }
 
-/// Produce `region` of `node`, consulting the cache.
+/// Produce `region` of `node`, consulting the cache where that can pay off.
+///
+/// Nodes with a single consumer bypass the cache entirely: their tiles are
+/// consumed exactly once, so retaining them would evict tiles that *are*
+/// reused and would make a streaming pipeline's peak memory equal to the cache
+/// budget rather than a few tiles in flight.
 fn produce(node: &Arc<Node>, region: Region, context: &Context) -> Result<Arc<TileBuf>> {
+    if !context.cacheable.contains(&node.id()) {
+        return produce_uncached(node, region, context);
+    }
     let key = TileKey::new(node.id(), region);
     if let Some(tile) = context.cache.get(&key) {
         return Ok(tile);

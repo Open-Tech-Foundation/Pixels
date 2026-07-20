@@ -22,5 +22,11 @@ default = ["raw"]
 # (ARCHITECTURE §Layer 2: "each format is a plugin behind a cargo feature").
 raw = ["dep:otf-pixels-codec-raw"]
 
+# The scaling benchmark is a plain binary, not a libtest harness: it measures
+# how fixed work redistributes across threads rather than timing a micro-op.
+[[bench]]
+name = "scaling"
+harness = false
+
 [lints]
 workspace = true

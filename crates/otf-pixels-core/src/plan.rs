@@ -87,6 +87,15 @@ pub struct NodePlan {
     /// below come from a forward-only source (ADR-0009). It is a property of
     /// this *position in this pipeline*, not of the node's op.
     pub materialize: bool,
+    /// Whether this node's tiles are worth retaining in the tile cache.
+    ///
+    /// Only nodes whose output is genuinely demanded more than once qualify:
+    /// a shared graph prefix, or a node feeding a spatial op whose tile
+    /// requests overlap. In a linear pipeline every tile is produced once and
+    /// consumed once, so caching it would be pure waste — and, worse, would
+    /// fill the byte budget with garbage and make a streaming pipeline's
+    /// memory look like the cache budget rather than a few tiles.
+    pub cacheable: bool,
 }
 
 /// The analysis result for one pipeline.
@@ -107,6 +116,25 @@ pub struct PlanOptions {
     pub square_size: u32,
 }
 
+impl PlanOptions {
+    /// Set the rows per strip in sequential segments.
+    ///
+    /// `PlanOptions` is `#[non_exhaustive]`, so downstream crates cannot use a
+    /// struct literal; these setters are the only way to configure it.
+    #[must_use]
+    pub const fn with_strip_rows(mut self, rows: u32) -> Self {
+        self.strip_rows = rows;
+        self
+    }
+
+    /// Set the edge length of square tiles in spatial segments.
+    #[must_use]
+    pub const fn with_square_size(mut self, size: u32) -> Self {
+        self.square_size = size;
+        self
+    }
+}
+
 impl Default for PlanOptions {
     fn default() -> Self {
         Self {
@@ -123,6 +151,8 @@ impl Plan {
     ///
     /// Propagates [`Op::input_regions`] for any op whose demand mapping
     /// rejects a region this plan would ask for.
+    ///
+    /// [`Op::input_regions`]: crate::Op::input_regions
     pub fn build(image: &Image, options: PlanOptions) -> Result<Self> {
         let root = Arc::clone(image.node());
         let order = topological_order(&root);
@@ -151,6 +181,8 @@ impl Plan {
                 NodePlan {
                     shape,
                     materialize: false,
+                    // Filled in below, once fan-out is known.
+                    cacheable: false,
                 },
             );
         }
@@ -166,7 +198,19 @@ impl Plan {
         //    `input_regions` and record what each node is asked for, in order.
         let demand = demand_sequences(&root, &output_tiles)?;
 
-        // 4. Materialize where non-monotonic demand meets a forward-only
+        // 4. Retention. A tile is only worth caching if something will ask
+        //    for it twice: a shared prefix (fan-out above one) or a spatial
+        //    consumer whose tile requests overlap at the borders.
+        let fan_out = fan_out(&order);
+        for node in &order {
+            let shared = fan_out.get(&node.id()).copied().unwrap_or(0) > 1;
+            let overlapping = spatial_consumers.contains(&node.id());
+            if let Some(plan) = nodes.get_mut(&node.id()) {
+                plan.cacheable = shared || overlapping;
+            }
+        }
+
+        // 5. Materialize where non-monotonic demand meets a forward-only
         //    source (ADR-0009).
         let forward_only = forward_only_nodes(&order);
         for node in &order {
@@ -258,6 +302,17 @@ fn topological_order(root: &Arc<Node>) -> Vec<Arc<Node>> {
         }
     }
     order
+}
+
+/// How many consumers each node has within this graph.
+fn fan_out(order: &[Arc<Node>]) -> HashMap<NodeId, usize> {
+    let mut counts: HashMap<NodeId, usize> = HashMap::new();
+    for node in order {
+        for input in node.inputs() {
+            *counts.entry(input.id()).or_default() += 1;
+        }
+    }
+    counts
 }
 
 /// Nodes that feed at least one spatial op.
@@ -690,6 +745,58 @@ mod tests {
     }
 
     // --- Plan shape ----------------------------------------------------------
+
+    #[test]
+    fn a_linear_pipeline_caches_nothing() {
+        // Every tile in a chain is produced once and consumed once, so
+        // retaining any of them is pure waste — and would make a streaming
+        // pipeline's peak memory equal the cache budget.
+        let source = image(64, 64, DecodeCapability::Regions);
+        let a = source.apply(Arc::new(ConstantOp::new(1))).unwrap();
+        let b = a.apply(Arc::new(ConstantOp::new(2))).unwrap();
+        let plan = Plan::build(&b, PlanOptions::default()).unwrap();
+        for node in [source.node().id(), a.node().id(), b.node().id()] {
+            assert!(
+                !plan.node(node).unwrap().cacheable,
+                "a linear chain cached a tile"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shared_prefix_is_cacheable() {
+        // Fan-out above one is the case the cache exists for: without it the
+        // shared prefix is recomputed once per branch.
+        let source = image(32, 32, DecodeCapability::Regions);
+        let base = source.apply(Arc::new(ConstantOp::new(1))).unwrap();
+        let left = base.apply(Arc::new(ConstantOp::new(2))).unwrap();
+        let right = base.apply(Arc::new(ConstantOp::new(3))).unwrap();
+        let joined =
+            Image::combine(&[left.clone(), right], Arc::new(crate::testing::SumOp)).unwrap();
+        let plan = Plan::build(&joined, PlanOptions::default()).unwrap();
+        assert!(
+            plan.node(base.node().id()).unwrap().cacheable,
+            "shared prefix not cached"
+        );
+        assert!(
+            !plan.node(left.node().id()).unwrap().cacheable,
+            "single consumer cached"
+        );
+        assert!(
+            !plan.node(joined.node().id()).unwrap().cacheable,
+            "the root has no consumer"
+        );
+    }
+
+    #[test]
+    fn a_node_feeding_a_spatial_op_is_cacheable() {
+        // Neighbourhood demand overlaps at tile borders, so those tiles are
+        // genuinely asked for more than once.
+        let source = image(64, 64, DecodeCapability::Regions);
+        let blurred = source.apply(Arc::new(Blur)).unwrap();
+        let plan = Plan::build(&blurred, PlanOptions::default()).unwrap();
+        assert!(plan.node(source.node().id()).unwrap().cacheable);
+    }
 
     #[test]
     fn the_plan_covers_every_node_once() {
