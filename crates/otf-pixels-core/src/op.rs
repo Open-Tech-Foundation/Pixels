@@ -3,7 +3,7 @@
 use crate::{ImageDescriptor, Region, Result, Tile, TileMut};
 use core::fmt;
 
-/// How an op reads its input relative to the output it is producing.
+/// The tile **shape** an op wants its input delivered in.
 ///
 /// The scheduler negotiates tile shapes from this declaration (ADR-0003):
 /// runs of [`Sequential`] ops move full-width strips, matching how codecs
@@ -13,19 +13,35 @@ use core::fmt;
 /// costs throughput; declaring [`Sequential`] when the op actually reads
 /// neighbours is a correctness bug.
 ///
+/// # Shape, not order
+///
+/// This says nothing about the *order* tiles are produced in. An op that
+/// mirrors vertically reads no neighbours and wants full-width strips, so it
+/// is [`Sequential`] — even though it consumes those strips bottom-up.
+///
+/// Order is not declared at all: the scheduler derives it from
+/// [`Op::input_regions`] and inserts a materialization buffer only where a
+/// non-forward demand sequence meets a forward-only source (ADR-0009). Keeping
+/// order out of this enum is deliberate — it is a property of the *seam*
+/// between an op and its upstream, not of the op, so the same op streams or
+/// buffers depending on what it is connected to.
+///
 /// [`Sequential`]: AccessPattern::Sequential
 /// [`Spatial`]: AccessPattern::Spatial
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum AccessPattern {
-    /// Each output pixel depends only on input pixels in the same row order.
+    /// Each output pixel depends on input pixels from a single row.
     ///
-    /// Pointwise ops (`modulate`, `flatten`, channel extraction) and pure
-    /// geometry remaps that preserve row order (`crop`, `flop`) are sequential.
+    /// Wants full-width strips. Pointwise ops (`modulate`, `flatten`, channel
+    /// extraction) and row-preserving geometry remaps (`crop`, `flop`, `flip`)
+    /// are sequential — including `flip`, which reverses row *order* but still
+    /// reads one input row per output row.
     Sequential,
-    /// Output pixels depend on a neighbourhood of input pixels.
+    /// Output pixels depend on a neighbourhood spanning multiple input rows.
     ///
-    /// Convolution, resize with filter support, and rotation are spatial.
+    /// Wants square tiles. Convolution and resize with filter support are
+    /// spatial.
     Spatial,
 }
 

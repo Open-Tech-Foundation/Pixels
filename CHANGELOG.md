@@ -6,7 +6,19 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- `Flip` now declares `AccessPattern::Sequential`, not `Spatial`.
+  `AccessPattern` describes tile *shape*; a vertical mirror reads one input
+  row per output row and wants full-width strips. Its row reversal is tile
+  *order*, which `input_regions` already expresses and the scheduler resolves
+  at the seam (ADR-0009).
+- SPEC §Guarantees 1 now states the constant-memory condition as "where the
+  format *and pipeline order* allow", naming the reverse-order-over-sequential
+  -source exception rather than leaving the guarantee quietly overstated.
+
 ### Added
+- ADR-0008 (crossbeam-deque for work stealing) and ADR-0009
+  (scheduler-inserted materialization at order-incompatible seams).
 - Project documentation: README, ARCHITECTURE, SPEC, ROADMAP, ADR-0001..0007.
 - Cargo workspace: `otf-pixels`, `otf-pixels-core`, `otf-pixels-ops`,
   `otf-pixels-codec-raw` (ADR-0006). No external dependencies.

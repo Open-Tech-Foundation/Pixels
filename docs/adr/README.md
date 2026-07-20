@@ -19,6 +19,8 @@ than silent divergence — this replaces the previous DECISIONS.md practice.
 | [0005](0005-streaming-io-sync-core.md) | Streaming-only I/O, sync core | Accepted |
 | [0006](0006-naming-and-crate-layout.md) | Naming and crate layout | Accepted |
 | [0007](0007-gpu-deferred-to-v2.md) | GPU compute deferred to v2, opt-in | Accepted |
+| [0008](0008-crossbeam-deque-for-work-stealing.md) | crossbeam-deque for work stealing | Accepted |
+| [0009](0009-scheduler-inserted-materialization.md) | Scheduler-inserted materialization at order-incompatible seams | Accepted |
 
 Deferred (no ADR yet, decide when reached): tile cache eviction policy
 details, fusion pass design, ICC pipeline, error taxonomy granularity.

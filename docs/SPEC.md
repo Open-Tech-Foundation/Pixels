@@ -90,9 +90,13 @@ g.output(Format::Png, opts).bytes()?;        // Vec<u8>
 
 ## Guarantees
 
-1. **Constant memory** for pipelines whose formats stream (see table);
-   otherwise memory is bounded by the buffering codec's need, never by
-   downstream ops.
+1. **Constant memory** where the format *and pipeline order* allow. For
+   pipelines whose formats stream (see table), memory is bounded by tiles in
+   flight; otherwise it is bounded by the buffering codec's need, never by
+   downstream ops. One documented exception: reverse-order ops (`flip`,
+   `rotate`) over a sequential source buffer one full intermediate, because
+   demand order and a forward-only source are incompatible (ADR-0009). The
+   same pipeline over a random-access source streams in constant memory.
 2. **Determinism**: identical input + pipeline + version ⇒ byte-identical
    output on every platform and backend (scalar and SIMD paths must agree
    exactly; this is CI-enforced).

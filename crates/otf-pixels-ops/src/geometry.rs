@@ -143,24 +143,26 @@ impl Op for Crop {
 
 /// Mirror an image vertically: the top row becomes the bottom row.
 ///
-/// # Access pattern
+/// # Access pattern and order
 ///
-/// `Flip` declares [`AccessPattern::Spatial`], which is the conservative
-/// reading of ADR-0003's two-valued declaration rather than a comfortable fit.
-/// A vertical mirror is not a neighbourhood op — square tiles buy it nothing —
-/// but it is emphatically not `Sequential` either: emitting output row 0
-/// requires input row `height - 1`, so it cannot stream in row order over a
-/// forward-only source.
+/// `Flip` is [`AccessPattern::Sequential`]: it reads exactly one input row per
+/// output row, reads no neighbours, and wants full-width strips — square tiles
+/// would buy it nothing. `AccessPattern` describes tile *shape*, and on shape
+/// `Flip` is as sequential as `crop`.
 ///
-/// ADR-0001 anticipates exactly this class ("some ops fit the pull model
-/// awkwardly and will need explicit materialization points"). Over a
-/// [`DecodeCapability::Regions`] source M2 can serve it by pulling bands from
-/// the bottom up; over a sequential source it needs a materialization point.
-/// Which of those the scheduler picks is an M2 decision, and if it turns out
-/// the two-valued enum cannot express it, that is a superseding ADR to
-/// ADR-0003 rather than a silent third variant.
+/// What `Flip` reverses is tile *order*, and that is deliberately not declared
+/// here. [`Op::input_regions`] already states the mapping exactly — output
+/// rows `y0..y1` come from input rows `H-y1..H-y0` — so the scheduler can
+/// derive the order itself and act on it only where it matters: against a
+/// forward-only source it inserts a materialization buffer, and against a
+/// random-access source (tiled TIFF, a memory buffer) it inserts nothing and
+/// the pipeline streams (ADR-0009).
 ///
-/// [`DecodeCapability::Regions`]: otf_pixels_core::DecodeCapability::Regions
+/// The point is that reversal is a property of the *seam*, not of this op. A
+/// static "always materialize" flag here would force a full-image buffer even
+/// where the upstream could serve bands bottom-up perfectly well.
+///
+/// [`Op::input_regions`]: otf_pixels_core::Op::input_regions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Flip;
 
@@ -190,9 +192,10 @@ impl Op for Flip {
     }
 
     fn access_pattern(&self) -> AccessPattern {
-        // A vertical mirror needs the *last* input row to emit the first output
-        // row, so it cannot stream in row order like a pointwise op can.
-        AccessPattern::Spatial
+        // One input row per output row, no neighbours: full-width strips suit
+        // it exactly. The reversal is in the order, which `input_regions`
+        // already expresses and the scheduler handles at the seam (ADR-0009).
+        AccessPattern::Sequential
     }
 
     fn compute(&self, inputs: &[Tile<'_>], output: &mut TileMut<'_>) -> Result<()> {
@@ -500,9 +503,27 @@ mod tests {
             AccessPattern::Sequential
         );
         assert_eq!(Flop.access_pattern(), AccessPattern::Sequential);
-        // A vertical mirror needs the last input row first, so it is not
-        // row-streamable.
-        assert_eq!(Flip.access_pattern(), AccessPattern::Spatial);
+        // Shape, not order: a vertical mirror reads one input row per output
+        // row and wants strips, so it is Sequential despite consuming them
+        // bottom-up. The reversal lives in `input_regions` (ADR-0009).
+        assert_eq!(Flip.access_pattern(), AccessPattern::Sequential);
+    }
+
+    #[test]
+    fn flip_demand_is_a_pure_region_remap() {
+        // The property ADR-0009 rests on: flip states its mapping exactly, so
+        // a random-access upstream can serve it in output order with no buffer.
+        // Every output band maps to an input band of identical size.
+        let input = ImageDescriptor::new(4, 100, PixelFormat::Gray8).unwrap();
+        for y in (0..100).step_by(10) {
+            let output = Region::new(0, y, 4, 10);
+            let regions = Flip.input_regions(output, &[input]).unwrap();
+            assert_eq!(regions.len(), 1);
+            assert_eq!(regions[0].height, output.height, "band size is preserved");
+            assert_eq!(regions[0].width, output.width);
+            // Mirrored about the horizontal axis.
+            assert_eq!(regions[0].y, 100 - y - 10);
+        }
     }
 
     #[test]
