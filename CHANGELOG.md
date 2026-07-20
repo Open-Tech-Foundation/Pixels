@@ -7,6 +7,11 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- `DecodedSource` now streams instead of materializing the whole image on
+  first pull. It advances a forward-only decoder to the requested band and
+  retains just that band as a rolling window, which is what makes constant
+  memory real rather than promised. A request behind the window is a reported
+  error, never a silent rewind.
 - `Flip` now declares `AccessPattern::Sequential`, not `Spatial`.
   `AccessPattern` describes tile *shape*; a vertical mirror reads one input
   row per output row and wants full-width strips. Its row reversal is tile
@@ -31,6 +36,9 @@ versioning: [SemVer](https://semver.org/).
   it reads no pixels.
 - `Producer::capability`, the upstream half of ADR-0009's seam analysis.
   `BufferSource` reports `Regions`; `DecodedSource` delegates to its decoder.
+- `otf-pixels-core`: `Scheduler`, the demand-driven parallel tile evaluator,
+  plus `evaluate_tiled` and `RunStats`. Output tiles are evaluated in parallel
+  batches and delivered to the sink in order.
 - Project documentation: README, ARCHITECTURE, SPEC, ROADMAP, ADR-0001..0007.
 - Cargo workspace: `otf-pixels`, `otf-pixels-core`, `otf-pixels-ops`,
   `otf-pixels-codec-raw` (ADR-0006). No external dependencies.

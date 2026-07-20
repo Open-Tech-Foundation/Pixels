@@ -81,40 +81,53 @@ impl Producer for BufferSource {
 }
 
 /// The decode state of a [`DecodedSource`].
-///
-/// A streaming decoder is single-pass, so the first pull runs it to completion
-/// and every later pull is served from the result.
 #[derive(Debug)]
 enum DecodeState {
-    /// Header parsed, no pixels read yet.
-    Pending(Box<dyn Decoder>),
-    /// Fully decoded.
-    Done(Arc<TileBuf>),
-    /// Decoding failed; the error is not retryable because the source has
-    /// already been consumed.
+    /// Header parsed; `cursor` rows have been consumed from the stream.
+    Reading {
+        /// The decoder, positioned at row `cursor`.
+        decoder: Box<dyn Decoder>,
+        /// The next row the decoder will emit.
+        cursor: u32,
+    },
+    /// Decoding failed. The stream is consumed and cannot be retried, so the
+    /// failure is remembered and replayed rather than producing partial pixels.
     Failed(String),
 }
 
-/// A producer that decodes a stream on first pull.
+/// A producer that decodes a stream on demand, forward only.
 ///
 /// Construction parses the header only — no pixel bytes are read — so
 /// [`Image::metadata`] stays free and laziness holds (SPEC §Guarantees 3).
 ///
 /// # Memory
 ///
-/// This M1 producer materializes the whole image on first pull, because the
-/// naive evaluator it feeds is itself whole-image (ROADMAP M1). It is
-/// deliberately *not* the constant-memory path: M2's scheduler pulls regions in
-/// order and streams rows through, which is where the constant-memory exit
-/// criterion is proved. The [`Producer`] contract does not change — only what
-/// sits behind it.
+/// Constant, and independent of image height: the decoder is advanced to the
+/// requested band and exactly that band is retained as a rolling window. This
+/// is what makes SPEC §Guarantees 1 true for streaming formats — the whole
+/// image is never resident.
+///
+/// The window also absorbs *repeated* demand for the same band, which is what
+/// lets two graph branches share one source without either re-reading a stream
+/// that has already moved on.
+///
+/// # Forward only
+///
+/// A request that starts before the window is an error, not a rewind: the
+/// bytes are gone (ADR-0005). The scheduler is responsible for never asking —
+/// [`Plan`] detects non-forward demand ahead of time and materializes instead
+/// (ADR-0009). Reaching this error therefore indicates a scheduling defect, and
+/// it is reported rather than papered over.
 ///
 /// [`Image::metadata`]: crate::Image::metadata
+/// [`Plan`]: crate::Plan
 #[derive(Debug)]
 pub struct DecodedSource {
     descriptor: ImageDescriptor,
     capability: DecodeCapability,
     state: Mutex<DecodeState>,
+    /// The most recently decoded band, reused for repeated demand.
+    window: Mutex<Option<(Region, Arc<TileBuf>)>>,
 }
 
 impl DecodedSource {
@@ -126,55 +139,93 @@ impl DecodedSource {
         Self {
             descriptor: decoder.descriptor(),
             capability: decoder.capability(),
-            state: Mutex::new(DecodeState::Pending(decoder)),
+            state: Mutex::new(DecodeState::Reading { decoder, cursor: 0 }),
+            window: Mutex::new(None),
         }
     }
 
-    /// Decode every row into a buffer.
-    fn decode_all(decoder: &mut dyn Decoder, descriptor: ImageDescriptor) -> Result<TileBuf> {
-        let mut buffer = TileBuf::for_image(&descriptor)?;
+    /// Decode rows `band.y .. band.bottom()` into a fresh buffer.
+    ///
+    /// Rows before `band.y` are decoded and discarded, since a forward-only
+    /// stream has no way to skip them.
+    fn decode_band(&self, band: Region) -> Result<Arc<TileBuf>> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| PixelsError::graph("decoder state was poisoned by a panicking thread"))?;
+
+        if let DecodeState::Failed(detail) = &*state {
+            return Err(PixelsError::malformed("stream", detail.clone()));
+        }
+        let DecodeState::Reading { decoder, cursor } = &mut *state else {
+            return Err(PixelsError::graph("decoder state changed unexpectedly"));
+        };
+
+        if band.y < *cursor {
+            return Err(PixelsError::graph(format!(
+                "source cannot rewind: row {} was requested but the stream is at row {cursor}; \
+                 this pipeline needed a materialization point",
+                band.y
+            )));
+        }
+
+        let outcome = Self::fill_band(decoder.as_mut(), cursor, band, self.descriptor);
+        match outcome {
+            Ok(buffer) => Ok(Arc::new(buffer)),
+            Err(error) => {
+                *state = DecodeState::Failed(error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    /// Advance `decoder` to `band` and read it, updating `cursor`.
+    fn fill_band(
+        decoder: &mut dyn Decoder,
+        cursor: &mut u32,
+        band: Region,
+        descriptor: ImageDescriptor,
+    ) -> Result<TileBuf> {
+        let mut scratch = vec![0_u8; descriptor.row_bytes()];
+        while *cursor < band.y {
+            decoder.read_row(&mut scratch)?;
+            *cursor += 1;
+        }
+        let mut buffer = TileBuf::zeroed(band, descriptor.pixel)?;
         {
             let mut tile = buffer.as_tile_mut()?;
-            for y in 0..descriptor.height {
+            for y in band.y..band.y.saturating_add(band.height) {
                 let row = tile.row_mut(y).ok_or_else(|| {
-                    PixelsError::malformed("stream", format!("row {y} is outside the image"))
+                    PixelsError::malformed("stream", format!("row {y} is outside the band"))
                 })?;
                 decoder.read_row(row)?;
+                *cursor += 1;
             }
         }
         Ok(buffer)
     }
 
-    /// Decode on first call; return the shared buffer on every call.
-    fn decoded(&self) -> Result<Arc<TileBuf>> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| PixelsError::graph("decoder state was poisoned by a panicking thread"))?;
-        match &*state {
-            DecodeState::Done(buffer) => return Ok(Arc::clone(buffer)),
-            DecodeState::Failed(detail) => {
-                return Err(PixelsError::malformed("stream", detail.clone()));
-            }
-            DecodeState::Pending(_) => {}
-        }
-        let DecodeState::Pending(decoder) = &mut *state else {
-            // Unreachable: the match above returned for every other variant.
-            return Err(PixelsError::graph("decoder state changed unexpectedly"));
-        };
-        match Self::decode_all(decoder.as_mut(), self.descriptor) {
-            Ok(buffer) => {
-                let buffer = Arc::new(buffer);
-                *state = DecodeState::Done(Arc::clone(&buffer));
-                Ok(buffer)
-            }
-            Err(error) => {
-                // The stream is consumed; remember the failure so a second pull
-                // reports the same error rather than decoding a partial stream.
-                *state = DecodeState::Failed(error.to_string());
-                Err(error)
+    /// The band covering `region`, from the window or freshly decoded.
+    fn band_for(&self, region: Region) -> Result<Arc<TileBuf>> {
+        {
+            let window = self
+                .window
+                .lock()
+                .map_err(|_| PixelsError::graph("source window was poisoned"))?;
+            if let Some((covered, buffer)) = &*window
+                && covered.contains(region)
+            {
+                return Ok(Arc::clone(buffer));
             }
         }
+        // Decode full-width bands: a forward-only stream produces whole rows
+        // anyway, so narrowing would discard pixels a later request may want.
+        let band = Region::new(0, region.y, self.descriptor.width, region.height);
+        let buffer = self.decode_band(band)?;
+        if let Ok(mut window) = self.window.lock() {
+            *window = Some((band, Arc::clone(&buffer)));
+        }
+        Ok(buffer)
     }
 }
 
@@ -192,7 +243,7 @@ impl Producer for DecodedSource {
     }
 
     fn produce(&self, region: Region, output: &mut TileMut<'_>) -> Result<()> {
-        let buffer = self.decoded()?;
+        let buffer = self.band_for(region)?;
         let tile = buffer.as_tile()?;
         copy_region(&tile, output, region)
     }
@@ -245,6 +296,18 @@ mod tests {
         (DecodedSource::new(Box::new(decoder)), rows_read)
     }
 
+    /// A 2x64 source, tall enough that a band is much smaller than the image.
+    fn tall_stub() -> (DecodedSource, Arc<std::sync::atomic::AtomicU32>) {
+        let rows_read = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let decoder = StubDecoder {
+            descriptor: ImageDescriptor::new(2, 64, PixelFormat::Gray8).unwrap(),
+            row: 0,
+            fail_at: None,
+            rows_read: Arc::clone(&rows_read),
+        };
+        (DecodedSource::new(Box::new(decoder)), rows_read)
+    }
+
     #[test]
     fn construction_reads_no_pixel_rows() {
         let (source, rows_read) = stub(None);
@@ -288,6 +351,123 @@ mod tests {
                 .unwrap_err();
             assert_eq!(err.code(), ErrorCode::Malformed, "attempt {attempt}");
         }
+    }
+
+    #[test]
+    fn decoding_advances_only_as_far_as_demanded() {
+        // The constant-memory property: asking for an early band must not
+        // decode the rest of the image.
+        let (source, rows_read) = tall_stub();
+        let mut out = TileBuf::zeroed(Region::new(0, 0, 2, 4), PixelFormat::Gray8).unwrap();
+        let mut tile = out.as_tile_mut().unwrap();
+        source.produce(Region::new(0, 0, 2, 4), &mut tile).unwrap();
+        assert_eq!(
+            rows_read.load(std::sync::atomic::Ordering::Relaxed),
+            4,
+            "decoded past the requested band"
+        );
+    }
+
+    #[test]
+    fn successive_bands_stream_forward() {
+        let (source, rows_read) = tall_stub();
+        for start in (0..64).step_by(4) {
+            let band = Region::new(0, start, 2, 4);
+            let mut out = TileBuf::zeroed(band, PixelFormat::Gray8).unwrap();
+            let mut tile = out.as_tile_mut().unwrap();
+            source.produce(band, &mut tile).unwrap();
+            // Each row of the ramp holds its own index.
+            assert_eq!(out.bytes()[0], start as u8, "band at row {start} is wrong");
+        }
+        assert_eq!(
+            rows_read.load(std::sync::atomic::Ordering::Relaxed),
+            64,
+            "rows re-read"
+        );
+    }
+
+    #[test]
+    fn repeated_demand_for_a_band_is_served_from_the_window() {
+        // Two graph branches pulling the same band must not re-read a stream
+        // that has already moved on.
+        let (source, rows_read) = tall_stub();
+        let band = Region::new(0, 0, 2, 4);
+        for _ in 0..5 {
+            let mut out = TileBuf::zeroed(band, PixelFormat::Gray8).unwrap();
+            let mut tile = out.as_tile_mut().unwrap();
+            source.produce(band, &mut tile).unwrap();
+        }
+        assert_eq!(
+            rows_read.load(std::sync::atomic::Ordering::Relaxed),
+            4,
+            "band was re-decoded"
+        );
+    }
+
+    #[test]
+    fn a_sub_band_of_the_window_is_served_without_re_reading() {
+        let (source, rows_read) = tall_stub();
+        let band = Region::new(0, 0, 2, 8);
+        let mut out = TileBuf::zeroed(band, PixelFormat::Gray8).unwrap();
+        source
+            .produce(band, &mut out.as_tile_mut().unwrap())
+            .unwrap();
+
+        let inner = Region::new(0, 2, 2, 2);
+        let mut small = TileBuf::zeroed(inner, PixelFormat::Gray8).unwrap();
+        source
+            .produce(inner, &mut small.as_tile_mut().unwrap())
+            .unwrap();
+        assert_eq!(small.bytes(), &[2, 2, 3, 3]);
+        assert_eq!(rows_read.load(std::sync::atomic::Ordering::Relaxed), 8);
+    }
+
+    #[test]
+    fn rewinding_is_a_reported_error_not_silent_corruption() {
+        // A forward-only stream cannot go back (ADR-0005). Reaching this means
+        // the plan failed to insert a materialization point (ADR-0009), so it
+        // is surfaced rather than papered over.
+        let (source, _) = tall_stub();
+        let later = Region::new(0, 16, 2, 4);
+        let mut out = TileBuf::zeroed(later, PixelFormat::Gray8).unwrap();
+        source
+            .produce(later, &mut out.as_tile_mut().unwrap())
+            .unwrap();
+
+        let earlier = Region::new(0, 0, 2, 4);
+        let mut back = TileBuf::zeroed(earlier, PixelFormat::Gray8).unwrap();
+        let err = source
+            .produce(earlier, &mut back.as_tile_mut().unwrap())
+            .unwrap_err();
+        assert_eq!(err.code(), ErrorCode::Graph);
+        assert!(err.to_string().contains("rewind"), "{err}");
+        assert!(err.to_string().contains("materialization"), "{err}");
+    }
+
+    #[test]
+    fn skipped_rows_are_consumed_not_lost() {
+        // Jumping forward past a band still has to read those bytes, because a
+        // forward-only stream cannot seek.
+        let (source, rows_read) = tall_stub();
+        let band = Region::new(0, 32, 2, 4);
+        let mut out = TileBuf::zeroed(band, PixelFormat::Gray8).unwrap();
+        source
+            .produce(band, &mut out.as_tile_mut().unwrap())
+            .unwrap();
+        assert_eq!(rows_read.load(std::sync::atomic::Ordering::Relaxed), 36);
+        assert_eq!(out.bytes()[0], 32, "landed on the wrong row");
+    }
+
+    #[test]
+    fn producers_report_their_capability() {
+        // The upstream half of ADR-0009's analysis.
+        let (source, _) = tall_stub();
+        assert_eq!(source.capability(), DecodeCapability::Sequential);
+
+        let descriptor = ImageDescriptor::new(2, 2, PixelFormat::Gray8).unwrap();
+        let buffer = Arc::new(TileBuf::for_image(&descriptor).unwrap());
+        let buffered = BufferSource::new(descriptor, buffer).unwrap();
+        assert_eq!(buffered.capability(), DecodeCapability::Regions);
     }
 
     #[test]

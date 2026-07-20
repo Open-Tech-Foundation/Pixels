@@ -59,6 +59,7 @@ mod op;
 mod pixel;
 mod plan;
 mod pool;
+mod schedule;
 mod source;
 mod tile;
 
@@ -76,5 +77,6 @@ pub use op::{AccessPattern, Op, Producer};
 pub use pixel::{ChannelLayout, ColorModel, PixelFormat, Sample, SampleKind};
 pub use plan::{NodePlan, Plan, PlanOptions, TileShape};
 pub use pool::ThreadPool;
+pub use schedule::{RunStats, Scheduler, SchedulerOptions, evaluate_tiled};
 pub use source::{BufferSource, DecodedSource};
 pub use tile::{Tile, TileBuf, TileMut, copy_region};
