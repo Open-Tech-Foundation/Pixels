@@ -48,6 +48,7 @@
 //! clone, so an async host integrates by running pipelines on its own worker
 //! threads and meeting the engine at the [`Source`]/[`Sink`] boundary.
 
+mod cache;
 mod codec;
 mod error;
 mod eval;
@@ -56,12 +57,14 @@ mod graph;
 mod io;
 mod op;
 mod pixel;
+mod pool;
 mod source;
 mod tile;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
+pub use cache::{CacheStats, TileCache, TileKey};
 pub use codec::{Codec, DecodeCapability, Decoder, EncodeOptions, Encoder, Format, Metadata};
 pub use error::{ErrorCode, Limit, PixelsError, Result};
 pub use eval::{demand, evaluate, evaluate_rows};
@@ -70,5 +73,6 @@ pub use graph::{Image, Node, NodeId};
 pub use io::{Sink, Source};
 pub use op::{AccessPattern, Op, Producer};
 pub use pixel::{ChannelLayout, ColorModel, PixelFormat, Sample, SampleKind};
+pub use pool::ThreadPool;
 pub use source::{BufferSource, DecodedSource};
 pub use tile::{Tile, TileBuf, TileMut, copy_region};

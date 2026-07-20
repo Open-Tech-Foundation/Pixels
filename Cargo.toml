@@ -18,6 +18,9 @@ categories = ["multimedia::images"]
 keywords = ["image", "streaming", "pipeline", "resize", "codec"]
 
 [workspace.dependencies]
+# Work-stealing deque primitive only; the pool and all scheduling policy are
+# ours (ADR-0008).
+crossbeam-deque = "0.8.7"
 otf-pixels-core = { version = "0.0.1", path = "crates/otf-pixels-core" }
 otf-pixels-ops = { version = "0.0.1", path = "crates/otf-pixels-ops" }
 otf-pixels-codec-raw = { version = "0.0.1", path = "crates/otf-pixels-codec-raw" }

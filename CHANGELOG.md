@@ -19,6 +19,12 @@ versioning: [SemVer](https://semver.org/).
 ### Added
 - ADR-0008 (crossbeam-deque for work stealing) and ADR-0009
   (scheduler-inserted materialization at order-incompatible seams).
+- `otf-pixels-core`: `TileCache`, a byte-budgeted LRU of graph intermediates
+  keyed by `(NodeId, Region)`. Eviction bounds what the cache *retains*, never
+  what a caller holds alive, so tiles need no pinning.
+- `otf-pixels-core`: `ThreadPool`, a work-stealing pool over `crossbeam-deque`
+  (ADR-0008). Panicking tasks are contained and reported as errors; a batch
+  reports its lowest-indexed failure so errors stay deterministic.
 - Project documentation: README, ARCHITECTURE, SPEC, ROADMAP, ADR-0001..0007.
 - Cargo workspace: `otf-pixels`, `otf-pixels-core`, `otf-pixels-ops`,
   `otf-pixels-codec-raw` (ADR-0006). No external dependencies.
