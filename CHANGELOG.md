@@ -16,3 +16,8 @@ versioning: [SemVer](https://semver.org/).
   `TileBuf` views, streaming `Source`/`Sink` traits (ADR-0005), `Decoder`/
   `Encoder`/`Codec` traits, the `Op` trait and lazy `Image` op graph, and the
   naive whole-image evaluator that M2 will be diffed against.
+- `otf-pixels-codec-raw`: `RawDecoder`/`RawEncoder` with caller-supplied
+  dimensions, pixel format and stride, streaming a row at a time in both
+  directions. Truncated streams are malformed-input errors, never panics.
+- `otf-pixels-ops`: `Crop`, `Flip` and `Flop` geometry ops, each declaring its
+  demand mapping and access pattern for M2's scheduler.
