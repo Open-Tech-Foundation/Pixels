@@ -1,0 +1,39 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/otf-pixels",
+    "crates/otf-pixels-core",
+    "crates/otf-pixels-ops",
+    "crates/otf-pixels-codec-raw",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/opentf/pixels"
+authors = ["The OpenTF Authors"]
+categories = ["multimedia::images"]
+keywords = ["image", "streaming", "pipeline", "resize", "codec"]
+
+[workspace.dependencies]
+otf-pixels-core = { version = "0.0.1", path = "crates/otf-pixels-core" }
+otf-pixels-ops = { version = "0.0.1", path = "crates/otf-pixels-ops" }
+otf-pixels-codec-raw = { version = "0.0.1", path = "crates/otf-pixels-codec-raw" }
+
+[workspace.lints.rust]
+missing_docs = "deny"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# ADR-0001/SPEC §Safety: malformed input is a value, never a panic.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "warn"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

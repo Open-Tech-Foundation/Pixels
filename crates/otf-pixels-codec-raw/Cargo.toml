@@ -1,0 +1,17 @@
+[package]
+name = "otf-pixels-codec-raw"
+description = "Raw (uncompressed) pixel codec for otf-pixels."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+[dependencies]
+otf-pixels-core.workspace = true
+
+[lints]
+workspace = true

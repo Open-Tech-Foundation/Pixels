@@ -1,0 +1,21 @@
+[package]
+name = "otf-pixels-core"
+description = "Core engine for otf-pixels: op graph, descriptors, tiles, codec traits, evaluator."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+[dependencies]
+
+[features]
+# Test doubles (counting producers, trivial ops) for exercising engine
+# contracts from other crates' tests. Not part of the stable API surface.
+testing = []
+
+[lints]
+workspace = true

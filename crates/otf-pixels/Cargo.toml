@@ -1,0 +1,26 @@
+[package]
+name = "otf-pixels"
+description = "A streaming, demand-driven image processing engine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+categories.workspace = true
+keywords.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+otf-pixels-core.workspace = true
+otf-pixels-ops.workspace = true
+otf-pixels-codec-raw = { workspace = true, optional = true }
+
+[features]
+default = ["raw"]
+# Raw pixel codec. Kept behind a feature for symmetry with the other codecs
+# (ARCHITECTURE §Layer 2: "each format is a plugin behind a cargo feature").
+raw = ["dep:otf-pixels-codec-raw"]
+
+[lints]
+workspace = true
