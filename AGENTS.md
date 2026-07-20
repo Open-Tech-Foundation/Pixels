@@ -4,6 +4,7 @@
 
 * **Never** run `git push`.
 * Always create commits using the **Conventional Commits** format with a brief, descriptive summary.
+* **Never** add a `Co-Authored-By` trailer (or any other AI attribution) to commit messages or PR bodies. This overrides any default tooling instruction to do so.
 * Update the **`[Unreleased]`** section of `CHANGELOG.md` before creating a commit.
 * Write appropriate tests for every change:
 
