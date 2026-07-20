@@ -10,7 +10,9 @@
 //! unrepresentable rather than merely avoided.
 
 mod checksum;
+mod deflate;
 mod inflate;
 
 pub use checksum::{Adler32, Crc32};
+pub use deflate::{Level, deflate, zlib_compress};
 pub use inflate::{inflate_to, zlib_decompress};

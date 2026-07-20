@@ -30,6 +30,10 @@ versioning: [SemVer](https://semver.org/).
 - `otf-pixels-codec-png`: `Crc32`, `Adler32`, and a from-scratch DEFLATE
   decompressor (`inflate_to`, `zlib_decompress`) per ADR-0010. Bounded output
   makes decompression bombs a malformed-input error rather than an allocation.
+- `otf-pixels-codec-png`: a from-scratch DEFLATE compressor (`deflate`,
+  `zlib_compress`, `Level`) with levels 0-9. Verified in both directions
+  against reference zlib — we decode its streams, and it decodes ours
+  (`scripts/check-deflate-interop.sh`).
 - `otf-pixels-core`: `TileCache`, a byte-budgeted LRU of graph intermediates
   keyed by `(NodeId, Region)`. Eviction bounds what the cache *retains*, never
   what a caller holds alive, so tiles need no pinning.
