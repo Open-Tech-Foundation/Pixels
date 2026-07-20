@@ -25,6 +25,12 @@ versioning: [SemVer](https://semver.org/).
 - `otf-pixels-core`: `ThreadPool`, a work-stealing pool over `crossbeam-deque`
   (ADR-0008). Panicking tasks are contained and reported as errors; a batch
   reports its lowest-indexed failure so errors stay deterministic.
+- `otf-pixels-core`: `Plan`, the pre-execution graph analysis. Negotiates tile
+  shapes per segment (ADR-0003) and marks materialization points where
+  non-forward demand meets a forward-only source (ADR-0009). Pure analysis —
+  it reads no pixels.
+- `Producer::capability`, the upstream half of ADR-0009's seam analysis.
+  `BufferSource` reports `Regions`; `DecodedSource` delegates to its decoder.
 - Project documentation: README, ARCHITECTURE, SPEC, ROADMAP, ADR-0001..0007.
 - Cargo workspace: `otf-pixels`, `otf-pixels-core`, `otf-pixels-ops`,
   `otf-pixels-codec-raw` (ADR-0006). No external dependencies.

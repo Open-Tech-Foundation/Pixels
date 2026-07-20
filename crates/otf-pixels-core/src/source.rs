@@ -5,7 +5,8 @@
 //! until a terminal pulls.
 
 use crate::{
-    Decoder, ImageDescriptor, PixelsError, Producer, Region, Result, TileBuf, TileMut, copy_region,
+    DecodeCapability, Decoder, ImageDescriptor, PixelsError, Producer, Region, Result, TileBuf,
+    TileMut, copy_region,
 };
 use std::sync::{Arc, Mutex};
 
@@ -66,6 +67,13 @@ impl Producer for BufferSource {
         self.descriptor
     }
 
+    fn capability(&self) -> DecodeCapability {
+        // The pixels are already in memory, so any region is equally cheap.
+        // This is what lets `flip` over a memory buffer stream rather than
+        // materialize (ADR-0009).
+        DecodeCapability::Regions
+    }
+
     fn produce(&self, region: Region, output: &mut TileMut<'_>) -> Result<()> {
         let tile = self.buffer.as_tile()?;
         copy_region(&tile, output, region)
@@ -105,6 +113,7 @@ enum DecodeState {
 #[derive(Debug)]
 pub struct DecodedSource {
     descriptor: ImageDescriptor,
+    capability: DecodeCapability,
     state: Mutex<DecodeState>,
 }
 
@@ -116,6 +125,7 @@ impl DecodedSource {
     pub fn new(decoder: Box<dyn Decoder>) -> Self {
         Self {
             descriptor: decoder.descriptor(),
+            capability: decoder.capability(),
             state: Mutex::new(DecodeState::Pending(decoder)),
         }
     }
@@ -175,6 +185,10 @@ impl Producer for DecodedSource {
 
     fn descriptor(&self) -> ImageDescriptor {
         self.descriptor
+    }
+
+    fn capability(&self) -> DecodeCapability {
+        self.capability
     }
 
     fn produce(&self, region: Region, output: &mut TileMut<'_>) -> Result<()> {

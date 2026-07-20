@@ -149,6 +149,22 @@ pub trait Producer: Send + Sync + fmt::Debug {
     /// Known from the header alone; answering this must not decode pixels.
     fn descriptor(&self) -> ImageDescriptor;
 
+    /// Whether this producer can serve arbitrary regions, or only forward ones.
+    ///
+    /// This is the upstream half of ADR-0009's seam analysis: a producer that
+    /// can only go forward forces the scheduler to materialize whenever demand
+    /// is not forward-monotonic, while one serving arbitrary regions lets the
+    /// same pipeline stream.
+    ///
+    /// Defaults to [`DecodeCapability::Sequential`], the conservative answer —
+    /// over-declaring it costs a buffer, under-declaring it is a correctness
+    /// bug.
+    ///
+    /// [`DecodeCapability::Sequential`]: crate::DecodeCapability::Sequential
+    fn capability(&self) -> crate::DecodeCapability {
+        crate::DecodeCapability::Sequential
+    }
+
     /// Fill `output` with the pixels of `region`.
     ///
     /// `region` is always within `descriptor().region()`.
