@@ -59,7 +59,10 @@ impl RawFormat {
     /// A densely packed layout: stride equals one row of pixels.
     #[must_use]
     pub const fn packed(descriptor: ImageDescriptor) -> Self {
-        Self { descriptor, stride: descriptor.row_bytes() }
+        Self {
+            descriptor,
+            stride: descriptor.row_bytes(),
+        }
     }
 
     /// A layout with explicit row padding.
@@ -95,7 +98,9 @@ impl RawFormat {
         pixel: PixelFormat,
         limits: &Limits,
     ) -> Result<Self> {
-        Ok(Self::packed(ImageDescriptor::with_limits(width, height, pixel, limits)?))
+        Ok(Self::packed(ImageDescriptor::with_limits(
+            width, height, pixel, limits,
+        )?))
     }
 
     /// Bytes of padding after each row.
@@ -155,7 +160,12 @@ impl<S: Source> RawDecoder<S> {
                 "image byte length overflows this platform's address space",
             ));
         }
-        Ok(Self { layout, source, rows_read: 0, padding: vec![0; layout.padding()] })
+        Ok(Self {
+            layout,
+            source,
+            rows_read: 0,
+            padding: vec![0; layout.padding()],
+        })
     }
 
     /// The layout this decoder was constructed with.
@@ -194,7 +204,10 @@ impl<S: Source + std::fmt::Debug> Decoder for RawDecoder<S> {
         if self.rows_read >= self.layout.descriptor.height {
             return Err(PixelsError::invalid_argument(
                 "out",
-                format!("all {} rows have already been read", self.layout.descriptor.height),
+                format!(
+                    "all {} rows have already been read",
+                    self.layout.descriptor.height
+                ),
             ));
         }
         // A stream that ends mid-image surfaces as Malformed from read_exact.
@@ -220,13 +233,21 @@ impl RawEncoder {
     /// A raw encoder that writes densely packed rows.
     #[must_use]
     pub const fn new() -> Self {
-        Self { layout: None, rows_written: 0, padding: Vec::new() }
+        Self {
+            layout: None,
+            rows_written: 0,
+            padding: Vec::new(),
+        }
     }
 
     /// A raw encoder that writes rows padded to `layout`'s stride.
     #[must_use]
     pub fn with_layout(layout: RawFormat) -> Self {
-        Self { layout: Some(layout), rows_written: 0, padding: vec![0; layout.padding()] }
+        Self {
+            layout: Some(layout),
+            rows_written: 0,
+            padding: vec![0; layout.padding()],
+        }
     }
 
     /// How many rows have been written so far.
@@ -284,7 +305,10 @@ impl Encoder for RawEncoder {
         if self.rows_written >= layout.descriptor.height {
             return Err(PixelsError::invalid_argument(
                 "row",
-                format!("all {} declared rows have already been written", layout.descriptor.height),
+                format!(
+                    "all {} declared rows have already been written",
+                    layout.descriptor.height
+                ),
             ));
         }
         sink.write_all(row)?;
@@ -297,7 +321,10 @@ impl Encoder for RawEncoder {
 
     fn finish(&mut self, sink: &mut dyn Sink) -> Result<()> {
         let Some(layout) = self.layout else {
-            return Err(PixelsError::malformed("raw", "finish called before write_header"));
+            return Err(PixelsError::malformed(
+                "raw",
+                "finish called before write_header",
+            ));
         };
         let declared = layout.descriptor.height;
         if self.rows_written != declared {
@@ -315,6 +342,7 @@ impl Encoder for RawEncoder {
 #[allow(
     clippy::unwrap_used,
     clippy::indexing_slicing,
+    clippy::panic,
     reason = "tests operate on known-good values and assert shapes directly"
 )]
 mod tests {
@@ -407,8 +435,14 @@ mod tests {
         let layout = RawFormat::packed(descriptor(4, 1));
         let stream: &[u8] = &[1, 2, 3, 4];
         let mut decoder = RawDecoder::new(layout, stream).unwrap();
-        assert_eq!(decoder.read_row(&mut [0; 3]).unwrap_err().code(), ErrorCode::InvalidArgument);
-        assert_eq!(decoder.read_row(&mut [0; 5]).unwrap_err().code(), ErrorCode::InvalidArgument);
+        assert_eq!(
+            decoder.read_row(&mut [0; 3]).unwrap_err().code(),
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            decoder.read_row(&mut [0; 5]).unwrap_err().code(),
+            ErrorCode::InvalidArgument
+        );
     }
 
     #[test]
@@ -429,7 +463,12 @@ mod tests {
     fn a_short_stride_is_rejected() {
         let err = RawFormat::with_stride(descriptor(4, 4), 3).unwrap_err();
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
-        assert_eq!(RawFormat::with_stride(descriptor(4, 4), 4).unwrap().padding(), 0);
+        assert_eq!(
+            RawFormat::with_stride(descriptor(4, 4), 4)
+                .unwrap()
+                .padding(),
+            0
+        );
     }
 
     #[test]
@@ -465,7 +504,10 @@ mod tests {
             ErrorCode::InvalidArgument
         );
         // finish before write_header.
-        assert_eq!(encoder.finish(&mut sink).unwrap_err().code(), ErrorCode::Malformed);
+        assert_eq!(
+            encoder.finish(&mut sink).unwrap_err().code(),
+            ErrorCode::Malformed
+        );
     }
 
     #[test]
@@ -473,7 +515,9 @@ mod tests {
         let layout = RawFormat::with_stride(descriptor(2, 2), 4).unwrap();
         let mut encoder = RawEncoder::with_layout(layout);
         let mut sink = Vec::new();
-        let err = encoder.write_header(&descriptor(3, 2), &mut sink).unwrap_err();
+        let err = encoder
+            .write_header(&descriptor(3, 2), &mut sink)
+            .unwrap_err();
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
     }
 
@@ -481,7 +525,9 @@ mod tests {
     fn every_v1_pixel_format_round_trips() {
         for &pixel in PixelFormat::ALL {
             let desc = ImageDescriptor::new(3, 2, pixel).unwrap();
-            let bytes: Vec<u8> = (0..desc.byte_len().unwrap()).map(|i| (i % 251) as u8).collect();
+            let bytes: Vec<u8> = (0..desc.byte_len().unwrap())
+                .map(|i| (i % 251) as u8)
+                .collect();
             let decoded = decode_all(RawFormat::packed(desc), &bytes).unwrap();
             assert_eq!(decoded, bytes, "{pixel} did not round-trip");
         }

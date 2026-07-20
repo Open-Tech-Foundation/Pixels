@@ -9,9 +9,7 @@
 //! exists, its output shape is already known, so [`Image::metadata`] is a field
 //! read rather than a traversal.
 
-use crate::{
-    Format, ImageDescriptor, Metadata, Op, PixelsError, Producer, Region, Result,
-};
+use crate::{Format, ImageDescriptor, Metadata, Op, PixelsError, Producer, Region, Result};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -230,7 +228,10 @@ impl Image {
     /// not match [`Op::arity`], and propagates [`Op::output_descriptor`].
     pub fn combine(inputs: &[Self], op: Arc<dyn Op>) -> Result<Self> {
         let Some(first) = inputs.first() else {
-            return Err(PixelsError::graph(format!("op `{}` needs at least one input", op.name())));
+            return Err(PixelsError::graph(format!(
+                "op `{}` needs at least one input",
+                op.name()
+            )));
         };
         if inputs.len() != op.arity() {
             return Err(PixelsError::graph(format!(
@@ -262,33 +263,42 @@ impl Image {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "tests operate on known-good values and assert shapes directly")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "tests operate on known-good values and assert shapes directly"
+)]
 mod tests {
     use super::*;
     use crate::testing::{ConstantOp, CountingProducer};
     use crate::{AccessPattern, Op, PixelFormat, Tile, TileMut};
 
     fn source(width: u32, height: u32) -> Image {
-        let producer = CountingProducer::new(
-            ImageDescriptor::new(width, height, PixelFormat::Gray8).unwrap(),
-        );
+        let producer =
+            CountingProducer::new(ImageDescriptor::new(width, height, PixelFormat::Gray8).unwrap());
         Image::from_producer(Arc::new(producer), Format::Raw)
     }
 
     #[test]
     fn chaining_builds_a_dag_without_touching_pixels() {
-        let producer =
-            Arc::new(CountingProducer::new(ImageDescriptor::new(4, 4, PixelFormat::Gray8).unwrap()));
+        let producer = Arc::new(CountingProducer::new(
+            ImageDescriptor::new(4, 4, PixelFormat::Gray8).unwrap(),
+        ));
         let image = Image::from_producer(Arc::clone(&producer) as Arc<dyn Producer>, Format::Raw);
         let chained = image.apply(Arc::new(ConstantOp::new(7))).unwrap();
         let _ = chained.apply(Arc::new(ConstantOp::new(9))).unwrap();
-        assert_eq!(producer.produce_calls(), 0, "graph construction must not pull pixels");
+        assert_eq!(
+            producer.produce_calls(),
+            0,
+            "graph construction must not pull pixels"
+        );
     }
 
     #[test]
     fn metadata_is_available_without_evaluation() {
-        let producer =
-            Arc::new(CountingProducer::new(ImageDescriptor::new(6, 3, PixelFormat::Gray8).unwrap()));
+        let producer = Arc::new(CountingProducer::new(
+            ImageDescriptor::new(6, 3, PixelFormat::Gray8).unwrap(),
+        ));
         let image = Image::from_producer(Arc::clone(&producer) as Arc<dyn Producer>, Format::Raw);
         let meta = image.metadata().unwrap();
         assert_eq!((meta.width, meta.height), (6, 3));
@@ -307,7 +317,9 @@ mod tests {
                 "halve"
             }
             fn output_descriptor(&self, inputs: &[ImageDescriptor]) -> Result<ImageDescriptor> {
-                let input = inputs.first().ok_or_else(|| PixelsError::graph("no input"))?;
+                let input = inputs
+                    .first()
+                    .ok_or_else(|| PixelsError::graph("no input"))?;
                 input.resized(input.width / 2, input.height)
             }
             fn input_regions(&self, out: Region, _: &[ImageDescriptor]) -> Result<Vec<Region>> {
@@ -320,7 +332,11 @@ mod tests {
                 Ok(())
             }
         }
-        let image = source(16, 4).apply(Arc::new(Halve)).unwrap().apply(Arc::new(Halve)).unwrap();
+        let image = source(16, 4)
+            .apply(Arc::new(Halve))
+            .unwrap()
+            .apply(Arc::new(Halve))
+            .unwrap();
         assert_eq!(image.descriptor().width, 4);
         assert_eq!(image.descriptor().height, 4);
     }
@@ -378,8 +394,8 @@ mod tests {
     #[test]
     fn arity_mismatch_is_a_graph_error() {
         let image = source(4, 4);
-        let err = Image::combine(&[image.clone(), image], Arc::new(ConstantOp::new(1)))
-            .unwrap_err();
+        let err =
+            Image::combine(&[image.clone(), image], Arc::new(ConstantOp::new(1))).unwrap_err();
         assert_eq!(err.code(), crate::ErrorCode::Graph);
         let err = Image::combine(&[], Arc::new(ConstantOp::new(1))).unwrap_err();
         assert_eq!(err.code(), crate::ErrorCode::Graph);

@@ -164,31 +164,45 @@ impl PixelsError {
     /// Report input bytes that are invalid for `format`.
     #[must_use]
     pub fn malformed(format: &'static str, detail: impl Into<String>) -> Self {
-        Self::Malformed { format, detail: detail.into() }
+        Self::Malformed {
+            format,
+            detail: detail.into(),
+        }
     }
 
     /// Report a recognized but unimplemented format or feature.
     #[must_use]
     pub fn unsupported(detail: impl Into<String>) -> Self {
-        Self::Unsupported { detail: detail.into() }
+        Self::Unsupported {
+            detail: detail.into(),
+        }
     }
 
     /// Report an invalid caller-supplied argument.
     #[must_use]
     pub fn invalid_argument(parameter: &'static str, detail: impl Into<String>) -> Self {
-        Self::InvalidArgument { parameter, detail: detail.into() }
+        Self::InvalidArgument {
+            parameter,
+            detail: detail.into(),
+        }
     }
 
     /// Report a graph that cannot be evaluated.
     #[must_use]
     pub fn graph(detail: impl Into<String>) -> Self {
-        Self::Graph { detail: detail.into() }
+        Self::Graph {
+            detail: detail.into(),
+        }
     }
 
     /// Report an exceeded safety limit.
     #[must_use]
     pub const fn limit_exceeded(limit: Limit, requested: u64, allowed: u64) -> Self {
-        Self::LimitExceeded { limit, requested, allowed }
+        Self::LimitExceeded {
+            limit,
+            requested,
+            allowed,
+        }
     }
 }
 
@@ -200,7 +214,11 @@ impl fmt::Display for PixelsError {
                 write!(f, "malformed {format} input: {detail}")
             }
             Self::Unsupported { detail } => write!(f, "unsupported: {detail}"),
-            Self::LimitExceeded { limit, requested, allowed } => write!(
+            Self::LimitExceeded {
+                limit,
+                requested,
+                allowed,
+            } => write!(
                 f,
                 "limit `{limit}` exceeded: requested {requested}, allowed {allowed}"
             ),
@@ -222,16 +240,26 @@ impl std::error::Error for PixelsError {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "tests operate on known-good values and assert shapes directly")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "tests operate on known-good values and assert shapes directly"
+)]
 mod tests {
     use super::*;
 
     #[test]
     fn code_is_stable_per_variant() {
-        assert_eq!(PixelsError::malformed("raw", "x").code(), ErrorCode::Malformed);
+        assert_eq!(
+            PixelsError::malformed("raw", "x").code(),
+            ErrorCode::Malformed
+        );
         assert_eq!(PixelsError::unsupported("x").code(), ErrorCode::Unsupported);
         assert_eq!(PixelsError::graph("x").code(), ErrorCode::Graph);
-        assert_eq!(PixelsError::invalid_argument("w", "x").code(), ErrorCode::InvalidArgument);
+        assert_eq!(
+            PixelsError::invalid_argument("w", "x").code(),
+            ErrorCode::InvalidArgument
+        );
         assert_eq!(
             PixelsError::limit_exceeded(Limit::MaxPixels, 5, 4).code(),
             ErrorCode::LimitExceeded

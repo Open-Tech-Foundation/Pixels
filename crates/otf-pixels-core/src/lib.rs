@@ -62,9 +62,7 @@ mod tile;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
-pub use codec::{
-    Codec, DecodeCapability, Decoder, EncodeOptions, Encoder, Format, Metadata,
-};
+pub use codec::{Codec, DecodeCapability, Decoder, EncodeOptions, Encoder, Format, Metadata};
 pub use error::{ErrorCode, Limit, PixelsError, Result};
 pub use eval::{demand, evaluate, evaluate_rows};
 pub use geometry::{ImageDescriptor, Limits, Region};

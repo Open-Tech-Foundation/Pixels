@@ -86,11 +86,7 @@ pub trait Op: Send + Sync + fmt::Debug {
     /// # Errors
     ///
     /// Returns an error if `output` is not a region this op can produce.
-    fn input_regions(
-        &self,
-        output: Region,
-        inputs: &[ImageDescriptor],
-    ) -> Result<Vec<Region>>;
+    fn input_regions(&self, output: Region, inputs: &[ImageDescriptor]) -> Result<Vec<Region>>;
 
     /// How this op reads its inputs; drives tile negotiation (ADR-0003).
     ///

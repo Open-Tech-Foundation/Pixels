@@ -96,7 +96,12 @@ impl Metadata {
     /// Build metadata from a decoded header descriptor and its container.
     #[must_use]
     pub const fn new(desc: &ImageDescriptor, format: Format) -> Self {
-        Self { width: desc.width, height: desc.height, format, pixel: desc.pixel }
+        Self {
+            width: desc.width,
+            height: desc.height,
+            format,
+            pixel: desc.pixel,
+        }
     }
 }
 
@@ -133,7 +138,9 @@ impl EncodeOptions {
 
 impl Default for EncodeOptions {
     fn default() -> Self {
-        Self { quality: Self::DEFAULT_QUALITY }
+        Self {
+            quality: Self::DEFAULT_QUALITY,
+        }
     }
 }
 
@@ -246,7 +253,11 @@ pub trait Encoder: Send {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "tests operate on known-good values and assert shapes directly")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "tests operate on known-good values and assert shapes directly"
+)]
 mod tests {
     use super::*;
     use crate::ErrorCode;
@@ -312,7 +323,9 @@ mod tests {
         }
         let mut buf = crate::TileBuf::zeroed(Region::from_size(1, 1), PixelFormat::Gray8).unwrap();
         let mut tile = buf.as_tile_mut().unwrap();
-        let err = Seq.read_region(Region::from_size(1, 1), &mut tile).unwrap_err();
+        let err = Seq
+            .read_region(Region::from_size(1, 1), &mut tile)
+            .unwrap_err();
         assert_eq!(err.code(), ErrorCode::Unsupported);
         assert_eq!(Seq.capability(), DecodeCapability::Sequential);
     }

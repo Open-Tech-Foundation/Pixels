@@ -93,9 +93,9 @@ fn compute_node(node: &Arc<Node>, cache: &HashMap<NodeId, Arc<TileBuf>>) -> Resu
         return Ok(output);
     }
 
-    let op = node
-        .op()
-        .ok_or_else(|| PixelsError::graph(format!("node `{}` is neither op nor source", node.name())))?;
+    let op = node.op().ok_or_else(|| {
+        PixelsError::graph(format!("node `{}` is neither op nor source", node.name()))
+    })?;
 
     // Demand propagation, whole-image: ask the op what it needs for the entire
     // output. M2 asks the same question per tile.
@@ -192,7 +192,11 @@ pub fn demand(image: &Image, output: Region) -> Result<Vec<(NodeId, Region)>> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "tests operate on known-good values and assert shapes directly")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "tests operate on known-good values and assert shapes directly"
+)]
 mod tests {
     use super::*;
     use crate::testing::{ConstantOp, CountingProducer, RampProducer};
@@ -229,7 +233,11 @@ mod tests {
         let right = base.apply(Arc::new(ConstantOp::new(2))).unwrap();
         let joined = Image::combine(&[left, right], Arc::new(crate::testing::SumOp)).unwrap();
         assert_eq!(evaluate(&joined).unwrap().bytes(), &[3, 3, 3, 3]);
-        assert_eq!(producer.produce_calls(), 1, "shared source pulled exactly once");
+        assert_eq!(
+            producer.produce_calls(),
+            1,
+            "shared source pulled exactly once"
+        );
     }
 
     #[test]
@@ -257,7 +265,9 @@ mod tests {
 
     #[test]
     fn a_failing_op_fails_the_whole_evaluation() {
-        let image = ramp(2, 2).apply(Arc::new(crate::testing::FailingOp)).unwrap();
+        let image = ramp(2, 2)
+            .apply(Arc::new(crate::testing::FailingOp))
+            .unwrap();
         let err = evaluate(&image).unwrap_err();
         assert_eq!(err.code(), crate::ErrorCode::Malformed);
     }
@@ -270,13 +280,18 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        assert_eq!(seen, vec![(0, vec![0, 1]), (1, vec![2, 3]), (2, vec![4, 5])]);
+        assert_eq!(
+            seen,
+            vec![(0, vec![0, 1]), (1, vec![2, 3]), (2, vec![4, 5])]
+        );
     }
 
     #[test]
     fn evaluate_rows_propagates_consumer_errors() {
-        let err = evaluate_rows(&ramp(2, 3), |_, _| Err(PixelsError::unsupported("sink refused")))
-            .unwrap_err();
+        let err = evaluate_rows(&ramp(2, 3), |_, _| {
+            Err(PixelsError::unsupported("sink refused"))
+        })
+        .unwrap_err();
         assert_eq!(err.code(), crate::ErrorCode::Unsupported);
     }
 
@@ -289,6 +304,10 @@ mod tests {
             .unwrap();
         let pairs = demand(&image, Region::from_size(4, 4)).unwrap();
         assert_eq!(pairs.len(), 2, "one op node and one source node");
-        assert_eq!(producer.produce_calls(), 0, "demand propagation touches no pixels");
+        assert_eq!(
+            producer.produce_calls(),
+            0,
+            "demand propagation touches no pixels"
+        );
     }
 }

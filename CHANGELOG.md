@@ -21,3 +21,10 @@ versioning: [SemVer](https://semver.org/).
   directions. Truncated streams are malformed-input errors, never panics.
 - `otf-pixels-ops`: `Crop`, `Flip` and `Flop` geometry ops, each declaring its
   demand mapping and access pattern for M2's scheduler.
+- `otf-pixels`: the chainable facade — `Image::from_raw`, `from_raw_stream`,
+  `crop`/`flip`/`flop`, and the `output(format, options)` terminal with
+  `write(sink)` and `bytes()`. Errors raised mid-chain are captured and
+  surfaced at the terminal, so pipelines read as one expression.
+- M1 exit-criterion test suite: raw → crop/flip → raw round-trips, graph
+  laziness (zero source bytes read before a terminal), malformed-input and
+  limit handling, determinism, and concurrent evaluation.

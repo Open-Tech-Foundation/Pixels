@@ -18,12 +18,7 @@ use crate::{ImageDescriptor, PixelFormat, PixelsError, Region, Result};
 ///
 /// A buffer must hold every full row plus the packed bytes of the final row;
 /// trailing stride padding after the last row is not required.
-fn validate(
-    region: Region,
-    pixel: PixelFormat,
-    stride: usize,
-    data_len: usize,
-) -> Result<usize> {
+fn validate(region: Region, pixel: PixelFormat, stride: usize, data_len: usize) -> Result<usize> {
     let row_bytes = (region.width as usize)
         .checked_mul(pixel.bytes_per_pixel())
         .ok_or_else(|| PixelsError::invalid_argument("region", "row byte length overflows"))?;
@@ -77,14 +72,15 @@ impl<'a> Tile<'a> {
     ///
     /// Returns [`PixelsError::InvalidArgument`] if `stride` is shorter than one
     /// packed row, or if `data` is too small to cover `region` at `stride`.
-    pub fn new(
-        region: Region,
-        pixel: PixelFormat,
-        stride: usize,
-        data: &'a [u8],
-    ) -> Result<Self> {
+    pub fn new(region: Region, pixel: PixelFormat, stride: usize, data: &'a [u8]) -> Result<Self> {
         let row_bytes = validate(region, pixel, stride, data.len())?;
-        Ok(Self { region, pixel, stride, row_bytes, data })
+        Ok(Self {
+            region,
+            pixel,
+            stride,
+            row_bytes,
+            data,
+        })
     }
 
     /// The region of the image this tile covers.
@@ -153,7 +149,13 @@ impl<'a> TileMut<'a> {
         data: &'a mut [u8],
     ) -> Result<Self> {
         let row_bytes = validate(region, pixel, stride, data.len())?;
-        Ok(Self { region, pixel, stride, row_bytes, data })
+        Ok(Self {
+            region,
+            pixel,
+            stride,
+            row_bytes,
+            data,
+        })
     }
 
     /// The region of the image this tile covers.
@@ -190,8 +192,12 @@ impl<'a> TileMut<'a> {
 
     /// The tile's rows, top to bottom, mutably.
     pub fn rows_mut(&mut self) -> impl Iterator<Item = &mut [u8]> {
-        let (stride, row_bytes, height) = (self.stride, self.row_bytes, self.region.height as usize);
-        self.data.chunks_mut(stride).take(height).filter_map(move |chunk| chunk.get_mut(..row_bytes))
+        let (stride, row_bytes, height) =
+            (self.stride, self.row_bytes, self.region.height as usize);
+        self.data
+            .chunks_mut(stride)
+            .take(height)
+            .filter_map(move |chunk| chunk.get_mut(..row_bytes))
     }
 
     /// Reborrow as an immutable tile.
@@ -235,7 +241,12 @@ impl TileBuf {
         let len = (region.height as usize)
             .checked_mul(stride)
             .ok_or_else(|| PixelsError::invalid_argument("region", "tile length overflows"))?;
-        Ok(Self { region, pixel, stride, data: vec![0; len] })
+        Ok(Self {
+            region,
+            pixel,
+            stride,
+            data: vec![0; len],
+        })
     }
 
     /// Allocate a zeroed buffer covering the whole of `desc`.
@@ -263,10 +274,18 @@ impl TileBuf {
         if data.len() != expected {
             return Err(PixelsError::invalid_argument(
                 "data",
-                format!("expected exactly {expected} packed bytes, got {}", data.len()),
+                format!(
+                    "expected exactly {expected} packed bytes, got {}",
+                    data.len()
+                ),
             ));
         }
-        Ok(Self { region, pixel, stride, data })
+        Ok(Self {
+            region,
+            pixel,
+            stride,
+            data,
+        })
     }
 
     /// The region this buffer covers.
@@ -328,7 +347,11 @@ pub fn copy_region(src: &Tile<'_>, dst: &mut TileMut<'_>, region: Region) -> Res
     if src.pixel() != dst.pixel() {
         return Err(PixelsError::invalid_argument(
             "pixel",
-            format!("cannot copy {} pixels into a {} tile", src.pixel(), dst.pixel()),
+            format!(
+                "cannot copy {} pixels into a {} tile",
+                src.pixel(),
+                dst.pixel()
+            ),
         ));
     }
     if !src.region().contains(region) {
@@ -352,7 +375,10 @@ pub fn copy_region(src: &Tile<'_>, dst: &mut TileMut<'_>, region: Region) -> Res
     let dst_offset = (region.x - dst.region().x) as usize * bpp;
     for y in region.y..region.y.saturating_add(region.height) {
         let (Some(src_row), Some(dst_row)) = (src.row(y), dst.row_mut(y)) else {
-            return Err(PixelsError::invalid_argument("region", format!("row {y} is out of range")));
+            return Err(PixelsError::invalid_argument(
+                "region",
+                format!("row {y} is out of range"),
+            ));
         };
         let (Some(from), Some(into)) = (
             src_row.get(src_offset..src_offset + span),
@@ -369,7 +395,11 @@ pub fn copy_region(src: &Tile<'_>, dst: &mut TileMut<'_>, region: Region) -> Res
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "tests operate on known-good values and assert shapes directly")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "tests operate on known-good values and assert shapes directly"
+)]
 mod tests {
     use super::*;
 
@@ -458,7 +488,13 @@ mod tests {
         let tile = Tile::new(Region::EMPTY, PixelFormat::Rgb8, 0, &[]).unwrap();
         assert_eq!(tile.rows().count(), 0);
         assert!(tile.row(0).is_none());
-        assert_eq!(TileBuf::zeroed(Region::EMPTY, PixelFormat::Rgb8).unwrap().bytes().len(), 0);
+        assert_eq!(
+            TileBuf::zeroed(Region::EMPTY, PixelFormat::Rgb8)
+                .unwrap()
+                .bytes()
+                .len(),
+            0
+        );
     }
 
     #[test]
@@ -508,8 +544,13 @@ mod tests {
         let src_data: Vec<u8> = (0..16).collect();
         let src = Tile::new(Region::from_size(2, 4), PixelFormat::Gray8, 4, &src_data).unwrap();
         let mut dst_data = vec![0_u8; 16];
-        let mut dst = TileMut::new(Region::from_size(2, 4), PixelFormat::Gray8, 4, &mut dst_data)
-            .unwrap();
+        let mut dst = TileMut::new(
+            Region::from_size(2, 4),
+            PixelFormat::Gray8,
+            4,
+            &mut dst_data,
+        )
+        .unwrap();
         copy_region(&src, &mut dst, Region::from_size(2, 4)).unwrap();
         // Packed pixels copied; stride padding left untouched.
         assert_eq!(&dst_data[0..2], &[0, 1]);

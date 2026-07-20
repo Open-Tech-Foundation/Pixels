@@ -298,7 +298,11 @@ macro_rules! dispatch_sample {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "tests operate on known-good values and assert shapes directly")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "tests operate on known-good values and assert shapes directly"
+)]
 mod tests {
     use super::*;
 
@@ -342,7 +346,11 @@ mod tests {
             assert!(seen.insert(format.as_str()), "duplicate name {format}");
         }
         assert_eq!(PixelFormat::Rgba8.as_str(), "rgba8");
-        assert_eq!(PixelFormat::ALL.len(), 9, "SPEC §Pixel formats lists 9 v1 formats");
+        assert_eq!(
+            PixelFormat::ALL.len(),
+            9,
+            "SPEC §Pixel formats lists 9 v1 formats"
+        );
     }
 
     #[test]
@@ -372,7 +380,10 @@ mod tests {
         // and an inherent `MAX` would shadow a trait one in generic code.
         assert!((<f32 as Sample>::FULL_SCALE - 1.0).abs() < f32::EPSILON);
         let (full_scale, type_max) = (<f32 as Sample>::FULL_SCALE, f32::MAX);
-        assert!(full_scale < type_max, "{full_scale} should be far below {type_max}");
+        assert!(
+            full_scale < type_max,
+            "{full_scale} should be far below {type_max}"
+        );
         // For the integer formats the two coincide, which is what makes the
         // shadowing bug invisible until a float kernel is written.
         assert_eq!(<u8 as Sample>::FULL_SCALE, u8::MAX);

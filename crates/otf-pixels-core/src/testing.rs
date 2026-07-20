@@ -26,7 +26,10 @@ impl CountingProducer {
     /// A producer of all-zero pixels shaped like `descriptor`.
     #[must_use]
     pub const fn new(descriptor: ImageDescriptor) -> Self {
-        Self { descriptor, calls: AtomicUsize::new(0) }
+        Self {
+            descriptor,
+            calls: AtomicUsize::new(0),
+        }
     }
 
     /// How many times [`Producer::produce`] has been called.
@@ -118,7 +121,10 @@ impl Op for ConstantOp {
     }
 
     fn output_descriptor(&self, inputs: &[ImageDescriptor]) -> Result<ImageDescriptor> {
-        inputs.first().copied().ok_or_else(|| PixelsError::graph("constant needs one input"))
+        inputs
+            .first()
+            .copied()
+            .ok_or_else(|| PixelsError::graph("constant needs one input"))
     }
 
     fn input_regions(&self, output: Region, _: &[ImageDescriptor]) -> Result<Vec<Region>> {
@@ -158,7 +164,10 @@ impl Op for SumOp {
             return Err(PixelsError::graph("sum needs two inputs"));
         };
         if a.width != b.width || a.height != b.height || a.pixel != b.pixel {
-            return Err(PixelsError::invalid_argument("inputs", "sum needs matching inputs"));
+            return Err(PixelsError::invalid_argument(
+                "inputs",
+                "sum needs matching inputs",
+            ));
         }
         Ok(*a)
     }
@@ -197,7 +206,10 @@ impl Op for FailingOp {
     }
 
     fn output_descriptor(&self, inputs: &[ImageDescriptor]) -> Result<ImageDescriptor> {
-        inputs.first().copied().ok_or_else(|| PixelsError::graph("failing needs one input"))
+        inputs
+            .first()
+            .copied()
+            .ok_or_else(|| PixelsError::graph("failing needs one input"))
     }
 
     fn input_regions(&self, output: Region, _: &[ImageDescriptor]) -> Result<Vec<Region>> {

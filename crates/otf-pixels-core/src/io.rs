@@ -38,7 +38,9 @@ pub trait Source: Send {
         let wanted = buf.len();
         let mut filled = 0;
         while filled < wanted {
-            let Some(rest) = buf.get_mut(filled..) else { break };
+            let Some(rest) = buf.get_mut(filled..) else {
+                break;
+            };
             match self.read(rest)? {
                 0 => {
                     return Err(PixelsError::malformed(
@@ -93,7 +95,11 @@ impl<W: std::io::Write + Send> Sink for W {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "tests operate on known-good values and assert shapes directly")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "tests operate on known-good values and assert shapes directly"
+)]
 mod tests {
     use super::*;
     use crate::ErrorCode;
@@ -118,7 +124,11 @@ mod tests {
 
     #[test]
     fn read_exact_reassembles_short_reads() {
-        let mut src = Trickle { data: (0..10).collect(), pos: 0, chunk: 3 };
+        let mut src = Trickle {
+            data: (0..10).collect(),
+            pos: 0,
+            chunk: 3,
+        };
         let mut buf = [0_u8; 10];
         src.read_exact(&mut buf).unwrap();
         assert_eq!(buf, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
@@ -126,7 +136,11 @@ mod tests {
 
     #[test]
     fn a_truncated_stream_is_malformed_not_an_io_error() {
-        let mut src = Trickle { data: vec![1, 2, 3], pos: 0, chunk: 2 };
+        let mut src = Trickle {
+            data: vec![1, 2, 3],
+            pos: 0,
+            chunk: 2,
+        };
         let mut buf = [0_u8; 8];
         let err = src.read_exact(&mut buf).unwrap_err();
         assert_eq!(err.code(), ErrorCode::Malformed);

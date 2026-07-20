@@ -25,18 +25,33 @@ pub struct Region {
 
 impl Region {
     /// The empty region at the origin.
-    pub const EMPTY: Self = Self { x: 0, y: 0, width: 0, height: 0 };
+    pub const EMPTY: Self = Self {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+    };
 
     /// Construct a region from its origin and size.
     #[must_use]
     pub const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     /// A region covering `width` × `height` pixels at the origin.
     #[must_use]
     pub const fn from_size(width: u32, height: u32) -> Self {
-        Self { x: 0, y: 0, width, height }
+        Self {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        }
     }
 
     /// The x coordinate one past the right edge.
@@ -93,7 +108,12 @@ impl Region {
         }
         // Both differences are positive and bounded by a u32 edge, so the
         // truncating casts below cannot lose information.
-        Self { x, y, width: (right - u64::from(x)) as u32, height: (bottom - u64::from(y)) as u32 }
+        Self {
+            x,
+            y,
+            width: (right - u64::from(x)) as u32,
+            height: (bottom - u64::from(y)) as u32,
+        }
     }
 
     /// Move the region by a signed offset, clamping at the coordinate origin.
@@ -103,7 +123,11 @@ impl Region {
             let moved = i64::from(v).saturating_add(d);
             moved.clamp(0, i64::from(u32::MAX)) as u32
         };
-        Self { x: shift(self.x, dx), y: shift(self.y, dy), ..self }
+        Self {
+            x: shift(self.x, dx),
+            y: shift(self.y, dy),
+            ..self
+        }
     }
 }
 
@@ -136,7 +160,20 @@ impl Limits {
     /// Only appropriate for fully trusted input.
     #[must_use]
     pub const fn unlimited() -> Self {
-        Self { max_pixels: u64::MAX }
+        Self {
+            max_pixels: u64::MAX,
+        }
+    }
+
+    /// The default limits with `max_pixels` replaced.
+    ///
+    /// This exists because [`Limits`] is `#[non_exhaustive]`: downstream crates
+    /// cannot write `Limits { max_pixels, .. }`, so without a setter the field
+    /// would be readable but unconfigurable outside this crate.
+    #[must_use]
+    pub const fn with_max_pixels(mut self, max_pixels: u64) -> Self {
+        self.max_pixels = max_pixels;
+        self
     }
 
     /// Check a dimension pair against these limits.
@@ -155,7 +192,11 @@ impl Limits {
         }
         let pixels = u64::from(width) * u64::from(height);
         if pixels > self.max_pixels {
-            return Err(PixelsError::limit_exceeded(Limit::MaxPixels, pixels, self.max_pixels));
+            return Err(PixelsError::limit_exceeded(
+                Limit::MaxPixels,
+                pixels,
+                self.max_pixels,
+            ));
         }
         Ok(())
     }
@@ -163,7 +204,9 @@ impl Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { max_pixels: Self::DEFAULT_MAX_PIXELS }
+        Self {
+            max_pixels: Self::DEFAULT_MAX_PIXELS,
+        }
     }
 }
 
@@ -210,7 +253,12 @@ impl ImageDescriptor {
         limits: &Limits,
     ) -> Result<Self> {
         limits.check(width, height)?;
-        Ok(Self { width, height, pixel, color: ColorModel::Srgb })
+        Ok(Self {
+            width,
+            height,
+            pixel,
+            color: ColorModel::Srgb,
+        })
     }
 
     /// The region covering the whole image.
@@ -242,7 +290,11 @@ impl ImageDescriptor {
     /// See [`Limits::check`].
     pub fn resized(&self, width: u32, height: u32) -> Result<Self> {
         Limits::default().check(width, height)?;
-        Ok(Self { width, height, ..*self })
+        Ok(Self {
+            width,
+            height,
+            ..*self
+        })
     }
 }
 
@@ -253,7 +305,11 @@ impl fmt::Display for ImageDescriptor {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "tests operate on known-good values and assert shapes directly")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "tests operate on known-good values and assert shapes directly"
+)]
 mod tests {
     use super::*;
     use crate::ErrorCode;
@@ -263,7 +319,11 @@ mod tests {
         let a = Region::new(0, 0, 10, 10);
         let b = Region::new(5, 5, 10, 10);
         assert_eq!(a.intersect(b), Region::new(5, 5, 5, 5));
-        assert_eq!(a.intersect(b), b.intersect(a), "intersection is commutative");
+        assert_eq!(
+            a.intersect(b),
+            b.intersect(a),
+            "intersection is commutative"
+        );
     }
 
     #[test]
@@ -272,7 +332,11 @@ mod tests {
         let b = Region::new(10, 10, 4, 4);
         assert!(a.intersect(b).is_empty());
         // Touching edges do not overlap.
-        assert!(Region::new(0, 0, 4, 4).intersect(Region::new(4, 0, 4, 4)).is_empty());
+        assert!(
+            Region::new(0, 0, 4, 4)
+                .intersect(Region::new(4, 0, 4, 4))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -280,7 +344,10 @@ mod tests {
         let a = Region::new(u32::MAX - 4, 0, 4, 4);
         let b = Region::new(u32::MAX - 2, 0, 2, 4);
         assert_eq!(a.intersect(b), Region::new(u32::MAX - 2, 0, 2, 4));
-        assert_eq!(Region::new(u32::MAX, u32::MAX, u32::MAX, u32::MAX).right(), 8_589_934_590);
+        assert_eq!(
+            Region::new(u32::MAX, u32::MAX, u32::MAX, u32::MAX).right(),
+            8_589_934_590
+        );
     }
 
     #[test]
@@ -296,9 +363,18 @@ mod tests {
 
     #[test]
     fn translate_clamps_instead_of_wrapping() {
-        assert_eq!(Region::new(5, 5, 2, 2).translate(-10, -10), Region::new(0, 0, 2, 2));
-        assert_eq!(Region::new(5, 5, 2, 2).translate(3, 4), Region::new(8, 9, 2, 2));
-        assert_eq!(Region::new(0, 0, 2, 2).translate(i64::MAX, i64::MAX).x, u32::MAX);
+        assert_eq!(
+            Region::new(5, 5, 2, 2).translate(-10, -10),
+            Region::new(0, 0, 2, 2)
+        );
+        assert_eq!(
+            Region::new(5, 5, 2, 2).translate(3, 4),
+            Region::new(8, 9, 2, 2)
+        );
+        assert_eq!(
+            Region::new(0, 0, 2, 2).translate(i64::MAX, i64::MAX).x,
+            u32::MAX
+        );
     }
 
     #[test]
@@ -312,8 +388,14 @@ mod tests {
     #[test]
     fn zero_dimensions_are_rejected() {
         let limits = Limits::default();
-        assert_eq!(limits.check(0, 10).unwrap_err().code(), ErrorCode::InvalidArgument);
-        assert_eq!(limits.check(10, 0).unwrap_err().code(), ErrorCode::InvalidArgument);
+        assert_eq!(
+            limits.check(0, 10).unwrap_err().code(),
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            limits.check(10, 0).unwrap_err().code(),
+            ErrorCode::InvalidArgument
+        );
     }
 
     #[test]
@@ -330,6 +412,19 @@ mod tests {
     }
 
     #[test]
+    fn max_pixels_is_configurable_without_a_struct_literal() {
+        // `Limits` is non_exhaustive, so downstream crates need this setter to
+        // configure the limit at all.
+        let limits = Limits::default().with_max_pixels(16);
+        assert_eq!(limits.max_pixels, 16);
+        assert!(limits.check(4, 4).is_ok());
+        assert_eq!(
+            limits.check(4, 5).unwrap_err().code(),
+            ErrorCode::LimitExceeded
+        );
+    }
+
+    #[test]
     fn descriptor_reports_packed_sizes() {
         let desc = ImageDescriptor::new(4, 3, PixelFormat::Rgb8).unwrap();
         assert_eq!(desc.row_bytes(), 12);
@@ -341,7 +436,9 @@ mod tests {
     #[test]
     fn descriptor_construction_enforces_limits() {
         assert_eq!(
-            ImageDescriptor::new(0, 4, PixelFormat::Rgb8).unwrap_err().code(),
+            ImageDescriptor::new(0, 4, PixelFormat::Rgb8)
+                .unwrap_err()
+                .code(),
             ErrorCode::InvalidArgument
         );
         let desc = ImageDescriptor::new(4, 4, PixelFormat::Rgb8).unwrap();

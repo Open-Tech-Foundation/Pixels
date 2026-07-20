@@ -5,8 +5,7 @@
 //! until a terminal pulls.
 
 use crate::{
-    Decoder, ImageDescriptor, PixelsError, Producer, Region, Result, TileBuf, TileMut,
-    copy_region,
+    Decoder, ImageDescriptor, PixelsError, Producer, Region, Result, TileBuf, TileMut, copy_region,
 };
 use std::sync::{Arc, Mutex};
 
@@ -41,7 +40,11 @@ impl BufferSource {
         if buffer.pixel() != descriptor.pixel {
             return Err(PixelsError::invalid_argument(
                 "buffer",
-                format!("buffer is {} but the image is {}", buffer.pixel(), descriptor.pixel),
+                format!(
+                    "buffer is {} but the image is {}",
+                    buffer.pixel(),
+                    descriptor.pixel
+                ),
             ));
         }
         Ok(Self { buffer, descriptor })
@@ -182,7 +185,11 @@ impl Producer for DecodedSource {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "tests operate on known-good values and assert shapes directly")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "tests operate on known-good values and assert shapes directly"
+)]
 mod tests {
     use super::*;
     use crate::{ErrorCode, PixelFormat};
@@ -205,7 +212,8 @@ mod tests {
             if Some(self.row) == self.fail_at {
                 return Err(PixelsError::malformed("stub", "corrupt row"));
             }
-            self.rows_read.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.rows_read
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             out.fill(self.row as u8);
             self.row += 1;
             Ok(())
@@ -238,7 +246,11 @@ mod tests {
             let mut tile = out.as_tile_mut().unwrap();
             source.produce(Region::from_size(2, 3), &mut tile).unwrap();
         }
-        assert_eq!(rows_read.load(std::sync::atomic::Ordering::Relaxed), 3, "decoded exactly once");
+        assert_eq!(
+            rows_read.load(std::sync::atomic::Ordering::Relaxed),
+            3,
+            "decoded exactly once"
+        );
         assert_eq!(out.bytes(), &[0, 0, 1, 1, 2, 2]);
     }
 
@@ -257,7 +269,9 @@ mod tests {
         let mut out = TileBuf::zeroed(Region::from_size(2, 3), PixelFormat::Gray8).unwrap();
         for attempt in 0..2 {
             let mut tile = out.as_tile_mut().unwrap();
-            let err = source.produce(Region::from_size(2, 3), &mut tile).unwrap_err();
+            let err = source
+                .produce(Region::from_size(2, 3), &mut tile)
+                .unwrap_err();
             assert_eq!(err.code(), ErrorCode::Malformed, "attempt {attempt}");
         }
     }
