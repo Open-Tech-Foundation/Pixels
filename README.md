@@ -53,8 +53,16 @@ OS-backend gaps.
 
 ## Status
 
-Pre-implementation. All v1 architecture decisions are recorded in
-[docs/adr/](docs/adr/).
+**M1 — core skeleton — complete.** The workspace, op graph, codec traits,
+raw codec, geometry ops and the naive whole-image evaluator are in place and
+tested; see [ROADMAP.md](docs/ROADMAP.md) for what each milestone adds.
+
+The evaluator is deliberately naive — it exists as the correctness oracle M2's
+tile scheduler is diffed against. Until M2 lands, pipelines are evaluated
+whole-image, so the constant-memory guarantee is **not yet met**: what exists
+today is the API and the codec contracts that will meet it.
+
+All v1 architecture decisions are recorded in [docs/adr/](docs/adr/).
 
 ## License
 

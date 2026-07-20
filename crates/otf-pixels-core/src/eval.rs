@@ -176,6 +176,8 @@ pub fn evaluate_rows(
 /// # Errors
 ///
 /// Propagates [`Op::input_regions`].
+///
+/// [`Op::input_regions`]: crate::Op::input_regions
 pub fn demand(image: &Image, output: Region) -> Result<Vec<(NodeId, Region)>> {
     let mut out = Vec::new();
     let mut stack = vec![(Arc::clone(image.node()), output)];
