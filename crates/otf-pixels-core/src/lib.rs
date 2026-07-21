@@ -72,7 +72,7 @@ pub use error::{ErrorCode, Limit, PixelsError, Result};
 pub use eval::{demand, evaluate, evaluate_rows};
 pub use geometry::{ImageDescriptor, Limits, Region};
 pub use graph::{Image, Node, NodeId};
-pub use io::{Sink, Source};
+pub use io::{Prefixed, Sink, Source};
 pub use op::{AccessPattern, Op, Producer};
 pub use pixel::{ChannelLayout, ColorModel, PixelFormat, Sample, SampleKind};
 pub use plan::{NodePlan, Plan, PlanOptions, TileShape};

@@ -15,12 +15,15 @@ readme = "../../README.md"
 otf-pixels-core.workspace = true
 otf-pixels-ops.workspace = true
 otf-pixels-codec-raw = { workspace = true, optional = true }
+otf-pixels-codec-png = { workspace = true, optional = true }
 
 [features]
-default = ["raw"]
+default = ["raw", "png"]
 # Raw pixel codec. Kept behind a feature for symmetry with the other codecs
 # (ARCHITECTURE §Layer 2: "each format is a plugin behind a cargo feature").
 raw = ["dep:otf-pixels-codec-raw"]
+# PNG codec, implemented from scratch including DEFLATE (ADR-0010).
+png = ["dep:otf-pixels-codec-png"]
 
 # The scaling benchmark is a plain binary, not a libtest harness: it measures
 # how fixed work redistributes across threads rather than timing a micro-op.

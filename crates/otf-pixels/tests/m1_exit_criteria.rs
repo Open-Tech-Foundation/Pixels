@@ -10,6 +10,10 @@
 //! from ARCHITECTURE §Failure model and SPEC §Safety, which apply from the
 //! first codec onward and so are M1's responsibility too.
 
+#![cfg(feature = "raw")]
+// The M1 criteria are all expressed over the raw codec, which is how they
+// reach pixels at all. Without it there is nothing to assert, so the suite
+// compiles out rather than failing to build.
 #![allow(
     clippy::unwrap_used,
     clippy::indexing_slicing,

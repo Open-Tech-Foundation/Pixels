@@ -6,6 +6,11 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- A build without the `raw` feature now compiles. The exit-criteria suites and
+  the crate-level example are expressed over the raw codec, so they compile out
+  with it rather than failing to build.
+
 ### Changed
 - `otf-pixels` now evaluates pipelines with the tile scheduler instead of the
   M1 whole-image evaluator. Rows still reach an encoder top to bottom.
@@ -37,6 +42,13 @@ versioning: [SemVer](https://semver.org/).
 - `otf-pixels-codec-png`: `PngDecoder`, covering every v1 PNG feature — bit
   depths 1/2/4/8/16, colour types 0/2/3/4/6, `PLTE`, `tRNS`, Adam7 interlace
   and all five filter types. Ancillary chunks are skipped, not honoured.
+- `otf-pixels`: `Image::open` and `Image::from_stream`, which identify a format
+  from its magic bytes and never from a file extension (SPEC §Formats).
+  `Format::Png` now resolves to a real encoder behind the `png` feature.
+- `otf-pixels-core`: `Prefixed`, a source that replays a buffered prefix before
+  delegating. It is what lets sniffing look at the magic bytes and still hand
+  the whole stream onward, without asking any source to seek (ADR-0005).
+- `otf-pixels-codec-png`: `PngCodec`, the sniffing registry entry for PNG.
 - `otf-pixels-codec-png`: `PngEncoder`, writing non-interlaced PNG at DEFLATE
   levels 0-9 with per-row adaptive filter selection. Verified in the encode
   direction too: libpng reads all 140 emitted files — seven pixel formats,

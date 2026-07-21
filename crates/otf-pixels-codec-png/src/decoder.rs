@@ -16,7 +16,8 @@
 //! incremental inflate. See the crate docs for why that is deferred.
 
 use otf_pixels_core::{
-    DecodeCapability, Decoder, ImageDescriptor, Limits, PixelFormat, PixelsError, Result, Source,
+    Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, PixelFormat, PixelsError,
+    Result, Source,
 };
 
 use crate::format::{
@@ -663,4 +664,26 @@ impl<S: Source + std::fmt::Debug> Decoder for PngDecoder<S> {
 #[must_use]
 pub fn probe(prefix: &[u8]) -> bool {
     prefix.get(..8) == Some(&SIGNATURE[..])
+}
+
+/// The PNG entry in a sniffing registry.
+///
+/// Format detection is by magic bytes only (SPEC §Formats); PNG's eight-byte
+/// signature is deliberately designed to survive — and detect — the transfer
+/// corruptions its §5.2 enumerates, so there is nothing else worth consulting.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PngCodec;
+
+impl Codec for PngCodec {
+    fn format(&self) -> Format {
+        Format::Png
+    }
+
+    fn magic_len(&self) -> usize {
+        SIGNATURE.len()
+    }
+
+    fn probe(&self, prefix: &[u8]) -> bool {
+        probe(prefix)
+    }
 }

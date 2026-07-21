@@ -12,6 +12,10 @@
 //! deliberately naive and therefore obviously correct, so any disagreement is
 //! a scheduler bug by definition.
 
+#![cfg(feature = "raw")]
+// The M2 criteria are all expressed over the raw codec, which is how they
+// reach pixels at all. Without it there is nothing to assert, so the suite
+// compiles out rather than failing to build.
 #![allow(
     clippy::unwrap_used,
     clippy::indexing_slicing,

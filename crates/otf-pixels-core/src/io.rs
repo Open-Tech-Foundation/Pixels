@@ -94,6 +94,54 @@ impl<W: std::io::Write + Send> Sink for W {
     }
 }
 
+/// A source that replays a buffered prefix before delegating to the rest.
+///
+/// Format sniffing needs to look at the first bytes and then hand the *whole*
+/// stream to a decoder, but [`Source`] is forward-only (ADR-0005) and cannot
+/// rewind. Reading the magic bytes into a prefix and putting them back in
+/// front is how sniffing stays compatible with that: nothing is re-read, and
+/// no source is required to seek.
+#[derive(Debug)]
+pub struct Prefixed<S: Source> {
+    prefix: Vec<u8>,
+    /// How much of `prefix` has already been handed out.
+    consumed: usize,
+    rest: S,
+}
+
+impl<S: Source> Prefixed<S> {
+    /// Replay `prefix`, then read from `rest`.
+    #[must_use]
+    pub const fn new(prefix: Vec<u8>, rest: S) -> Self {
+        Self {
+            prefix,
+            consumed: 0,
+            rest,
+        }
+    }
+}
+
+impl<S: Source> Source for Prefixed<S> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let Some(remaining) = self.prefix.get(self.consumed..) else {
+            return self.rest.read(buf);
+        };
+        if remaining.is_empty() {
+            return self.rest.read(buf);
+        }
+        // A short read is contractually fine, so the prefix and the rest are
+        // never mixed in one call — which keeps the boundary easy to reason
+        // about and impossible to get half-right.
+        let take = remaining.len().min(buf.len());
+        let (Some(from), Some(into)) = (remaining.get(..take), buf.get_mut(..take)) else {
+            return Ok(0);
+        };
+        into.copy_from_slice(from);
+        self.consumed += take;
+        Ok(take)
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -180,5 +228,50 @@ mod tests {
         let err = Sink::write_all(&mut Broken, b"x").unwrap_err();
         assert_eq!(err.code(), ErrorCode::Io);
         assert_eq!(Sink::flush(&mut Broken).unwrap_err().code(), ErrorCode::Io);
+    }
+
+    #[test]
+    fn a_prefixed_source_replays_then_delegates() {
+        let mut source = Prefixed::new(vec![1, 2, 3], &b"456"[..]);
+        let mut all = Vec::new();
+        let mut buf = [0_u8; 2];
+        loop {
+            match source.read(&mut buf).unwrap() {
+                0 => break,
+                n => all.extend_from_slice(&buf[..n]),
+            }
+        }
+        assert_eq!(all, vec![1, 2, 3, b'4', b'5', b'6']);
+    }
+
+    #[test]
+    fn a_prefixed_source_never_mixes_the_prefix_into_one_read() {
+        // The boundary is the only place this can go wrong, so pin it: a
+        // buffer larger than the prefix still stops at the prefix's end.
+        let mut source = Prefixed::new(vec![9, 9], &b"xyz"[..]);
+        let mut buf = [0_u8; 16];
+        assert_eq!(source.read(&mut buf).unwrap(), 2);
+        assert_eq!(&buf[..2], &[9, 9]);
+        assert_eq!(source.read(&mut buf).unwrap(), 3);
+        assert_eq!(&buf[..3], b"xyz");
+        assert_eq!(source.read(&mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn an_empty_prefix_is_a_pass_through() {
+        let mut source = Prefixed::new(Vec::new(), &b"data"[..]);
+        let mut buf = [0_u8; 8];
+        assert_eq!(source.read(&mut buf).unwrap(), 4);
+        assert_eq!(&buf[..4], b"data");
+    }
+
+    #[test]
+    fn read_exact_spans_the_prefix_boundary() {
+        // `read_exact` loops over short reads, so the split must be invisible
+        // to it — this is how a decoder will actually consume the stream.
+        let mut source = Prefixed::new(vec![0xDE, 0xAD], &b"\xBE\xEF"[..]);
+        let mut buf = [0_u8; 4];
+        source.read_exact(&mut buf).unwrap();
+        assert_eq!(buf, [0xDE, 0xAD, 0xBE, 0xEF]);
     }
 }

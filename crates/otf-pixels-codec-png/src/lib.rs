@@ -17,7 +17,7 @@ mod format;
 mod inflate;
 
 pub use checksum::{Adler32, Crc32};
-pub use decoder::{PngDecoder, probe};
+pub use decoder::{PngCodec, PngDecoder, probe};
 pub use deflate::{Level, deflate, zlib_compress};
 pub use encoder::PngEncoder;
 pub use format::{ColorType, Filter, Header, SIGNATURE};

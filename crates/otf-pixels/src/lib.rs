@@ -7,7 +7,10 @@
 //! [`otf_pixels_core`]'s engine, [`otf_pixels_ops`]' kernels and the codec
 //! crates.
 //!
-//! ```
+// The example writes raw bytes, so it only runs when that codec is compiled
+// in. `raw` is a default feature, so docs.rs and an ordinary build both run it.
+#![cfg_attr(feature = "raw", doc = "```")]
+#![cfg_attr(not(feature = "raw"), doc = "```ignore")]
 //! use otf_pixels::{Format, Image, ImageDescriptor, PixelFormat};
 //!
 //! # fn main() -> Result<(), otf_pixels::PixelsError> {
@@ -48,26 +51,29 @@
 //!
 //! # Current scope
 //!
-//! Through ROADMAP M2. Notably **not** here yet:
+//! Through ROADMAP M3. Notably **not** here yet:
 //!
-//! - `Image::open` and format sniffing, which arrive with the first codec that
-//!   has magic bytes to sniff (M3, PNG). Raw cannot be detected — only
-//!   requested — so there is nothing for it to dispatch on today.
 //! - `resize`, `rotate`, `modulate`, `convolve`, `composite` and the channel
 //!   ops (M4).
+//! - Every format but PNG and raw. [`Image::open`] reports an unsupported
+//!   format for bytes it cannot identify rather than guessing.
 
-use otf_pixels_core::{BufferSource, Op, Producer, Scheduler, TileBuf};
+use otf_pixels_core::{BufferSource, Op, Prefixed, Producer, Scheduler, TileBuf};
 use std::sync::Arc;
 
 pub use otf_pixels_core::{
-    AccessPattern, ChannelLayout, ColorModel, Decoder, EncodeOptions, Encoder, ErrorCode, Format,
-    ImageDescriptor, Limit, Limits, Metadata, PixelFormat, PixelsError, PlanOptions, Region,
-    Result, RunStats, SchedulerOptions, Sink, Source, TileShape, evaluate as evaluate_reference,
+    AccessPattern, ChannelLayout, Codec, ColorModel, Decoder, EncodeOptions, Encoder, ErrorCode,
+    Format, ImageDescriptor, Limit, Limits, Metadata, PixelFormat, PixelsError, PlanOptions,
+    Region, Result, RunStats, SchedulerOptions, Sink, Source, TileShape,
+    evaluate as evaluate_reference,
 };
 pub use otf_pixels_ops::{Crop, Flip, Flop};
 
 #[cfg(feature = "raw")]
 pub use otf_pixels_codec_raw::{RawCodec, RawDecoder, RawEncoder, RawFormat};
+
+#[cfg(feature = "png")]
+pub use otf_pixels_codec_png::{PngCodec, PngDecoder, PngEncoder};
 
 /// A lazily evaluated image pipeline.
 ///
@@ -110,6 +116,92 @@ impl Image {
     ) -> Result<Self> {
         let decoder = RawDecoder::new(layout, source)?;
         Ok(Self::from_decoder(Box::new(decoder), Format::Raw))
+    }
+
+    /// Open an image file, identifying its format from its contents.
+    ///
+    /// The path's extension is **ignored**. Detection is by magic bytes only
+    /// (SPEC §Formats), because a name is an attacker-controlled hint while
+    /// the bytes are a fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::Io`] if the file cannot be opened,
+    /// [`PixelsError::Unsupported`] if no built-in codec recognises it, and
+    /// [`PixelsError::Malformed`] if the header is invalid for the format its
+    /// magic bytes claim.
+    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let file = std::fs::File::open(path).map_err(|e| {
+            // `PixelsError::io` takes a static context, so the path goes into
+            // the wrapped error instead. Losing which file failed would make
+            // the error useless in exactly the case it fires.
+            let kind = e.kind();
+            let detail = std::io::Error::new(kind, format!("{}: {e}", path.display()));
+            PixelsError::io("opening image file", detail)
+        })?;
+        Self::from_stream(std::io::BufReader::new(file))
+    }
+
+    /// Build an image from a byte stream, identifying its format from the
+    /// leading bytes.
+    ///
+    /// Sniffing reads only the longest magic prefix any known codec needs, and
+    /// replays it to the decoder rather than seeking — a [`Source`] is
+    /// forward-only (ADR-0005), so a pipe or socket works here exactly as a
+    /// file does. A stream shorter than that prefix is not an error at this
+    /// stage: it simply matches nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::Unsupported`] if no built-in codec recognises
+    /// the stream, [`PixelsError::Io`] on read failure, or
+    /// [`PixelsError::Malformed`] if the header is invalid for the format its
+    /// magic bytes claim.
+    pub fn from_stream(mut source: impl Source + std::fmt::Debug + 'static) -> Result<Self> {
+        let codecs = sniffing_codecs();
+        let longest = codecs.iter().map(|c| c.magic_len()).max().unwrap_or(0);
+
+        // Short reads are normal, and a stream shorter than `longest` is a
+        // legitimate no-match rather than a failure, so this loop stops at end
+        // of input instead of demanding a full prefix.
+        let mut prefix = Vec::with_capacity(longest);
+        let mut buffer = vec![0_u8; longest];
+        while prefix.len() < longest {
+            let Some(rest) = buffer.get_mut(prefix.len()..) else {
+                break;
+            };
+            match source.read(rest)? {
+                0 => break,
+                n => {
+                    let Some(read) = rest.get(..n) else { break };
+                    prefix.extend_from_slice(read);
+                }
+            }
+        }
+
+        let Some(codec) = codecs.iter().find(|codec| codec.probe(&prefix)) else {
+            return Err(PixelsError::unsupported(format!(
+                "no codec recognises this stream; its first {} bytes are {:02x?}",
+                prefix.len().min(8),
+                prefix.get(..prefix.len().min(8)).unwrap_or(&[])
+            )));
+        };
+        let stream = Prefixed::new(prefix, source);
+        // Unused when no decoding codec is compiled in, which is a legitimate
+        // if degenerate build rather than a mistake.
+        let _ = &stream;
+
+        match codec.format() {
+            #[cfg(feature = "png")]
+            Format::Png => {
+                let decoder = PngDecoder::new(stream, Limits::default())?;
+                Ok(Self::from_decoder(Box::new(decoder), Format::Png))
+            }
+            other => Err(PixelsError::unsupported(format!(
+                "{other} was detected but no decoder for it is compiled in"
+            ))),
+        }
     }
 
     /// Build an image from any decoder whose header has already been parsed.
@@ -452,11 +544,28 @@ impl RowAssembler {
     }
 }
 
+/// Every codec that can be sniffed, in probe order.
+///
+/// Raw is deliberately absent: it has no magic bytes, so it can only be
+/// requested, never detected. Adding it here would make it match everything.
+fn sniffing_codecs() -> Vec<Box<dyn Codec>> {
+    let codecs: Vec<Box<dyn Codec>> = vec![
+        #[cfg(feature = "png")]
+        Box::new(PngCodec),
+    ];
+    codecs
+}
+
 /// Build the encoder for `format`, or report that it is not available.
-fn encoder_for(format: Format, _options: EncodeOptions) -> Result<Box<dyn Encoder>> {
+fn encoder_for(format: Format, options: EncodeOptions) -> Result<Box<dyn Encoder>> {
+    // Only read by codecs that have something to tune; see the comment in
+    // `from_stream` for why a build with none of them still has to compile.
+    let _ = &options;
     match format {
         #[cfg(feature = "raw")]
         Format::Raw => Ok(Box::new(RawEncoder::new())),
+        #[cfg(feature = "png")]
+        Format::Png => Ok(Box::new(PngEncoder::from_options(&options))),
         #[cfg(not(feature = "raw"))]
         Format::Raw => Err(PixelsError::unsupported(
             "raw encoding requires the `raw` feature of otf-pixels",
@@ -468,7 +577,11 @@ fn encoder_for(format: Format, _options: EncodeOptions) -> Result<Box<dyn Encode
     }
 }
 
-#[cfg(test)]
+// Gated on `raw` because almost every test here reaches pixels through the
+// raw encoder, which is the only format that can express "these exact bytes".
+// A build without it has nothing to compare against, so the suite compiles out
+// rather than asserting less.
+#[cfg(all(test, feature = "raw"))]
 #[allow(
     clippy::unwrap_used,
     clippy::indexing_slicing,
@@ -533,8 +646,9 @@ mod tests {
 
     #[test]
     fn unimplemented_formats_are_catchable_errors() {
+        // Png is absent: it landed in M3 and is checked by the round-trip
+        // tests instead. Every remaining format must still fail cleanly.
         for format in [
-            Format::Png,
             Format::Jpeg,
             Format::Gif,
             Format::Tiff,
@@ -568,6 +682,7 @@ mod tests {
         assert_eq!(output.options().quality, 55);
     }
 
+    #[cfg(feature = "raw")]
     #[test]
     fn from_raw_stream_defers_decoding_to_the_terminal() {
         let descriptor = ImageDescriptor::new(2, 2, PixelFormat::Gray8).unwrap();
@@ -583,6 +698,7 @@ mod tests {
         assert_eq!(bytes, [1, 2, 3, 4]);
     }
 
+    #[cfg(feature = "raw")]
     #[test]
     fn a_truncated_stream_fails_the_terminal_without_panicking() {
         let descriptor = ImageDescriptor::new(4, 4, PixelFormat::Gray8).unwrap();
@@ -607,5 +723,118 @@ mod tests {
             image.metadata().unwrap().width,
             clone.metadata().unwrap().width
         );
+    }
+
+    #[cfg(feature = "png")]
+    #[test]
+    fn a_png_round_trips_through_the_facade() {
+        let png = ramp(37, 21)
+            .output(Format::Png, EncodeOptions::default())
+            .bytes()
+            .unwrap();
+        let image = Image::from_stream(std::io::Cursor::new(png)).unwrap();
+        assert_eq!(image.descriptor().unwrap().width, 37);
+        assert_eq!(image.metadata().unwrap().format, Format::Png);
+
+        let back = image
+            .output(Format::Raw, EncodeOptions::default())
+            .bytes()
+            .unwrap();
+        let expected = ramp(37, 21)
+            .output(Format::Raw, EncodeOptions::default())
+            .bytes()
+            .unwrap();
+        assert_eq!(back, expected, "pixels changed across a PNG round trip");
+    }
+
+    #[cfg(feature = "png")]
+    #[test]
+    fn a_pipeline_survives_a_png_round_trip() {
+        // The point of sniffing is that a decoded image is an ordinary graph
+        // source, so ops compose over it exactly as over raw pixels.
+        let png = ramp(16, 16)
+            .output(Format::Png, EncodeOptions::default())
+            .bytes()
+            .unwrap();
+        let cropped = Image::from_stream(std::io::Cursor::new(png))
+            .unwrap()
+            .crop(2, 3, 8, 5)
+            .flip()
+            .output(Format::Raw, EncodeOptions::default())
+            .bytes()
+            .unwrap();
+        let direct = ramp(16, 16)
+            .crop(2, 3, 8, 5)
+            .flip()
+            .output(Format::Raw, EncodeOptions::default())
+            .bytes()
+            .unwrap();
+        assert_eq!(cropped, direct);
+    }
+
+    #[cfg(feature = "png")]
+    #[test]
+    fn open_ignores_the_extension_and_reads_the_bytes() {
+        let dir = std::env::temp_dir().join(format!("otf-pixels-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("actually-a-png.jpg");
+        let png = ramp(8, 8)
+            .output(Format::Png, EncodeOptions::default())
+            .bytes()
+            .unwrap();
+        std::fs::write(&path, &png).unwrap();
+
+        let image = Image::open(&path).unwrap();
+        assert_eq!(
+            image.metadata().unwrap().format,
+            Format::Png,
+            "extension won over content"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn open_names_the_file_it_could_not_read() {
+        let error = Image::open("/nonexistent/otf-pixels/missing.png").unwrap_err();
+        assert_eq!(error.code(), ErrorCode::Io);
+        assert!(error.to_string().contains("missing.png"), "{error}");
+    }
+
+    #[test]
+    fn an_unrecognised_stream_is_unsupported_not_a_guess() {
+        for bytes in [&b""[..], &b"not an image"[..], &[0_u8; 64][..]] {
+            let error = Image::from_stream(std::io::Cursor::new(bytes.to_vec())).unwrap_err();
+            assert_eq!(error.code(), ErrorCode::Unsupported, "{bytes:02x?}");
+        }
+    }
+
+    #[cfg(feature = "png")]
+    #[test]
+    fn a_truncated_png_is_malformed_not_a_panic() {
+        let png = ramp(8, 8)
+            .output(Format::Png, EncodeOptions::default())
+            .bytes()
+            .unwrap();
+        // Past the signature, so sniffing succeeds and the header parse is
+        // what has to fail cleanly.
+        for cut in [9, 16, 24, 32, png.len() - 1] {
+            let truncated = png[..cut].to_vec();
+            let result = Image::from_stream(std::io::Cursor::new(truncated))
+                .and_then(|i| i.output(Format::Raw, EncodeOptions::default()).bytes());
+            assert!(result.is_err(), "truncating to {cut} bytes should fail");
+        }
+    }
+
+    #[cfg(feature = "png")]
+    #[test]
+    fn sniffing_reads_only_the_magic_bytes_before_deciding() {
+        // A stream that is exactly the signature and nothing else must be
+        // recognised as PNG and then fail on its missing header, proving the
+        // sniff does not need — or read — more than the magic.
+        let error = Image::from_stream(std::io::Cursor::new(
+            otf_pixels_codec_png::SIGNATURE.to_vec(),
+        ))
+        .unwrap_err();
+        assert_eq!(error.code(), ErrorCode::Malformed, "{error}");
     }
 }
