@@ -34,7 +34,7 @@
 //! to accept, which for PNG is exactly the filtered raster size derived from
 //! the header (SPEC §Safety).
 
-use otf_pixels_core::{PixelsError, Result};
+use crate::{Error, Result};
 
 use crate::checksum::Adler32;
 
@@ -53,11 +53,11 @@ enum Halt {
     /// The input ran out mid-item; the reader has been rewound.
     NeedInput,
     /// The stream is invalid and no amount of further input will help.
-    Fatal(PixelsError),
+    Fatal(Error),
 }
 
-impl From<PixelsError> for Halt {
-    fn from(error: PixelsError) -> Self {
+impl From<Error> for Halt {
+    fn from(error: Error) -> Self {
         Self::Fatal(error)
     }
 }
@@ -238,8 +238,8 @@ impl BitReader {
 }
 
 /// The error for a stream that ended mid-symbol.
-fn truncated() -> PixelsError {
-    PixelsError::malformed("deflate", "stream ended in the middle of a symbol")
+fn truncated() -> Error {
+    Error::malformed("deflate", "stream ended in the middle of a symbol")
 }
 
 /// The maximum code length DEFLATE permits.
@@ -265,7 +265,7 @@ impl Huffman {
         for &length in lengths {
             let length = length as usize;
             if length > MAX_BITS {
-                return Err(PixelsError::malformed(
+                return Err(Error::malformed(
                     "deflate",
                     format!("code length {length} exceeds the {MAX_BITS}-bit maximum"),
                 ));
@@ -285,7 +285,7 @@ impl Huffman {
             left <<= 1;
             left -= i32::from(counts.get(length).copied().unwrap_or(0));
             if left < 0 {
-                return Err(PixelsError::malformed(
+                return Err(Error::malformed(
                     "deflate",
                     "Huffman table is over-subscribed",
                 ));
@@ -346,14 +346,14 @@ impl Huffman {
                 reader.skip(length as u32)?;
                 let position = (index + (code - first)) as usize;
                 return self.symbols.get(position).copied().ok_or_else(|| {
-                    Halt::Fatal(PixelsError::malformed("deflate", "invalid Huffman symbol"))
+                    Halt::Fatal(Error::malformed("deflate", "invalid Huffman symbol"))
                 });
             }
             index += count;
             first = (first + count) << 1;
             code <<= 1;
         }
-        Err(Halt::Fatal(PixelsError::malformed(
+        Err(Halt::Fatal(Error::malformed(
             "deflate",
             "no Huffman code matched within 15 bits",
         )))
@@ -511,7 +511,7 @@ impl Inflater {
     ///
     /// # Errors
     ///
-    /// Returns [`PixelsError::Malformed`] for an invalid stream, for output
+    /// Returns [`Error`] for an invalid stream, for output
     /// exceeding the limit, or for a stream that ended mid-symbol after
     /// [`Inflater::end_of_input`].
     pub fn decode(&mut self) -> Result<()> {
@@ -547,7 +547,7 @@ impl Inflater {
                         let length = self.reader.take(16)? as usize;
                         let complement = self.reader.take(16)? as usize;
                         if length ^ 0xFFFF != complement {
-                            return Err(Halt::Fatal(PixelsError::malformed(
+                            return Err(Halt::Fatal(Error::malformed(
                                 "deflate",
                                 "stored block length does not match its complement",
                             )));
@@ -572,7 +572,7 @@ impl Inflater {
                         }
                     }
                     _ => {
-                        return Err(Halt::Fatal(PixelsError::malformed(
+                        return Err(Halt::Fatal(Error::malformed(
                             "deflate",
                             "reserved block type 3",
                         )));
@@ -641,7 +641,7 @@ impl Inflater {
             257..=285 => {
                 let index = symbol as usize - 257;
                 let base = LENGTH_BASE.get(index).copied().ok_or_else(|| {
-                    Halt::Fatal(PixelsError::malformed("deflate", "invalid length code"))
+                    Halt::Fatal(Error::malformed("deflate", "invalid length code"))
                 })?;
                 let extra = LENGTH_EXTRA.get(index).copied().unwrap_or(0);
                 let length = base as usize + self.reader.take(u32::from(extra))? as usize;
@@ -649,7 +649,7 @@ impl Inflater {
                 let distance_symbol = distances.decode(&mut self.reader)? as usize;
                 let distance_base =
                     DISTANCE_BASE.get(distance_symbol).copied().ok_or_else(|| {
-                        Halt::Fatal(PixelsError::malformed("deflate", "invalid distance code"))
+                        Halt::Fatal(Error::malformed("deflate", "invalid distance code"))
                     })?;
                 let distance_extra = DISTANCE_EXTRA.get(distance_symbol).copied().unwrap_or(0);
                 let distance =
@@ -661,7 +661,7 @@ impl Inflater {
                 // retained window rather than total output is what makes it
                 // still correct once old output has been drained away.
                 if distance == 0 || distance > self.window.len() {
-                    return Err(Halt::Fatal(PixelsError::malformed(
+                    return Err(Halt::Fatal(Error::malformed(
                         "deflate",
                         format!(
                             "back-reference of distance {distance} points before the start of \
@@ -678,7 +678,7 @@ impl Inflater {
                 let start = self.window.len() - distance;
                 for offset in 0..length {
                     let byte = self.window.get(start + offset).copied().ok_or_else(|| {
-                        Halt::Fatal(PixelsError::malformed(
+                        Halt::Fatal(Error::malformed(
                             "deflate",
                             "back-reference read out of range",
                         ))
@@ -688,7 +688,7 @@ impl Inflater {
                 self.produced += length;
             }
             _ => {
-                return Err(Halt::Fatal(PixelsError::malformed(
+                return Err(Halt::Fatal(Error::malformed(
                     "deflate",
                     format!("literal/length symbol {symbol} is out of range"),
                 )));
@@ -700,7 +700,7 @@ impl Inflater {
     /// Reject output that would exceed the limit.
     fn check_limit(&self, adding: usize) -> Step<()> {
         if self.produced.saturating_add(adding) > self.limit {
-            return Err(Halt::Fatal(PixelsError::malformed(
+            return Err(Halt::Fatal(Error::malformed(
                 "deflate",
                 format!(
                     "stream expands beyond the {} byte limit implied by the image header",
@@ -718,7 +718,7 @@ fn read_dynamic_tables(reader: &mut BitReader) -> Step<(Huffman, Huffman)> {
     let distance_count = reader.take(5)? as usize + 1;
     let code_length_count = reader.take(4)? as usize + 4;
     if literal_count > 288 || distance_count > 30 {
-        return Err(Halt::Fatal(PixelsError::malformed(
+        return Err(Halt::Fatal(Error::malformed(
             "deflate",
             "dynamic block declares too many codes",
         )));
@@ -755,7 +755,7 @@ fn read_dynamic_tables(reader: &mut BitReader) -> Step<(Huffman, Huffman)> {
                     .checked_sub(1)
                     .and_then(|i| lengths.get(i).copied())
                     .ok_or_else(|| {
-                        Halt::Fatal(PixelsError::malformed(
+                        Halt::Fatal(Error::malformed(
                             "deflate",
                             "repeat code with no previous length",
                         ))
@@ -772,7 +772,7 @@ fn read_dynamic_tables(reader: &mut BitReader) -> Step<(Huffman, Huffman)> {
                 fill(&mut lengths, &mut index, 0, repeat, total)?;
             }
             _ => {
-                return Err(Halt::Fatal(PixelsError::malformed(
+                return Err(Halt::Fatal(Error::malformed(
                     "deflate",
                     "invalid code length symbol",
                 )));
@@ -789,7 +789,7 @@ fn read_dynamic_tables(reader: &mut BitReader) -> Step<(Huffman, Huffman)> {
 /// Write `value` into `lengths` `repeat` times, refusing to overrun.
 fn fill(lengths: &mut [u8], index: &mut usize, value: u8, repeat: usize, total: usize) -> Step<()> {
     if *index + repeat > total {
-        return Err(Halt::Fatal(PixelsError::malformed(
+        return Err(Halt::Fatal(Error::malformed(
             "deflate",
             "code length repeat runs past the end of the table",
         )));
@@ -810,7 +810,7 @@ fn fill(lengths: &mut [u8], index: &mut usize, value: u8, repeat: usize, total: 
 ///
 /// # Errors
 ///
-/// Returns [`PixelsError::Malformed`] for any invalid or truncated stream, and
+/// Returns [`Error`] for any invalid or truncated stream, and
 /// for output exceeding `limit` — a decompression bomb is malformed input, not
 /// a resource the caller must survive.
 pub fn inflate_to(data: &[u8], limit: usize) -> Result<Vec<u8>> {
@@ -856,7 +856,7 @@ impl ZlibStream {
     ///
     /// # Errors
     ///
-    /// Returns [`PixelsError::Malformed`] for a bad header, an unsupported
+    /// Returns [`Error`] for a bad header, an unsupported
     /// compression method, or any DEFLATE error.
     pub fn push(&mut self, mut data: &[u8]) -> Result<Vec<u8>> {
         // The two-byte header must be complete before anything else happens,
@@ -905,7 +905,7 @@ impl ZlibStream {
     ///
     /// # Errors
     ///
-    /// Returns [`PixelsError::Malformed`] if the stream ended mid-symbol, if
+    /// Returns [`Error`] if the stream ended mid-symbol, if
     /// the trailer is missing, or if the Adler-32 does not match.
     pub fn finish(&mut self) -> Result<Vec<u8>> {
         if self.ended {
@@ -913,7 +913,7 @@ impl ZlibStream {
         }
         self.ended = true;
         if self.header.len() < 2 {
-            return Err(PixelsError::malformed(
+            return Err(Error::malformed(
                 "zlib",
                 "stream is shorter than its 2-byte header",
             ));
@@ -929,7 +929,7 @@ impl ZlibStream {
         self.collect_trailer(&leftover);
 
         if self.trailer.len() < 4 {
-            return Err(PixelsError::malformed(
+            return Err(Error::malformed(
                 "zlib",
                 "stream is missing its Adler-32 trailer",
             ));
@@ -942,7 +942,7 @@ impl ZlibStream {
         ]);
         let actual = self.adler.finish();
         if actual != expected {
-            return Err(PixelsError::malformed(
+            return Err(Error::malformed(
                 "zlib",
                 format!(
                     "Adler-32 mismatch: stream declares {expected:#010x}, data is {actual:#010x}"
@@ -958,28 +958,25 @@ fn validate_zlib_header(header: &[u8]) -> Result<()> {
     let (&cmf, &flg) = match (header.first(), header.get(1)) {
         (Some(cmf), Some(flg)) => (cmf, flg),
         _ => {
-            return Err(PixelsError::malformed(
+            return Err(Error::malformed(
                 "zlib",
                 "stream is shorter than its 2-byte header",
             ));
         }
     };
     if cmf & 0x0F != 8 {
-        return Err(PixelsError::malformed(
+        return Err(Error::malformed(
             "zlib",
             format!("compression method {} is not deflate", cmf & 0x0F),
         ));
     }
     if (u16::from(cmf) << 8 | u16::from(flg)) % 31 != 0 {
-        return Err(PixelsError::malformed(
-            "zlib",
-            "header check bits are wrong",
-        ));
+        return Err(Error::malformed("zlib", "header check bits are wrong"));
     }
     if flg & 0x20 != 0 {
         // A preset dictionary would change what the back-references mean, and
         // PNG forbids it (PNG spec §10.3).
-        return Err(PixelsError::malformed(
+        return Err(Error::malformed(
             "zlib",
             "preset dictionaries are not supported",
         ));
@@ -991,7 +988,7 @@ fn validate_zlib_header(header: &[u8]) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Returns [`PixelsError::Malformed`] for a bad header, an unsupported
+/// Returns [`Error`] for a bad header, an unsupported
 /// compression method, a checksum mismatch, or any DEFLATE error.
 pub fn zlib_decompress(data: &[u8], limit: usize) -> Result<Vec<u8>> {
     let mut stream = ZlibStream::new(limit);
@@ -1102,7 +1099,7 @@ mod tests {
         //
         // BFINAL=1, BTYPE=01, symbol 257 (7-bit code 0000001), distance code 0.
         let err = inflate_to(&[0x03, 0x02], 1024).unwrap_err();
-        assert_eq!(err.code(), otf_pixels_core::ErrorCode::Malformed);
+        assert_eq!(err.format(), "deflate", "{err}");
         assert!(err.to_string().contains("back-reference"), "{err}");
     }
 
@@ -1111,7 +1108,7 @@ mod tests {
         // A decompression bomb: 65535 zero bytes from a tiny stored block.
         let bomb = stored_stream(&vec![0_u8; 65535]);
         let err = inflate_to(&bomb, 1024).unwrap_err();
-        assert_eq!(err.code(), otf_pixels_core::ErrorCode::Malformed);
+        assert_eq!(err.format(), "deflate", "{err}");
         assert!(err.to_string().contains("limit"), "{err}");
         // The same stream within a generous limit is fine.
         assert_eq!(inflate_to(&bomb, 65535).unwrap().len(), 65535);
@@ -1289,11 +1286,7 @@ mod tests {
         let mut inflater = Inflater::new(1024);
         inflater.feed(&stream);
         let error = inflater.decode().unwrap_err();
-        assert_eq!(
-            error.code(),
-            otf_pixels_core::ErrorCode::Malformed,
-            "{error}"
-        );
+        assert_eq!(error.format(), "deflate", "{error}");
         assert!(
             inflater.produced() <= 1024,
             "produced {} bytes",

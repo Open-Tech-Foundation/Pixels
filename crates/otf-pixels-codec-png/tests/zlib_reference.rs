@@ -117,7 +117,7 @@ fn the_output_limit_is_enforced_against_real_streams() {
     // A genuine 5000-byte expansion refused at 4999 is the decompression-bomb
     // guard doing its job on a real stream rather than a synthetic one.
     let err = zlib_decompress(&fixture("long_zero_run"), 4999).unwrap_err();
-    assert_eq!(err.code(), otf_pixels_core::ErrorCode::Malformed);
+    assert_eq!(err.format(), "deflate", "{err}");
     assert!(zlib_decompress(&fixture("long_zero_run"), 5000).is_ok());
 }
 

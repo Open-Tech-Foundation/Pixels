@@ -1,6 +1,6 @@
 [package]
-name = "otf-pixels-codec-png"
-description = "PNG codec for otf-pixels, implemented from scratch including DEFLATE."
+name = "otf-pixels-compress"
+description = "Compression and checksum primitives for otf-pixels codecs."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,9 +10,9 @@ authors.workspace = true
 categories.workspace = true
 keywords.workspace = true
 
+# Deliberately no dependency on otf-pixels-core: this crate knows about bit
+# streams and byte buffers, not about images (ADR-0012).
 [dependencies]
-otf-pixels-core.workspace = true
-otf-pixels-compress.workspace = true
 
 [lints]
 workspace = true

@@ -262,9 +262,5 @@ fn a_decompression_bomb_is_bounded_not_allocated() {
     );
 
     let error = zlib_decompress(&bomb, 1 << 20).unwrap_err();
-    assert_eq!(
-        error.code(),
-        otf_pixels_core::ErrorCode::Malformed,
-        "{error}"
-    );
+    assert_eq!(error.format(), "deflate", "{error}");
 }

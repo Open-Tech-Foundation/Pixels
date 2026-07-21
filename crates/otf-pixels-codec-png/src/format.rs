@@ -6,7 +6,7 @@
 
 use otf_pixels_core::{ImageDescriptor, Limits, PixelFormat, PixelsError, Result, Source};
 
-use crate::checksum::Crc32;
+use otf_pixels_compress::Crc32;
 
 /// The eight-byte PNG signature (§5.2).
 ///

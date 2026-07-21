@@ -17,7 +17,7 @@
 //! boundary makes a later dynamic-table implementation a drop-in, exactly as
 //! ADR-0004 makes whole codecs swappable.
 
-use otf_pixels_core::{PixelsError, Result};
+use crate::{Error, Result};
 
 use crate::checksum::Adler32;
 
@@ -39,10 +39,10 @@ impl Level {
     ///
     /// # Errors
     ///
-    /// Returns [`PixelsError::InvalidArgument`] outside 0..=9.
+    /// Returns [`Error`] outside 0..=9.
     pub fn new(level: u8) -> Result<Self> {
         if level > 9 {
-            return Err(PixelsError::invalid_argument(
+            return Err(Error::malformed(
                 "level",
                 format!("compression level must be 0..=9, got {level}"),
             ));
@@ -200,7 +200,7 @@ fn hash3(data: &[u8], at: usize) -> usize {
 ///
 /// # Errors
 ///
-/// Returns [`PixelsError::Graph`] only if an internal invariant is violated;
+/// Returns [`Error`] only if an internal invariant is violated;
 /// compression itself cannot fail on valid input.
 pub fn deflate(data: &[u8], level: Level) -> Result<Vec<u8>> {
     if level == Level::NONE {
@@ -249,15 +249,17 @@ pub fn deflate(data: &[u8], level: Level) -> Result<Vec<u8>> {
         }
 
         if best_length >= MIN_MATCH {
-            let (code, extra, extra_bits) = length_code(best_length)
-                .ok_or_else(|| PixelsError::graph("no length code for a computed match"))?;
+            let (code, extra, extra_bits) = length_code(best_length).ok_or_else(|| {
+                Error::malformed("deflate", "no length code for a computed match")
+            })?;
             let (literal_code, literal_bits) = fixed_literal_code(code);
             writer.write_code(literal_code, literal_bits);
             if extra_bits > 0 {
                 writer.write(extra, extra_bits);
             }
-            let (dcode, dextra, dextra_bits) = distance_code(best_distance)
-                .ok_or_else(|| PixelsError::graph("no distance code for a computed match"))?;
+            let (dcode, dextra, dextra_bits) = distance_code(best_distance).ok_or_else(|| {
+                Error::malformed("deflate", "no distance code for a computed match")
+            })?;
             // Distance codes use a fixed 5-bit code in fixed-Huffman blocks.
             writer.write_code(u32::from(dcode), 5);
             if dextra_bits > 0 {
@@ -487,7 +489,7 @@ mod tests {
         assert!(Level::new(0).is_ok());
         assert!(Level::new(9).is_ok());
         let err = Level::new(10).unwrap_err();
-        assert_eq!(err.code(), otf_pixels_core::ErrorCode::InvalidArgument);
+        assert!(err.detail().contains("0..=9"), "{err}");
         assert_eq!(Level::default(), Level::DEFAULT);
         assert_eq!(Level::DEFAULT.get(), 6);
     }

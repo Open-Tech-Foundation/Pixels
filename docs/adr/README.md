@@ -23,6 +23,7 @@ than silent divergence — this replaces the previous DECISIONS.md practice.
 | [0009](0009-scheduler-inserted-materialization.md) | Scheduler-inserted materialization at order-incompatible seams | Accepted |
 | [0010](0010-own-inflate-and-deflate.md) | Own inflate and deflate | Accepted |
 | [0011](0011-autovectorization-and-fixed-point.md) | SIMD by autovectorization; fixed-point arithmetic at 8 bits | Accepted |
+| [0012](0012-extract-compression-crate.md) | Extract `otf-pixels-compress` | Accepted |
 
 Deferred (no ADR yet, decide when reached): tile cache eviction policy
 details, fusion pass design, ICC pipeline, error taxonomy granularity.

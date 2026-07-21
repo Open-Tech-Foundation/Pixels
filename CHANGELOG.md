@@ -35,6 +35,13 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Added
+- ADR-0012 (extract `otf-pixels-compress`), executing the "move on a third
+  consumer" clause ADR-0010 wrote for exactly this moment.
+- `otf-pixels-compress`: inflate, deflate, zlib, `Crc32` and `Adler32` moved
+  from `otf-pixels-codec-png` (which re-exports them, so nothing downstream
+  changes), plus LZW in both the GIF and TIFF dialects — one implementation
+  parameterized by bit order, since the two specifications differ in framing
+  and not in substance.
 - ADR-0011 (SIMD by autovectorization; fixed-point arithmetic at 8 bits).
 - `otf-pixels`: `resize`, `thumbnail`, `rotate`, `modulate`, `convolve`,
   `blur`, `sharpen`, `extract_channel`, `flatten` and `composite` on the

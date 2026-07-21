@@ -19,8 +19,8 @@ use otf_pixels_core::{
     EncodeOptions, Encoder, ImageDescriptor, PixelFormat, PixelsError, Result, Sink,
 };
 
-use crate::deflate::{Level, zlib_compress};
 use crate::format::{ColorType, Filter, SIGNATURE, apply_filter, write_chunk};
+use otf_pixels_compress::{Level, zlib_compress};
 
 /// Encodes a PNG stream.
 #[derive(Debug)]
@@ -251,7 +251,8 @@ impl Encoder for PngEncoder {
             ));
         }
 
-        let compressed = zlib_compress(&state.filtered, self.level)?;
+        let compressed =
+            zlib_compress(&state.filtered, self.level).map_err(crate::compress_error)?;
         let mut chunk = Vec::with_capacity(compressed.len() + 12);
         write_chunk(&mut chunk, b"IDAT", &compressed);
         write_chunk(&mut chunk, b"IEND", &[]);

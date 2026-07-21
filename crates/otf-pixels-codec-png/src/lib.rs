@@ -9,16 +9,29 @@
 //! failure — an out-of-bounds write through a back-reference — is
 //! unrepresentable rather than merely avoided.
 
-mod checksum;
 mod decoder;
-mod deflate;
 mod encoder;
 mod format;
-mod inflate;
 
-pub use checksum::{Adler32, Crc32};
 pub use decoder::{PngCodec, PngDecoder, probe};
-pub use deflate::{Level, deflate, zlib_compress};
 pub use encoder::PngEncoder;
 pub use format::{ColorType, Filter, Header, SIGNATURE};
-pub use inflate::{Inflater, ZlibStream, inflate_to, zlib_decompress};
+
+// Re-exported rather than defined here: ADR-0012 moved the compression
+// primitives to `otf-pixels-compress` once TIFF and GIF became consumers of
+// them. They stay in this crate's public surface so nothing downstream breaks.
+pub use otf_pixels_compress::{
+    Adler32, Crc32, Inflater, Level, ZlibStream, deflate, inflate_to, zlib_compress,
+    zlib_decompress,
+};
+
+/// Translate a compression failure into this crate's error type.
+///
+/// `otf-pixels-compress` deliberately does not depend on `otf-pixels-core`
+/// (ADR-0012), so the mapping to a stable [`ErrorCode`] lives here, where the
+/// format context is known.
+///
+/// [`ErrorCode`]: otf_pixels_core::ErrorCode
+pub(crate) fn compress_error(error: otf_pixels_compress::Error) -> otf_pixels_core::PixelsError {
+    otf_pixels_core::PixelsError::malformed(error.format(), error.detail().to_owned())
+}

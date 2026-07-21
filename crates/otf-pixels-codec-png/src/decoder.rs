@@ -28,7 +28,7 @@ use crate::format::{
     ChunkReader, ChunkStream, ColorType, Filter, Header, SIGNATURE, adam7_pass_size,
     adam7_position, unfilter,
 };
-use crate::inflate::{ZlibStream, zlib_decompress};
+use otf_pixels_compress::{ZlibStream, zlib_decompress};
 
 /// The specification's cap on a `PLTE` chunk: 256 entries of three bytes.
 const MAX_PLTE: usize = 256 * 3;
@@ -290,7 +290,8 @@ impl<S: Source> PngDecoder<S> {
 
         // The limit is the exact filtered size the header implies, which is
         // what makes a decompression bomb a malformed-input error.
-        let filtered = zlib_decompress(&compressed, self.header.filtered_size())?;
+        let filtered = zlib_decompress(&compressed, self.header.filtered_size())
+            .map_err(crate::compress_error)?;
         let samples = self.unfilter_all(&filtered)?;
         self.expand(&samples, palette.as_deref(), transparency.as_ref())
     }
@@ -496,7 +497,7 @@ impl<S: Source> Streaming<S> {
                             self.chunks.skip_payload()?;
                             self.chunks.close()?;
                             self.input_done = true;
-                            let tail = self.zlib.finish()?;
+                            let tail = self.zlib.finish().map_err(crate::compress_error)?;
                             self.filtered.extend_from_slice(&tail);
                             return Ok(!tail.is_empty());
                         }
@@ -518,7 +519,10 @@ impl<S: Source> Streaming<S> {
             if read == 0 {
                 continue;
             }
-            let produced = self.zlib.push(buffer.get(..read).unwrap_or(&[]))?;
+            let produced = self
+                .zlib
+                .push(buffer.get(..read).unwrap_or(&[]))
+                .map_err(crate::compress_error)?;
             if !produced.is_empty() {
                 self.filtered.extend_from_slice(&produced);
                 return Ok(true);
