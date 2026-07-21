@@ -92,6 +92,12 @@ impl Composite {
 }
 
 impl Op for Composite {
+    /// Never rescaled, for two independent reasons: the overlay position is in
+    /// pixels, and the second input is a separate image that would not be
+    /// reduced alongside the first.
+    fn rescaled(&self) -> Option<std::sync::Arc<dyn Op>> {
+        None
+    }
     fn name(&self) -> &'static str {
         "composite"
     }

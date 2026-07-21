@@ -79,6 +79,13 @@ impl Crop {
 }
 
 impl Op for Crop {
+    /// Never rescaled, and the most important of the exclusions: a crop
+    /// window is given in input pixels. `crop(1000, 1000, 100, 100)` against a
+    /// source decoded eight times smaller would return a different part of the
+    /// picture — correctly shaped, and the wrong content.
+    fn rescaled(&self) -> Option<std::sync::Arc<dyn Op>> {
+        None
+    }
     fn name(&self) -> &'static str {
         "crop"
     }
@@ -167,6 +174,11 @@ impl Op for Crop {
 pub struct Flip;
 
 impl Op for Flip {
+    /// A mirror permutes pixels and carries no length, so it means the same
+    /// thing at any resolution.
+    fn rescaled(&self) -> Option<std::sync::Arc<dyn Op>> {
+        Some(std::sync::Arc::new(Self))
+    }
     fn name(&self) -> &'static str {
         "flip"
     }
@@ -231,6 +243,10 @@ impl Op for Flip {
 pub struct Flop;
 
 impl Op for Flop {
+    /// As [`Flip`]: a permutation with no length in it.
+    fn rescaled(&self) -> Option<std::sync::Arc<dyn Op>> {
+        Some(std::sync::Arc::new(Self))
+    }
     fn name(&self) -> &'static str {
         "flop"
     }

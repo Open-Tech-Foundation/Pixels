@@ -237,6 +237,14 @@ impl Convolve {
 }
 
 impl Op for Convolve {
+    /// Never rescaled. The kernel is measured in pixels, so the same 3x3 blur
+    /// over a source decoded eight times smaller is eight times the blur
+    /// relative to image content. The output would be the right size and the
+    /// wrong picture, which is exactly the failure the conservative default
+    /// exists to prevent.
+    fn rescaled(&self) -> Option<std::sync::Arc<dyn Op>> {
+        None
+    }
     fn name(&self) -> &'static str {
         "convolve"
     }

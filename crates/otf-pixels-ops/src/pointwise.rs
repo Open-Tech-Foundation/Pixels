@@ -158,6 +158,12 @@ fn modulate_rgb(m: &Modulate, r: f32, g: f32, b: f32) -> (f32, f32, f32) {
 }
 
 impl Op for Modulate {
+    /// Pointwise: every output pixel depends on the one input pixel beneath
+    /// it, with no length or coordinate anywhere, so resolution is irrelevant
+    /// to what this op means, and there is no bound state to discard.
+    fn rescaled(&self) -> Option<std::sync::Arc<dyn Op>> {
+        Some(std::sync::Arc::new(*self))
+    }
     fn name(&self) -> &'static str {
         "modulate"
     }
@@ -369,6 +375,12 @@ impl ExtractChannel {
 }
 
 impl Op for ExtractChannel {
+    /// Pointwise: every output pixel depends on the one input pixel beneath
+    /// it, with no length or coordinate anywhere, so resolution is irrelevant
+    /// to what this op means, and there is no bound state to discard.
+    fn rescaled(&self) -> Option<std::sync::Arc<dyn Op>> {
+        Some(std::sync::Arc::new(*self))
+    }
     fn name(&self) -> &'static str {
         "extract_channel"
     }
@@ -462,6 +474,12 @@ impl Flatten {
 }
 
 impl Op for Flatten {
+    /// Pointwise: every output pixel depends on the one input pixel beneath
+    /// it, with no length or coordinate anywhere, so resolution is irrelevant
+    /// to what this op means, and there is no bound state to discard.
+    fn rescaled(&self) -> Option<std::sync::Arc<dyn Op>> {
+        Some(std::sync::Arc::new(*self))
+    }
     fn name(&self) -> &'static str {
         "flatten"
     }

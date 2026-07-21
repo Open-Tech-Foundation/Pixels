@@ -87,6 +87,35 @@ pub trait Op: Send + Sync + fmt::Debug {
     /// [`PixelsError::Unsupported`]: crate::PixelsError::Unsupported
     fn output_descriptor(&self, inputs: &[ImageDescriptor]) -> Result<ImageDescriptor>;
 
+    /// A copy of this op fit for a graph rebuilt at a **reduced input
+    /// resolution**, or `None` if this op must not be.
+    ///
+    /// This is what licenses shrink-on-load: a JPEG can be decoded at 1/8 and
+    /// fed to `resize` with the same result. Returning `Some` asserts two
+    /// separate things, which is why they are one method — an op that got only
+    /// the first right would be silently wrong:
+    ///
+    /// 1. **The op means the same thing** against a smaller input. Three kinds
+    ///    do not, and all three still produce a correctly-shaped image:
+    ///    ops carrying coordinates in input pixels (`crop(1000, 1000, ..)`
+    ///    names a different part of a source eight times smaller), ops
+    ///    carrying a distance in input pixels (a 3x3 convolution over a 1/8
+    ///    decode is eight times the blur relative to content), and ops whose
+    ///    second input is a separate image that would not be reduced with it.
+    /// 2. **The returned instance carries no state bound to the old input.**
+    ///    Ops may memoize tables keyed to the shape they first saw — `resize`
+    ///    builds its filter weights that way — and reusing such an instance
+    ///    against a new shape is at best an error and at worst a resample
+    ///    against the wrong scale.
+    ///
+    /// The default is `None`, so an op is presumed unsafe until it says
+    /// otherwise. Declaring it wrongly does not corrupt memory or change the
+    /// output *shape*; it silently changes the picture, which is worse, so the
+    /// conservative default is the right one.
+    fn rescaled(&self) -> Option<std::sync::Arc<dyn Op>> {
+        None
+    }
+
     /// The input regions needed to produce `output`.
     ///
     /// This is the inverse mapping that demand propagation walks backwards
@@ -179,4 +208,43 @@ pub trait Producer: Send + Sync + fmt::Debug {
     /// [`PixelsError::Io`]: crate::PixelsError::Io
     /// [`PixelsError::InvalidArgument`]: crate::PixelsError::InvalidArgument
     fn produce(&self, region: Region, output: &mut TileMut<'_>) -> Result<()>;
+
+    /// What this producer would emit if asked for `target` or larger, when it
+    /// can reach that size more cheaply than by producing full resolution.
+    ///
+    /// **Pure**: nothing is committed, and calling this must not change what
+    /// the producer subsequently emits. The planner asks first, checks the
+    /// whole graph still holds, and only then calls [`Producer::reduce_to`] —
+    /// so a producer that reduced itself here would corrupt pipelines the
+    /// planner went on to reject.
+    ///
+    /// The returned descriptor is never smaller than `target` in either axis:
+    /// decoding below the requested size and enlarging afterwards would
+    /// discard detail and then invent it back.
+    ///
+    /// `None` — the default — means this producer has only one resolution.
+    fn reduced_descriptor(&self, target: (u32, u32)) -> Option<ImageDescriptor> {
+        let _ = target;
+        None
+    }
+
+    /// Commit to emitting `descriptor`, which [`Producer::reduced_descriptor`]
+    /// must have returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::Unsupported`] if this producer cannot reduce, or
+    /// [`PixelsError::InvalidArgument`] if pixels have already been produced —
+    /// the resolution is fixed from the first [`Producer::produce`] onward,
+    /// because rows already emitted cannot be retracted.
+    ///
+    /// [`PixelsError::Unsupported`]: crate::PixelsError::Unsupported
+    /// [`PixelsError::InvalidArgument`]: crate::PixelsError::InvalidArgument
+    fn reduce_to(&self, descriptor: ImageDescriptor) -> Result<()> {
+        let _ = descriptor;
+        Err(crate::PixelsError::unsupported(format!(
+            "producer `{}` has only one resolution",
+            self.name()
+        )))
+    }
 }

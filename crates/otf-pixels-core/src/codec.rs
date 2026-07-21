@@ -216,6 +216,38 @@ pub trait Decoder: Send + fmt::Debug {
             "this decoder is sequential; region decode requires DecodeCapability::Regions",
         ))
     }
+
+    /// What this decoder would produce if asked for `target` or larger, when
+    /// the format lets it reach that size more cheaply than a full decode.
+    ///
+    /// JPEG is the motivating case — the low-frequency corner of a DCT block
+    /// is a smaller version of that block, so 1/8, 1/4 and 1/2 come almost
+    /// free — but nothing here is JPEG-specific: a pyramidal TIFF or a WebP
+    /// with scaled decode fits the same shape.
+    ///
+    /// **Pure**: nothing is committed. The planner asks before it knows
+    /// whether the reduction is legal for the pipeline as a whole.
+    ///
+    /// The returned descriptor is never smaller than `target` in either axis.
+    fn reduced_descriptor(&self, target: (u32, u32)) -> Option<ImageDescriptor> {
+        let _ = target;
+        None
+    }
+
+    /// Commit to producing `descriptor`, which
+    /// [`Decoder::reduced_descriptor`] must have returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::Unsupported`] if this decoder has one
+    /// resolution, or [`PixelsError::InvalidArgument`] if any row has already
+    /// been read — the resolution is fixed from the first row onward.
+    fn reduce_to(&mut self, descriptor: ImageDescriptor) -> Result<()> {
+        let _ = descriptor;
+        Err(PixelsError::unsupported(
+            "this decoder has only one resolution",
+        ))
+    }
 }
 
 /// Encodes rows of pixels into a byte stream.

@@ -91,6 +91,8 @@ pub struct JpegDecoder<S: Source> {
     mcu_row: u32,
     /// How much of full resolution this decode produces.
     scale: Scale,
+    /// Kept so a later re-scale can be re-checked against the same bounds.
+    limits: Limits,
     /// Output rows already served.
     row: u32,
 }
@@ -319,18 +321,77 @@ impl<S: Source> JpegDecoder<S> {
             ));
         }
 
-        // How many samples one block becomes: 8 at full resolution, fewer at a
-        // reduced scale. Every plane dimension below is in these units, which
-        // is the whole of what a scaled decode changes downstream.
-        let sample = scale.block_size();
         let mcus_per_line = full_width.div_ceil(h_max * 8);
         let mcu_rows = full_height.div_ceil(v_max * 8);
+
+        // Geometry is set up by `apply_scale`, which the planner may call
+        // again later: shrink-on-load decides the scale only once the whole
+        // pipeline is known, by which point this decoder already exists.
+        let mut decoder = Self {
+            reader,
+            descriptor,
+            predictors: vec![0; frame.components.len()],
+            frame,
+            scan,
+            colour,
+            quant,
+            dc_tables,
+            ac_tables,
+            restart_interval,
+            restarts_left: u32::from(restart_interval),
+            orientation,
+            limits,
+            planes: Vec::new(),
+            band: Vec::new(),
+            band_row: 0,
+            band_height: 0,
+            mcus_per_line,
+            mcu_rows,
+            mcu_row: 0,
+            scale: Scale::Full,
+            row: 0,
+        };
+        decoder.apply_scale(scale)?;
+        Ok(decoder)
+    }
+
+    /// Set the resolution this decoder will produce, rebuilding the geometry
+    /// that depends on it.
+    ///
+    /// Every plane dimension is in samples-per-block, so the scale is the only
+    /// thing the rest of the decoder has to know about.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::InvalidArgument`] if any row has already been
+    /// read — a scaled decode cannot start halfway — or
+    /// [`PixelsError::LimitExceeded`] if the scaled size is outside `limits`.
+    fn apply_scale(&mut self, scale: Scale) -> Result<()> {
+        if self.row > 0 || self.mcu_row > 0 {
+            return Err(PixelsError::invalid_argument(
+                "scale",
+                format!("{} rows have already been decoded", self.row),
+            ));
+        }
+        let full_width = u32::from(self.frame.width);
+        let full_height = u32::from(self.frame.height);
+        let (h_max, v_max) = (u32::from(self.frame.h_max()), u32::from(self.frame.v_max()));
+        let descriptor = ImageDescriptor::with_limits(
+            scale.apply(full_width),
+            scale.apply(full_height),
+            self.descriptor.pixel,
+            &self.limits,
+        )?;
+
+        // How many samples one block becomes: 8 at full resolution, fewer at a
+        // reduced scale.
+        let sample = scale.block_size();
         let band_height = v_max * sample;
 
-        let mut planes = Vec::with_capacity(frame.components.len());
-        for component in &frame.components {
+        let mut planes = Vec::with_capacity(self.frame.components.len());
+        for component in &self.frame.components {
             let (h, v) = (u32::from(component.h), u32::from(component.v));
-            let stride = usize::try_from(mcus_per_line * h * sample)
+            let stride = usize::try_from(self.mcus_per_line * h * sample)
                 .map_err(|_| PixelsError::malformed("jpeg", "component plane overflows"))?;
             let height = usize::try_from(v * sample).unwrap_or(32);
             let samples = stride
@@ -349,36 +410,20 @@ impl<S: Source> JpegDecoder<S> {
             });
         }
 
-        let row_bytes = descriptor.row_bytes();
-        let band = row_bytes
+        let band = descriptor
+            .row_bytes()
             .checked_mul(band_height as usize)
             .ok_or_else(|| PixelsError::malformed("jpeg", "MCU row band overflows"))?;
 
-        Ok(Self {
-            reader,
-            descriptor,
-            predictors: vec![0; frame.components.len()],
-            frame,
-            scan,
-            colour,
-            quant,
-            dc_tables,
-            ac_tables,
-            restart_interval,
-            restarts_left: u32::from(restart_interval),
-            orientation,
-            planes,
-            band: vec![0_u8; band],
-            // Nothing decoded yet, so the band is spent and the first
-            // `read_row` fills it.
-            band_row: band_height,
-            band_height,
-            mcus_per_line,
-            mcu_rows,
-            mcu_row: 0,
-            scale,
-            row: 0,
-        })
+        self.descriptor = descriptor;
+        self.planes = planes;
+        self.band = vec![0_u8; band];
+        // Nothing decoded yet, so the band is spent and the first `read_row`
+        // fills it.
+        self.band_row = band_height;
+        self.band_height = band_height;
+        self.scale = scale;
+        Ok(())
     }
 
     /// The resolution this decoder produces, as eighths of full size.
@@ -793,6 +838,46 @@ impl<S: Source + std::fmt::Debug> Decoder for JpegDecoder<S> {
 
     fn capability(&self) -> DecodeCapability {
         DecodeCapability::Sequential
+    }
+
+    fn reduced_descriptor(&self, target: (u32, u32)) -> Option<ImageDescriptor> {
+        // Past the first row the geometry is settled.
+        if self.row > 0 || self.mcu_row > 0 {
+            return None;
+        }
+        let full = (u32::from(self.frame.width), u32::from(self.frame.height));
+        let scale = Scale::fitting(full, target);
+        if scale == self.scale {
+            return None;
+        }
+        ImageDescriptor::new(
+            scale.apply(full.0),
+            scale.apply(full.1),
+            self.descriptor.pixel,
+        )
+        .ok()
+    }
+
+    fn reduce_to(&mut self, descriptor: ImageDescriptor) -> Result<()> {
+        let full = (u32::from(self.frame.width), u32::from(self.frame.height));
+        // The descriptor has to be one this decoder could have offered, not an
+        // arbitrary size: only the four M/8 scales are reachable without
+        // resampling, which is the caller's job and not ours.
+        let scale = Scale::ALL
+            .into_iter()
+            .find(|scale| {
+                scale.apply(full.0) == descriptor.width && scale.apply(full.1) == descriptor.height
+            })
+            .ok_or_else(|| {
+                PixelsError::invalid_argument(
+                    "descriptor",
+                    format!(
+                        "{}x{} is not an M/8 scale of {}x{}",
+                        descriptor.width, descriptor.height, full.0, full.1
+                    ),
+                )
+            })?;
+        self.apply_scale(scale)
     }
 
     fn read_row(&mut self, out: &mut [u8]) -> Result<()> {

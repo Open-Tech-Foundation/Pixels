@@ -126,6 +126,12 @@ impl Rotate {
 }
 
 impl Op for Rotate {
+    /// A rotation by a multiple of 90 degrees carries no length or
+    /// coordinate: it permutes pixels, so it means the same thing whatever
+    /// resolution they arrive at, and holds no state to discard.
+    fn rescaled(&self) -> Option<std::sync::Arc<dyn Op>> {
+        Some(std::sync::Arc::new(Self::new(self.quarter)))
+    }
     fn name(&self) -> &'static str {
         "rotate"
     }

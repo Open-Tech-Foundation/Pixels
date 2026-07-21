@@ -218,6 +218,15 @@ fn check_binding<'a>(bound: &'a Binding, input: &ImageDescriptor) -> Result<&'a 
 }
 
 impl Op for Resize {
+    /// Resize pins its own output size, so a smaller input reaches the same
+    /// answer with less work. This is the op shrink-on-load exists for.
+    ///
+    /// The clone drops the filter tables, which are bound to the input shape
+    /// they were first built for — reusing them against a reduced source is
+    /// exactly the resample-at-the-wrong-scale this guards against.
+    fn rescaled(&self) -> Option<std::sync::Arc<dyn Op>> {
+        Some(std::sync::Arc::new(self.clone()))
+    }
     fn name(&self) -> &'static str {
         "resize"
     }

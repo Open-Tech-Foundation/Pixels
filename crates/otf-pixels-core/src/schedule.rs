@@ -119,6 +119,22 @@ pub struct RunStats {
     /// This is the number the constant-memory guarantee is about: it must not
     /// grow with image height for a streaming pipeline.
     pub peak_bytes: u64,
+    /// The source resolution shrink-on-load lowered, if it did.
+    ///
+    /// `None` means the source decoded at full size — either because it has
+    /// one resolution, or because the pipeline was not eligible (see
+    /// [`shrink_on_load`]). Reported rather than left silent so a pipeline
+    /// that expected the fast path and did not get it can be diagnosed
+    /// instead of merely being slow.
+    ///
+    /// Filled in by whoever applied the rewrite. [`Scheduler::run`] does not
+    /// apply it: the rewrite has to happen *above* the choice of evaluator, or
+    /// the scheduler and the reference evaluator would be handed different
+    /// graphs and stop agreeing — and their agreement is the oracle the whole
+    /// engine is checked against (ROADMAP M2).
+    ///
+    /// [`shrink_on_load`]: crate::shrink_on_load
+    pub reduction: Option<crate::Reduction>,
 }
 
 /// A demand-driven, parallel tile evaluator.

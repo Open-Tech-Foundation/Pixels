@@ -7,6 +7,14 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- Any streaming decode resized to more than one tile column failed outright
+  with "source cannot rewind" — 512x512 to 300x300 on PNG or JPEG alike, while
+  512x512 to 32x32 worked, the boundary being one 128px tile. Consecutive
+  requests to a forward-only source *overlap* rather than abut, because each
+  output row of a resize needs input rows either side of it, and the retained
+  band was discarded wholesale instead of carrying those rows over. The
+  scheduler and the M1 reference evaluator now agree byte for byte across the
+  shapes that used to fail.
 - `DecodeCapability::Regions` no longer claims to cover scaled-decode JPEG. A
   reduced-scale decode still emits rows in order and still entropy-decodes
   every coefficient; it is a decoder configuration, not random access, and the
@@ -45,6 +53,23 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Added
+- Shrink-on-load: `shrink_on_load` rewrites a graph over a reduced source when
+  the whole pipeline permits it, so a JPEG thumbnail decodes at 1/8 rather
+  than at full size and then discards the pixels. The decision needs the
+  complete graph — `from_stream` runs before `.resize(200, 150)` is ever
+  called — so it is a rewrite pass rather than a decoder option, and it runs
+  above the choice of evaluator so the scheduler and the reference evaluator
+  keep agreeing.
+- `Op::rescaled` replaces the pair of decisions an op would otherwise have to
+  get right separately: whether it means the same thing against a smaller
+  input, *and* whether the instance it hands back carries state bound to the
+  old one. `resize` memoizes filter tables keyed to the shape it first saw, so
+  reusing the instance was a resample against the wrong scale waiting to
+  happen. `crop`, `convolve` and `composite` decline outright — coordinates
+  and kernel sizes are in input pixels.
+- `Output::write_with_stats` returns `RunStats`, including the reduction
+  shrink-on-load applied, so a pipeline that expected the fast path and did
+  not get it is diagnosable rather than merely slow.
 - `otf-pixels-codec-jpeg`: `JpegDecoder`, baseline JPEG from scratch — Huffman
   entropy decode, a fixed-point IDCT, every chroma subsampling, restart
   intervals, greyscale and RGB-labelled files, and EXIF orientation read (but

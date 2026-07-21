@@ -518,8 +518,25 @@ impl Output {
     ///
     /// Returns [`PixelsError::Unsupported`] if the format has no encoder in
     /// this build, and otherwise any error from the pipeline or the sink.
-    pub fn write(self, mut sink: impl Sink) -> Result<()> {
-        let image = self.image.graph()?.clone();
+    pub fn write(self, sink: impl Sink) -> Result<()> {
+        self.write_with_stats(sink).map(|_| ())
+    }
+
+    /// Stream to `sink`, reporting what the run did.
+    ///
+    /// The same work as [`Output::write`], with [`RunStats`] returned instead
+    /// of discarded. Use it to confirm a pipeline streamed rather than
+    /// materialized, or that a JPEG thumbnail took the shrink-on-load path:
+    /// `stats.reduction` is `None` when the source decoded at full size, which
+    /// is the difference between a fast thumbnail and a slow one.
+    ///
+    /// # Errors
+    ///
+    /// As [`Output::write`].
+    pub fn write_with_stats(self, mut sink: impl Sink) -> Result<RunStats> {
+        // Rewritten before an evaluator is chosen, so the scheduler and the
+        // reference evaluator are handed the same graph and keep agreeing.
+        let (image, reduction) = otf_pixels_core::shrink_on_load(self.image.graph()?)?;
         let descriptor = image.descriptor();
         let mut encoder = encoder_for(self.format, self.options)?;
         encoder.write_header(&descriptor, &mut sink)?;
@@ -527,11 +544,13 @@ impl Output {
         // The scheduler delivers tiles; an encoder wants whole rows in order.
         let scheduler = Scheduler::new(self.scheduler)?;
         let mut rows = RowAssembler::new(descriptor);
-        scheduler.run(&image, |region, tile| {
+        let mut stats = scheduler.run(&image, |region, tile| {
             rows.accept(region, tile, &mut |row| encoder.write_row(row, &mut sink))
         })?;
         rows.finish(&mut |row| encoder.write_row(row, &mut sink))?;
-        encoder.finish(&mut sink)
+        encoder.finish(&mut sink)?;
+        stats.reduction = reduction;
+        Ok(stats)
     }
 
     /// Run the pipeline through the **reference** evaluator instead of the
@@ -551,7 +570,10 @@ impl Output {
     ///
     /// As [`Output::bytes`].
     pub fn bytes_via_reference(self) -> Result<Vec<u8>> {
-        let image = self.image.graph()?.clone();
+        // The same rewrite the scheduled path applies. Without it the oracle
+        // would evaluate a different graph and the two would disagree wherever
+        // shrink-on-load fired — which would look like a scheduler bug.
+        let (image, _) = otf_pixels_core::shrink_on_load(self.image.graph()?)?;
         let descriptor = image.descriptor();
         let mut encoder = encoder_for(self.format, self.options)?;
         let mut sink = Vec::with_capacity(descriptor.byte_len().unwrap_or_default());
@@ -726,6 +748,7 @@ fn encoder_for(format: Format, options: EncodeOptions) -> Result<Box<dyn Encoder
 #[cfg(all(test, feature = "raw"))]
 #[allow(
     clippy::unwrap_used,
+    clippy::expect_used,
     clippy::indexing_slicing,
     clippy::panic,
     reason = "tests operate on known-good values and assert shapes directly"
@@ -871,6 +894,176 @@ mod tests {
             .max()
             .unwrap_or(0);
         assert!(worst <= 12, "worst sample differs by {worst}");
+    }
+
+    /// Overlapping band demand, which a resize always produces, must give the
+    /// same pixels through the scheduler as through the reference evaluator.
+    ///
+    /// This is the regression test for a bug that made every streaming decode
+    /// resized to more than one tile column fail outright: consecutive
+    /// requests to a forward-only source overlap by the resize filter's
+    /// support, and those rows are already past the stream cursor. Getting an
+    /// answer at all is half of it; the other half is that the rows carried
+    /// over from the retained band are the right ones, which only a comparison
+    /// against the oracle can show.
+    #[cfg(feature = "jpeg")]
+    #[test]
+    fn a_streaming_resize_matches_the_reference_evaluator() {
+        for &(width, height, target) in &[
+            (512_u32, 512_u32, 300_u32),
+            (512, 512, 256),
+            (256, 256, 200),
+            (320, 240, 129),
+            (64, 64, 16),
+        ] {
+            let source = jpeg_source(width, height);
+            let scheduled = Image::from_stream(std::io::Cursor::new(source.clone()))
+                .unwrap()
+                .resize(target, target)
+                .output(Format::Raw, EncodeOptions::default())
+                .bytes()
+                .unwrap_or_else(|e| panic!("{width}x{height} -> {target}: {e}"));
+            let reference = Image::from_stream(std::io::Cursor::new(source))
+                .unwrap()
+                .resize(target, target)
+                .output(Format::Raw, EncodeOptions::default())
+                .bytes_via_reference()
+                .unwrap();
+
+            assert_eq!(
+                scheduled.len(),
+                (target * target * 3) as usize,
+                "{width}x{height} -> {target}: size"
+            );
+            assert_eq!(
+                scheduled, reference,
+                "{width}x{height} -> {target}: the scheduler and the oracle disagree"
+            );
+        }
+    }
+
+    /// Shrink-on-load, end to end: a thumbnail pipeline must decode the JPEG
+    /// at a reduced scale rather than at full size and then throw it away.
+    #[cfg(feature = "jpeg")]
+    #[test]
+    fn a_thumbnail_pipeline_shrinks_the_jpeg_on_load() {
+        // 512x512 down to 32x32: 1/8 covers it exactly.
+        let source = jpeg_source(512, 512);
+
+        let image = Image::from_stream(std::io::Cursor::new(source)).unwrap();
+        assert_eq!(
+            image.metadata().unwrap().width,
+            512,
+            "metadata is full size"
+        );
+
+        // Evaluated once: a stream-backed graph cannot be run twice, because
+        // the bytes are gone the first time.
+        let mut bytes = Vec::new();
+        let stats = image
+            .resize(32, 32)
+            .output(Format::Raw, EncodeOptions::default())
+            .write_with_stats(&mut bytes)
+            .unwrap();
+
+        let reduction = stats
+            .reduction
+            .expect("a 512 to 32 resize should shrink the source on load");
+        assert_eq!(reduction.from, (512, 512));
+        assert_eq!(
+            reduction.to,
+            (64, 64),
+            "1/8 is the coarsest scale that still covers 32"
+        );
+        assert!((reduction.factor() - 64.0).abs() < 0.01);
+        // And the pixels are still there, at the size that was asked for.
+        assert_eq!(bytes.len(), 32 * 32 * 3);
+    }
+
+    /// A crop names coordinates in source pixels, so shrinking underneath it
+    /// would return a different part of the picture.
+    #[cfg(feature = "jpeg")]
+    #[test]
+    fn a_crop_blocks_shrink_on_load() {
+        let source = jpeg_source(512, 512);
+        let stats = Image::from_stream(std::io::Cursor::new(source))
+            .unwrap()
+            .crop(256, 256, 128, 128)
+            .resize(32, 32)
+            .output(Format::Raw, EncodeOptions::default())
+            .write_with_stats(&mut Vec::new())
+            .unwrap();
+        assert!(
+            stats.reduction.is_none(),
+            "a crop must block shrink-on-load: {:?}",
+            stats.reduction
+        );
+    }
+
+    /// Cropping *after* a resize is fine — the crop is then in the resized
+    /// image's coordinates, which the reduction does not move.
+    #[cfg(feature = "jpeg")]
+    #[test]
+    fn a_crop_after_the_resize_still_allows_shrinking() {
+        let source = jpeg_source(512, 512);
+        let stats = Image::from_stream(std::io::Cursor::new(source))
+            .unwrap()
+            .resize(64, 64)
+            .crop(0, 0, 32, 32)
+            .output(Format::Raw, EncodeOptions::default())
+            .write_with_stats(&mut Vec::new())
+            .unwrap();
+        // The crop is still not scale-covariant, so this conservatively does
+        // not fire. Recorded as the current behaviour rather than asserted as
+        // desirable: a crop below a resize could be allowed, and is not.
+        assert!(stats.reduction.is_none());
+    }
+
+    /// A JPEG whose pipeline only resizes a little must not be shrunk past
+    /// what it needs.
+    #[cfg(feature = "jpeg")]
+    #[test]
+    fn a_mild_resize_shrinks_by_less_or_not_at_all() {
+        let source = jpeg_source(512, 512);
+        // 300 needs more than half of 512, so no scale fits.
+        let stats = Image::from_stream(std::io::Cursor::new(source.clone()))
+            .unwrap()
+            .resize(300, 300)
+            .output(Format::Raw, EncodeOptions::default())
+            .write_with_stats(&mut Vec::new())
+            .unwrap();
+        assert!(stats.reduction.is_none(), "{:?}", stats.reduction);
+
+        // 200 fits inside 1/2 (256) but not 1/4 (128).
+        let stats = Image::from_stream(std::io::Cursor::new(source))
+            .unwrap()
+            .resize(200, 200)
+            .output(Format::Raw, EncodeOptions::default())
+            .write_with_stats(&mut Vec::new())
+            .unwrap();
+        assert_eq!(stats.reduction.map(|r| r.to), Some((256, 256)));
+    }
+
+    /// A JPEG of `size` square, as bytes.
+    #[cfg(feature = "jpeg")]
+    fn jpeg_source(width: u32, height: u32) -> Vec<u8> {
+        let descriptor = ImageDescriptor::new(width, height, PixelFormat::Rgb8).unwrap();
+        let pixels: Vec<u8> = (0..descriptor.byte_len().unwrap())
+            .map(|i| {
+                let pixel = i / 3;
+                let (x, y) = (pixel as u32 % width, pixel as u32 / width);
+                match i % 3 {
+                    0 => (x * 255 / width) as u8,
+                    1 => (y * 255 / height) as u8,
+                    _ => 96,
+                }
+            })
+            .collect();
+        Image::from_raw(descriptor, pixels)
+            .unwrap()
+            .output(Format::Jpeg, EncodeOptions::with_quality(85).unwrap())
+            .bytes()
+            .unwrap()
     }
 
     /// The pipeline a thumbnail actually is: decode, resize, encode.
