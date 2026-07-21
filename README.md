@@ -53,10 +53,19 @@ OS-backend gaps.
 
 ## Status
 
-**M2 — tile scheduler — complete.** The workspace, op graph, codec traits,
-raw codec, geometry ops, and the demand-driven parallel tile scheduler are in
-place and tested; see [ROADMAP.md](docs/ROADMAP.md) for what each milestone
-adds.
+**M3 — PNG — complete.** The workspace, op graph, codec traits, raw codec,
+geometry ops, the demand-driven parallel tile scheduler and a from-scratch PNG
+codec are in place and tested; see [ROADMAP.md](docs/ROADMAP.md) for what each
+milestone adds.
+
+PNG is ours down to the DEFLATE, per [ADR-0010](docs/adr/0010-own-deflate.md):
+inflate, deflate, CRC-32, Adler-32, all five filters, Adam7, palettes, `tRNS`
+and 1/2/4/8/16-bit depths. Correctness is measured against the reference
+implementations rather than against ourselves — a shared misreading of a
+specification round-trips perfectly and is still wrong. All 86 decodable
+PngSuite files match libpng's decoding, all 14 corrupt files are rejected, and
+libpng reads back every PNG we write. `Image::open` identifies formats by
+magic bytes only; the file extension is ignored.
 
 Pipelines now stream: peak memory is bounded by tiles in flight, not by image
 size, and is verified against a ~100 MP synthetic source. The M1 whole-image

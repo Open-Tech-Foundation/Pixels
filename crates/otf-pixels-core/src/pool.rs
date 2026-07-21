@@ -254,12 +254,12 @@ impl Batch {
 
     /// Record one task's outcome and wake the waiter if it was the last.
     fn finish(&self, index: usize, outcome: Result<()>) {
-        if let Err(error) = outcome
-            && let Some(slot) = self.slots.get(index)
-        {
-            *slot
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+        if let Err(error) = outcome {
+            if let Some(slot) = self.slots.get(index) {
+                *slot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+            }
         }
         if self.remaining.fetch_sub(1, Ordering::SeqCst) == 1 {
             let mut finished = self

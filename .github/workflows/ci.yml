@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Warnings are failures here. The lint policy lives in the workspace
+  # manifest; this makes it binding rather than advisory.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-targets
+      # `--all-targets` skips doctests, and the crate-level examples are part
+      # of the documented contract.
+      - run: cargo test --workspace --doc
+
+  lint:
+    name: fmt and clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets
+
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # `missing_docs = "deny"` means an undocumented public item fails the
+      # build; this additionally catches broken intra-doc links.
+      - run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  features:
+    name: feature combinations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Each codec is a plugin behind a feature (ARCHITECTURE §Layer 2), so
+      # every combination has to build — including none of them.
+      - run: cargo check --workspace --no-default-features
+      - run: cargo check --workspace --no-default-features --features raw
+      - run: cargo check --workspace --no-default-features --features png
+      - run: cargo check --workspace --all-features
+
+  msrv:
+    name: msrv (1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: Swatinem/rust-cache@v2
+      # The declared `rust-version` is a promise; this is what keeps it true.
+      - run: cargo check --workspace --all-targets
+
+  interop:
+    name: reference interop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - run: pip install pillow
+      # Our decoder cannot validate our encoder: a shared misreading of the
+      # specification round-trips perfectly and is still wrong. These check our
+      # output against the reference implementations of zlib and libpng.
+      - run: ./scripts/check-deflate-interop.sh
+      - run: ./scripts/check-png-interop.sh
+      # The reference manifest is generated, so it must match what the
+      # generator produces today — otherwise a stale manifest could quietly
+      # start agreeing with a broken decoder.
+      - name: reference manifest is current
+        run: |
+          python3 scripts/regenerate-pngsuite-reference.py \
+            crates/otf-pixels-codec-png/tests/fixtures/pngsuite
+          git diff --exit-code crates/otf-pixels-codec-png/tests/fixtures/pngsuite/REFERENCE
+
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-fuzz --locked
+      # A short run per target on every change. This is a regression gate, not
+      # a discovery campaign: it catches what a code change broke today, while
+      # a long-running campaign finds the deep bugs. `-max_total_time` keeps CI
+      # bounded; any crash fails the job regardless of when it appears.
+      - run: cargo fuzz run png_decode -- -max_total_time=120
+        working-directory: fuzz
+      - run: cargo fuzz run inflate -- -max_total_time=120
+        working-directory: fuzz
+      - run: cargo fuzz run png_roundtrip -- -max_total_time=120
+        working-directory: fuzz

@@ -1,0 +1,39 @@
+[package]
+name = "otf-pixels-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+otf-pixels-core = { path = "../crates/otf-pixels-core" }
+otf-pixels-codec-png = { path = "../crates/otf-pixels-codec-png" }
+
+[[bin]]
+name = "png_decode"
+path = "fuzz_targets/png_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "inflate"
+path = "fuzz_targets/inflate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "png_roundtrip"
+path = "fuzz_targets/png_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+# The fuzz crate is deliberately outside the workspace: it needs nightly and
+# pulls in libfuzzer, neither of which should burden an ordinary build.
+[workspace]
+members = ["."]

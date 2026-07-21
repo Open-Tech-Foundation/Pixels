@@ -7,6 +7,9 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The declared MSRV of 1.85 was not actually met: three `let` chains need
+  1.88. Rewritten as nested `if let`, and CI now checks 1.85 so the promise
+  stays true rather than aspirational.
 - A build without the `raw` feature now compiles. The exit-criteria suites and
   the crate-level example are expressed over the raw codec, so they compile out
   with it rather than failing to build.
@@ -42,6 +45,13 @@ versioning: [SemVer](https://semver.org/).
 - `otf-pixels-codec-png`: `PngDecoder`, covering every v1 PNG feature — bit
   depths 1/2/4/8/16, colour types 0/2/3/4/6, `PLTE`, `tRNS`, Adam7 interlace
   and all five filter types. Ancillary chunks are skipped, not honoured.
+- CI (`.github/workflows/ci.yml`): test, fmt, clippy, docs, feature
+  combinations, MSRV, reference interop and fuzzing. The interop job also
+  regenerates the PngSuite manifest and fails on a diff, so a stale reference
+  cannot quietly start agreeing with a broken decoder.
+- `fuzz/`: `cargo fuzz` targets for PNG decode, inflate and encode/decode
+  round-trip, plus `tests/fuzz.rs`, an in-tree deterministic mutation harness
+  that runs the same no-panic property on stable in seconds.
 - `otf-pixels`: `Image::open` and `Image::from_stream`, which identify a format
   from its magic bytes and never from a file extension (SPEC §Formats).
   `Format::Png` now resolves to a real encoder behind the `png` feature.

@@ -212,10 +212,10 @@ impl DecodedSource {
                 .window
                 .lock()
                 .map_err(|_| PixelsError::graph("source window was poisoned"))?;
-            if let Some((covered, buffer)) = &*window
-                && covered.contains(region)
-            {
-                return Ok(Arc::clone(buffer));
+            if let Some((covered, buffer)) = &*window {
+                if covered.contains(region) {
+                    return Ok(Arc::clone(buffer));
+                }
             }
         }
         // Decode full-width bands: a forward-only stream produces whole rows
