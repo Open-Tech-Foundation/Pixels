@@ -48,27 +48,28 @@ JPEG fast path: when the source is JPEG and the target size is ≤ ½ source,
 decode at the nearest M/8 IDCT scale — a thumbnail from a 24 MP photo never
 materializes the full-resolution image.
 
-**Status**: the decoder half is implemented and tested
-(`JpegDecoder::with_scale`, `Scale::fitting`); a caller driving the codec
-directly gets the fast path today. Pipelines built through `Image` do **not**
-yet select it, so this paragraph describes intent rather than behaviour at the
-facade. Two things stand in the way, both of which land in the planner:
+**Status**: implemented. `Image` pipelines select the scale automatically —
+`from_stream(jpeg).resize(200, 150)` decodes at 1/8 — and
+`Output::write_with_stats` reports which reduction was applied, so a pipeline
+that expected the fast path and did not get it is diagnosable rather than
+merely slow.
 
-- The scale can only be chosen once the whole pipeline is known, because it
-  depends on the target size. `Plan::build` already reads the entire graph
-  before any pixel moves, so that is where the decision belongs — but the
-  planner today *analyses* an immutable graph and would have to *rewrite* it,
-  since reducing the source changes every descriptor below it. That is the
-  same machinery v2's op fusion needs.
-- Not every op means the same thing against a reduced source. `resize`,
-  `flip`, `flop` and `rotate` do. `crop` and `composite` carry coordinates in
-  source pixels, and `convolve` carries a kernel in pixels — a 3x3 blur over a
-  1/8 decode is eight times the blur relative to image content. So the
-  optimization can only fire when every op between source and terminal is
-  declared scale-covariant, and that declaration does not exist yet.
+The choice is made by a graph rewrite (`shrink_on_load`) once the pipeline is
+complete, because the useful size is the pipeline's target and that does not
+exist when the source is opened. It applies only when all three hold:
 
-Whether it fired must be observable rather than silent, so a pipeline that
-expected the fast path and did not get it is diagnosable.
+- The graph has **one source**. With two, only one would shrink.
+- Every op is willing to be **rescaled** (`Op::rescaled`). `crop` and
+  `composite` carry coordinates in source pixels and `convolve` carries a
+  kernel in pixels — a 3x3 blur over a 1/8 decode is eight times the blur
+  relative to image content — so all three decline.
+- Re-deriving every descriptor from the reduced source leaves the **root
+  unchanged**, which is what distinguishes `resize(200, 150)`, that pins its
+  output size, from a bare `flip`, that would simply emit a smaller image.
+
+A pipeline that does not qualify decodes at full resolution rather than
+failing: cropping a JPEG is a legal thing to do, and refusing it to protect an
+optimization would be the wrong trade.
 
 ## API surface (Rust)
 
