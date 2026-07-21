@@ -116,6 +116,7 @@ dependencies = [
  "fast_image_resize",
  "image",
  "otf-pixels-codec-gif",
+ "otf-pixels-codec-jpeg",
  "otf-pixels-codec-png",
  "otf-pixels-codec-raw",
  "otf-pixels-codec-tiff",

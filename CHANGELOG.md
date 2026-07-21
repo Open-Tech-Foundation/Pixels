@@ -85,6 +85,10 @@ versioning: [SemVer](https://semver.org/).
   at 1/2, truncation was ten times further from the true downsample (15.4 mean
   error against 0.57). With the box basis we match libjpeg to three decimal
   places on every fixture that has no chroma subsampling.
+- `otf-pixels`: JPEG wired into sniffing, decode and encode behind a `jpeg`
+  feature, on by default. `Image::from_stream` recognises a JPEG by its magic
+  bytes and `output(Format::Jpeg, options)` writes one, so a decode/resize/
+  re-encode pipeline works end to end.
 - A `jpeg_decode` fuzz target and an in-tree mutation harness, both asserting
   only that no input panics, plus a `jpeg_roundtrip` target asserting that
   every stream this encoder produces is one this decoder accepts at the

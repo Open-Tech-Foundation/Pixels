@@ -81,6 +81,9 @@ pub use otf_pixels_codec_png::{PngCodec, PngDecoder, PngEncoder};
 #[cfg(feature = "gif")]
 pub use otf_pixels_codec_gif::{GifCodec, GifDecoder, GifEncoder};
 
+#[cfg(feature = "jpeg")]
+pub use otf_pixels_codec_jpeg::{JpegCodec, JpegDecoder, JpegEncoder, Scale, Subsampling};
+
 #[cfg(feature = "tiff")]
 pub use otf_pixels_codec_tiff::{TiffCodec, TiffDecoder, TiffEncoder, TiffLayout};
 
@@ -211,6 +214,11 @@ impl Image {
             Format::Gif => {
                 let decoder = GifDecoder::new(stream, Limits::default())?;
                 Ok(Self::from_decoder(Box::new(decoder), Format::Gif))
+            }
+            #[cfg(feature = "jpeg")]
+            Format::Jpeg => {
+                let decoder = JpegDecoder::new(stream, Limits::default())?;
+                Ok(Self::from_decoder(Box::new(decoder), Format::Jpeg))
             }
             #[cfg(feature = "tiff")]
             Format::Tiff => {
@@ -676,6 +684,8 @@ fn sniffing_codecs() -> Vec<Box<dyn Codec>> {
         Box::new(PngCodec),
         #[cfg(feature = "gif")]
         Box::new(GifCodec),
+        #[cfg(feature = "jpeg")]
+        Box::new(JpegCodec),
         #[cfg(feature = "tiff")]
         Box::new(TiffCodec),
     ];
@@ -694,6 +704,8 @@ fn encoder_for(format: Format, options: EncodeOptions) -> Result<Box<dyn Encoder
         Format::Png => Ok(Box::new(PngEncoder::from_options(&options))),
         #[cfg(feature = "gif")]
         Format::Gif => Ok(Box::new(GifEncoder::from_options(&options))),
+        #[cfg(feature = "jpeg")]
+        Format::Jpeg => Ok(Box::new(JpegEncoder::from_options(&options))),
         #[cfg(not(feature = "raw"))]
         Format::Raw => Err(PixelsError::unsupported(
             "raw encoding requires the `raw` feature of otf-pixels",
@@ -774,11 +786,10 @@ mod tests {
 
     #[test]
     fn unimplemented_formats_are_catchable_errors() {
-        // Png and Gif are absent: they encode as of M3 and M5, and are checked
-        // by their round-trip tests instead. Tiff decodes but does not yet
-        // encode, so it belongs here. Every remaining format must fail
-        // cleanly rather than producing something.
-        for format in [Format::Jpeg, Format::Tiff, Format::WebP, Format::Avif] {
+        // Png, Gif and Jpeg are absent: they encode as of M3, M5 and M6, and
+        // are checked by their round-trip tests instead. Every remaining
+        // format must fail cleanly rather than producing something.
+        for format in [Format::Tiff, Format::WebP, Format::Avif] {
             let err = ramp(2, 2)
                 .output(format, EncodeOptions::default())
                 .bytes()
@@ -786,6 +797,104 @@ mod tests {
             assert_eq!(err.code(), ErrorCode::Unsupported, "{format}");
             assert!(err.to_string().contains(format.as_str()), "{err}");
         }
+    }
+
+    /// A JPEG written through the facade must be readable back through it,
+    /// found by sniffing rather than by being told what it is.
+    #[cfg(feature = "jpeg")]
+    #[test]
+    fn jpeg_round_trips_through_the_facade() {
+        let (width, height) = (32_u32, 24_u32);
+        let descriptor = ImageDescriptor::new(width, height, PixelFormat::Rgb8).unwrap();
+        let pixels: Vec<u8> = (0..descriptor.byte_len().unwrap())
+            .map(|i| {
+                // A smooth gradient, which survives quantization well enough
+                // for a tolerance this tight to mean something.
+                let pixel = i / 3;
+                let (x, y) = (pixel as u32 % width, pixel as u32 / width);
+                match i % 3 {
+                    0 => (x * 255 / width) as u8,
+                    1 => (y * 255 / height) as u8,
+                    _ => 128,
+                }
+            })
+            .collect();
+
+        let bytes = Image::from_raw(descriptor, pixels.clone())
+            .unwrap()
+            .output(Format::Jpeg, EncodeOptions::with_quality(95).unwrap())
+            .bytes()
+            .unwrap();
+
+        let image = Image::from_stream(std::io::Cursor::new(bytes.clone())).unwrap();
+        let metadata = image.metadata().unwrap();
+        assert_eq!(metadata.format, Format::Jpeg, "sniffing missed the JPEG");
+        assert_eq!((metadata.width, metadata.height), (width, height));
+        assert_eq!(metadata.pixel, PixelFormat::Rgb8);
+
+        let decoded = image
+            .output(Format::Raw, EncodeOptions::default())
+            .bytes()
+            .unwrap();
+        assert_eq!(decoded.len(), pixels.len());
+        let worst = decoded
+            .iter()
+            .zip(&pixels)
+            .map(|(&a, &b)| a.abs_diff(b))
+            .max()
+            .unwrap_or(0);
+        assert!(worst <= 12, "worst sample differs by {worst}");
+    }
+
+    /// The pipeline a thumbnail actually is: decode, resize, encode.
+    #[cfg(feature = "jpeg")]
+    #[test]
+    fn a_jpeg_pipeline_resizes_and_re_encodes() {
+        let descriptor = ImageDescriptor::new(64, 64, PixelFormat::Rgb8).unwrap();
+        let pixels: Vec<u8> = (0..descriptor.byte_len().unwrap())
+            .map(|i| ((i / 3) % 251) as u8)
+            .collect();
+        let source = Image::from_raw(descriptor, pixels)
+            .unwrap()
+            .output(Format::Jpeg, EncodeOptions::default())
+            .bytes()
+            .unwrap();
+
+        let thumbnail = Image::from_stream(std::io::Cursor::new(source.clone()))
+            .unwrap()
+            .resize(16, 16)
+            .output(Format::Jpeg, EncodeOptions::with_quality(70).unwrap())
+            .bytes()
+            .unwrap();
+
+        let metadata = Image::from_stream(std::io::Cursor::new(thumbnail.clone()))
+            .unwrap()
+            .metadata()
+            .unwrap();
+        assert_eq!((metadata.width, metadata.height), (16, 16));
+        assert!(
+            thumbnail.len() < source.len(),
+            "a 16x16 thumbnail is {} bytes against a 64x64 source's {}",
+            thumbnail.len(),
+            source.len()
+        );
+    }
+
+    /// Greyscale must stay greyscale through the facade rather than being
+    /// widened to RGB on the way out.
+    #[cfg(feature = "jpeg")]
+    #[test]
+    fn grayscale_jpeg_keeps_one_channel_through_the_facade() {
+        let bytes = ramp(24, 16)
+            .output(Format::Jpeg, EncodeOptions::with_quality(90).unwrap())
+            .bytes()
+            .unwrap();
+        let metadata = Image::from_stream(std::io::Cursor::new(bytes))
+            .unwrap()
+            .metadata()
+            .unwrap();
+        assert_eq!(metadata.pixel, PixelFormat::Gray8);
+        assert_eq!((metadata.width, metadata.height), (24, 16));
     }
 
     #[test]

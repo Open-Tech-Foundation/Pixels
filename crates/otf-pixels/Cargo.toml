@@ -17,10 +17,11 @@ otf-pixels-ops.workspace = true
 otf-pixels-codec-raw = { workspace = true, optional = true }
 otf-pixels-codec-png = { workspace = true, optional = true }
 otf-pixels-codec-gif = { workspace = true, optional = true }
+otf-pixels-codec-jpeg = { workspace = true, optional = true }
 otf-pixels-codec-tiff = { workspace = true, optional = true }
 
 [features]
-default = ["raw", "png", "gif", "tiff"]
+default = ["raw", "png", "gif", "jpeg", "tiff"]
 # Raw pixel codec. Kept behind a feature for symmetry with the other codecs
 # (ARCHITECTURE §Layer 2: "each format is a plugin behind a cargo feature").
 raw = ["dep:otf-pixels-codec-raw"]
@@ -28,6 +29,9 @@ raw = ["dep:otf-pixels-codec-raw"]
 png = ["dep:otf-pixels-codec-png"]
 # GIF codec, including LZW (ADR-0012).
 gif = ["dep:otf-pixels-codec-gif"]
+# Baseline JPEG codec, including M/8 scaled decode. Progressive JPEG is a
+# wrapped codec and is not part of this feature.
+jpeg = ["dep:otf-pixels-codec-jpeg"]
 # TIFF codec. The only v1 format with region random access.
 tiff = ["dep:otf-pixels-codec-tiff"]
 
