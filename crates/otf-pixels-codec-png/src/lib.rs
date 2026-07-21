@@ -21,4 +21,4 @@ pub use decoder::{PngCodec, PngDecoder, probe};
 pub use deflate::{Level, deflate, zlib_compress};
 pub use encoder::PngEncoder;
 pub use format::{ColorType, Filter, Header, SIGNATURE};
-pub use inflate::{inflate_to, zlib_decompress};
+pub use inflate::{Inflater, ZlibStream, inflate_to, zlib_decompress};
