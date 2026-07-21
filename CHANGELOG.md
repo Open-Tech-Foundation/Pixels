@@ -35,6 +35,9 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Added
+- M5 exit-criterion tests and `benches/thumbnail.rs`, the giant-tiled-TIFF
+  thumbnail benchmark against libvips. It skips cleanly when `vips` is not
+  installed rather than omitting the row or inventing a number.
 - ADR-0012 (extract `otf-pixels-compress`), executing the "move on a third
   consumer" clause ADR-0010 wrote for exactly this moment.
 - `otf-pixels-codec-tiff`: `TiffDecoder` covering baseline TIFF 6.0 — both

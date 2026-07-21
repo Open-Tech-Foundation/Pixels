@@ -61,6 +61,8 @@ jobs:
       - run: cargo check --workspace --no-default-features
       - run: cargo check --workspace --no-default-features --features raw
       - run: cargo check --workspace --no-default-features --features png
+      - run: cargo check --workspace --no-default-features --features gif
+      - run: cargo check --workspace --no-default-features --features tiff
       - run: cargo check --workspace --all-features
 
   msrv:
@@ -90,17 +92,38 @@ jobs:
       - run: pip install pillow
       # Our decoder cannot validate our encoder: a shared misreading of the
       # specification round-trips perfectly and is still wrong. These check our
-      # output against the reference implementations of zlib and libpng.
+      # output against the reference implementations of zlib, libpng, libgif
+      # and libtiff.
       - run: ./scripts/check-deflate-interop.sh
       - run: ./scripts/check-png-interop.sh
+      - run: ./scripts/check-gif-interop.sh
+      - run: ./scripts/check-tiff-interop.sh
       # The reference manifest is generated, so it must match what the
       # generator produces today — otherwise a stale manifest could quietly
       # start agreeing with a broken decoder.
-      - name: reference manifest is current
+      - name: reference manifests are current
         run: |
           python3 scripts/regenerate-pngsuite-reference.py \
             crates/otf-pixels-codec-png/tests/fixtures/pngsuite
-          git diff --exit-code crates/otf-pixels-codec-png/tests/fixtures/pngsuite/REFERENCE
+          python3 scripts/regenerate-gif-reference.py \
+            crates/otf-pixels-codec-gif/tests/fixtures
+          python3 scripts/regenerate-tiff-reference.py \
+            crates/otf-pixels-codec-tiff/tests/fixtures
+          git diff --exit-code -- '*/REFERENCE'
+
+  benchmark:
+    name: exit-criterion benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # libvips is a system library, not a cargo dependency. The M5 benchmark
+      # skips cleanly without it; installing it here is what makes the
+      # published comparison a real measurement rather than a quoted figure.
+      - run: sudo apt-get update && sudo apt-get install -y libvips-tools
+      - run: cargo bench -p otf-pixels --bench thumbnail
+      - run: cargo bench -p otf-pixels --bench ops
 
   fuzz:
     name: fuzz

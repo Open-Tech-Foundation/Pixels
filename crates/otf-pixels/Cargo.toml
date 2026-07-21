@@ -42,6 +42,11 @@ fast_image_resize = "6"
 name = "ops"
 harness = false
 
+# The M5 exit criterion: giant tiled TIFF to thumbnail, against libvips.
+[[bench]]
+name = "thumbnail"
+harness = false
+
 # The scaling benchmark is a plain binary, not a libtest harness: it measures
 # how fixed work redistributes across threads rather than timing a micro-op.
 [[bench]]

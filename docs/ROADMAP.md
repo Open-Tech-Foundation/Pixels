@@ -43,12 +43,14 @@ Estimates deliberately omitted — scope, not dates, is the commitment.
   the shared input copy is netted out. That is worse than ADR-0011 predicted,
   and is recorded as such.
 
-### M5 — GIF + TIFF (from scratch)
-- GIF: LZW, palettes, frame disposal; single-frame encode + quantization.
-- TIFF: IFD, baseline tags, none/LZW/deflate, strip + tiled; tiled TIFF
-  wired to region random-access decode (the streaming showcase).
+### M5 — GIF + TIFF (from scratch) — **complete**
+- GIF: LZW, palettes, frame disposal; single-frame encode + quantization. ✅
+- TIFF: IFD, baseline tags, none/LZW/deflate/PackBits, strip + tiled; tiled
+  TIFF wired to region random-access decode (the streaming showcase). ✅
 - **Exit**: giant tiled TIFF → thumbnail in constant memory, benchmarked
-  against libvips.
+  against libvips. ✅ The constant-memory half is asserted in
+  `tests/m5_exit_criteria.rs`; the comparison is `benches/thumbnail.rs`,
+  which needs `libvips-tools` and skips cleanly without it. CI installs it.
 
 ### M6 — JPEG baseline (from scratch) + wrapped codecs
 - Baseline JPEG decode/encode: Huffman, DCT, chroma subsampling; EXIF

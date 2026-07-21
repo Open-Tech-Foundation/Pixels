@@ -53,6 +53,22 @@ OS-backend gaps.
 
 ## Status
 
+**M5 — GIF + TIFF — complete.** Both from scratch, both checked against the
+reference implementations rather than against ourselves: all GIF and TIFF
+fixtures match libgif and libtiff, and those libraries read back every file we
+write (42 GIFs, 240 TIFFs).
+
+TIFF is the streaming showcase. A *tiled* TIFF is the one v1 format with
+genuine random access, so `TiffDecoder` reports `DecodeCapability::Regions`
+and the scheduler pulls regions rather than rows — a thumbnail of a huge scan
+decompresses the tiles it needs and no others. That is ADR-0001's
+demand-driven design doing the thing it was designed for, and M5 is the first
+milestone where it is observable.
+
+Compression primitives moved to `otf-pixels-compress`
+([ADR-0012](docs/adr/0012-extract-compression-crate.md)), executing the "move
+on a third consumer" clause ADR-0010 wrote for exactly this moment.
+
 **M4 — core op set + SIMD — complete.** The full v1 op set from
 [SPEC §Core ops](docs/SPEC.md) is implemented: resize with seven filters,
 rotate, flip/flop, crop, modulate, convolve, composite, and the channel ops.

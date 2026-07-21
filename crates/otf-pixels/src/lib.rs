@@ -82,7 +82,7 @@ pub use otf_pixels_codec_png::{PngCodec, PngDecoder, PngEncoder};
 pub use otf_pixels_codec_gif::{GifCodec, GifDecoder, GifEncoder};
 
 #[cfg(feature = "tiff")]
-pub use otf_pixels_codec_tiff::{TiffCodec, TiffDecoder};
+pub use otf_pixels_codec_tiff::{TiffCodec, TiffDecoder, TiffEncoder, TiffLayout};
 
 /// A lazily evaluated image pipeline.
 ///

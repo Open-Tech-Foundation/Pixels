@@ -309,9 +309,8 @@ impl LzwDecoder {
 
             // Define the new entry: the previous string plus this one's first
             // byte. Nothing is defined for the first code after a clear.
-            if let Some(previous_code) = previous
-                && (next as usize) < MAX_CODES
-            {
+            let room = (next as usize) < MAX_CODES;
+            if let Some(previous_code) = previous.filter(|_| room) {
                 if let (Some(p), Some(s)) =
                     (prefix.get_mut(next as usize), suffix.get_mut(next as usize))
                 {
