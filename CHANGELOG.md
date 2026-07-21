@@ -22,6 +22,12 @@ versioning: [SemVer](https://semver.org/).
   with it rather than failing to build.
 
 ### Changed
+- SPEC's JPEG fast-path paragraph now records that it describes intent rather
+  than facade behaviour, and what stands in the way: the planner analyses an
+  immutable graph where selecting a reduced source would require rewriting it,
+  and ops carrying pixel-valued parameters (`crop`, `composite`, `convolve`)
+  do not mean the same thing against a reduced source. The decoder half is
+  implemented and usable directly.
 - `otf-pixels` now evaluates pipelines with the tile scheduler instead of the
   M1 whole-image evaluator. Rows still reach an encoder top to bottom.
 - `DecodedSource` now streams instead of materializing the whole image on
