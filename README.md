@@ -53,6 +53,31 @@ OS-backend gaps.
 
 ## Status
 
+**M4 — core op set + SIMD — complete.** The full v1 op set from
+[SPEC §Core ops](docs/SPEC.md) is implemented: resize with seven filters,
+rotate, flip/flop, crop, modulate, convolve, composite, and the channel ops.
+
+Performance, measured on the same machine and the same pixels
+(`cargo bench -p otf-pixels --bench ops`), 4000x3000 RGB8 → 400x300, Lanczos3:
+
+| | time | throughput | vs otf-pixels |
+|---|---|---|---|
+| otf-pixels | 43.3 ms | 277 MP/s | 1.00x |
+| `image` 0.25 | 210.2 ms | 57 MP/s | 4.85x slower |
+| `fast_image_resize` 6.0 | 29.2 ms | 412 MP/s | **1.49x faster** |
+
+Read those honestly. About 15 ms of every row is the 36 MB input copy that all
+three pay. Netting it out, our resampling kernel is roughly **2x slower than
+`fast_image_resize`**, which is hand-written SIMD with runtime dispatch, and
+roughly **5x faster than `image`**, which is scalar.
+
+[ADR-0011](docs/adr/0011-autovectorization-and-fixed-point.md) chose
+autovectorized safe Rust over intrinsics, keeping `unsafe_code = "forbid"`
+intact in every crate, and predicted a 10–30% penalty against hand-written
+SIMD. The measured penalty is larger than that. The ADR is recorded as
+predicting it, the benchmark is recorded as refuting it, and neither has been
+quietly adjusted to agree with the other.
+
 **M3 — PNG — complete.** The workspace, op graph, codec traits, raw codec,
 geometry ops, the demand-driven parallel tile scheduler and a from-scratch PNG
 codec are in place and tested; see [ROADMAP.md](docs/ROADMAP.md) for what each

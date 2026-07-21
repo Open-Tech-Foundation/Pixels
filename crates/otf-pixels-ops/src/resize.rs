@@ -26,7 +26,7 @@ use otf_pixels_core::{
 };
 
 use crate::filter::{Filter, Weights};
-use crate::resample::{row_f32, row_u8, row_u16};
+use crate::resample::{column_f32, column_u8, column_u16, row_f32, row_u8, row_u16};
 
 /// How a resize reconciles the requested size with the source aspect ratio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -308,15 +308,20 @@ fn resample_tile(
                 row_u8(row, target, channels, &horizontal);
             }
 
-            // The vertical pass walks a column, which is strided in the
-            // intermediate. Gathering it into a contiguous scratch buffer
-            // first is what lets the kernel stay a flat multiply-accumulate.
-            let mut column = vec![0_u8; source.height as usize * channels];
-            let mut resampled = vec![0_u8; region.height as usize * channels];
-            for x in 0..region.width as usize {
-                gather_column(&intermediate, &mut column, x, channels, intermediate_row);
-                row_u8(&column, &mut resampled, channels, &vertical);
-                scatter_column_u8(&resampled, output, x, channels, region)?;
+            // The vertical pass accumulates a whole output row at a time,
+            // reading input rows sequentially. See the note in `resample`.
+            let mut accumulator = vec![0_i32; intermediate_row];
+            let mut resampled = vec![0_u8; intermediate_row];
+            for (index, run) in vertical.runs().iter().enumerate() {
+                column_u8(
+                    &intermediate,
+                    intermediate_row,
+                    run.start as usize,
+                    vertical.quantized(run),
+                    &mut accumulator,
+                    &mut resampled,
+                );
+                write_row(output, region.y + index as u32, &resampled);
             }
         }
         SampleKind::U16 => {
@@ -332,12 +337,19 @@ fn resample_tile(
                 };
                 row_u16(&wide, target, channels, &horizontal);
             }
-            let mut column = vec![0_u16; source.height as usize * channels];
-            let mut resampled = vec![0_u16; region.height as usize * channels];
-            for x in 0..region.width as usize {
-                gather_column(&intermediate, &mut column, x, channels, intermediate_row);
-                row_u16(&column, &mut resampled, channels, &vertical);
-                scatter_column_u16(&resampled, output, x, channels, region)?;
+            let mut accumulator = vec![0.0_f32; intermediate_row];
+            let mut resampled = vec![0_u16; intermediate_row];
+            for (index, run) in vertical.runs().iter().enumerate() {
+                column_u16(
+                    &intermediate,
+                    intermediate_row,
+                    run.start as usize,
+                    vertical.exact(run),
+                    &mut accumulator,
+                    &mut resampled,
+                );
+                let bytes: Vec<u8> = resampled.iter().flat_map(|v| v.to_ne_bytes()).collect();
+                write_row(output, region.y + index as u32, &bytes);
             }
         }
         SampleKind::F32 => {
@@ -353,12 +365,19 @@ fn resample_tile(
                 };
                 row_f32(&floats, target, channels, &horizontal);
             }
-            let mut column = vec![0.0_f32; source.height as usize * channels];
-            let mut resampled = vec![0.0_f32; region.height as usize * channels];
-            for x in 0..region.width as usize {
-                gather_column(&intermediate, &mut column, x, channels, intermediate_row);
-                row_f32(&column, &mut resampled, channels, &vertical);
-                scatter_column_f32(&resampled, output, x, channels, region)?;
+            let mut accumulator = vec![0.0_f32; intermediate_row];
+            let mut resampled = vec![0.0_f32; intermediate_row];
+            for (index, run) in vertical.runs().iter().enumerate() {
+                column_f32(
+                    &intermediate,
+                    intermediate_row,
+                    run.start as usize,
+                    vertical.exact(run),
+                    &mut accumulator,
+                    &mut resampled,
+                );
+                let bytes: Vec<u8> = resampled.iter().flat_map(|v| v.to_ne_bytes()).collect();
+                write_row(output, region.y + index as u32, &bytes);
             }
         }
     }
@@ -390,96 +409,13 @@ fn to_f32(row: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-/// Copy column `x` of a row-major buffer into a contiguous buffer.
-fn gather_column<T: Copy>(source: &[T], into: &mut [T], x: usize, channels: usize, row_len: usize) {
-    for (y, pixel) in into.chunks_exact_mut(channels).enumerate() {
-        let at = y * row_len + x * channels;
-        let Some(from) = source.get(at..at + channels) else {
-            continue;
-        };
-        pixel.copy_from_slice(from);
+/// Write a resampled row into the output tile.
+fn write_row(output: &mut TileMut<'_>, y: u32, bytes: &[u8]) {
+    let Some(row) = output.row_mut(y) else { return };
+    let len = row.len().min(bytes.len());
+    if let (Some(to), Some(from)) = (row.get_mut(..len), bytes.get(..len)) {
+        to.copy_from_slice(from);
     }
-}
-
-/// Write a resampled column back into the output tile.
-fn scatter_column_u8(
-    column: &[u8],
-    output: &mut TileMut<'_>,
-    x: usize,
-    channels: usize,
-    region: Region,
-) -> Result<()> {
-    for y in 0..region.height {
-        let Some(row) = output.row_mut(region.y + y) else {
-            continue;
-        };
-        let at = x * channels;
-        let Some(target) = row.get_mut(at..at + channels) else {
-            continue;
-        };
-        let from = y as usize * channels;
-        let Some(source) = column.get(from..from + channels) else {
-            continue;
-        };
-        target.copy_from_slice(source);
-    }
-    Ok(())
-}
-
-/// The 16-bit scatter, converting back to native-endian bytes.
-fn scatter_column_u16(
-    column: &[u16],
-    output: &mut TileMut<'_>,
-    x: usize,
-    channels: usize,
-    region: Region,
-) -> Result<()> {
-    for y in 0..region.height {
-        let Some(row) = output.row_mut(region.y + y) else {
-            continue;
-        };
-        for channel in 0..channels {
-            let value = column
-                .get(y as usize * channels + channel)
-                .copied()
-                .unwrap_or(0);
-            let at = (x * channels + channel) * 2;
-            for (offset, byte) in value.to_ne_bytes().iter().enumerate() {
-                if let Some(slot) = row.get_mut(at + offset) {
-                    *slot = *byte;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// The float scatter, converting back to native-endian bytes.
-fn scatter_column_f32(
-    column: &[f32],
-    output: &mut TileMut<'_>,
-    x: usize,
-    channels: usize,
-    region: Region,
-) -> Result<()> {
-    for y in 0..region.height {
-        let Some(row) = output.row_mut(region.y + y) else {
-            continue;
-        };
-        for channel in 0..channels {
-            let value = column
-                .get(y as usize * channels + channel)
-                .copied()
-                .unwrap_or(0.0);
-            let at = (x * channels + channel) * 4;
-            for (offset, byte) in value.to_ne_bytes().iter().enumerate() {
-                if let Some(slot) = row.get_mut(at + offset) {
-                    *slot = *byte;
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

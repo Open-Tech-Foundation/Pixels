@@ -25,6 +25,17 @@ raw = ["dep:otf-pixels-codec-raw"]
 # PNG codec, implemented from scratch including DEFLATE (ADR-0010).
 png = ["dep:otf-pixels-codec-png"]
 
+[dev-dependencies]
+# Benchmark comparisons only (ROADMAP M4 exit criterion). These never enter the
+# published dependency graph, so the shipped library stays dependency-free
+# apart from crossbeam-deque (ADR-0008).
+image = { version = "0.25", default-features = false }
+fast_image_resize = "6"
+
+[[bench]]
+name = "ops"
+harness = false
+
 # The scaling benchmark is a plain binary, not a libtest harness: it measures
 # how fixed work redistributes across threads rather than timing a micro-op.
 [[bench]]

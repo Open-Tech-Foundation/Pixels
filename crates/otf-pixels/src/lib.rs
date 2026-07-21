@@ -67,7 +67,10 @@ pub use otf_pixels_core::{
     Region, Result, RunStats, SchedulerOptions, Sink, Source, TileShape,
     evaluate as evaluate_reference,
 };
-pub use otf_pixels_ops::{Crop, Flip, Flop};
+pub use otf_pixels_ops::{
+    Blend, Composite, Convolve, Crop, ExtractChannel, Filter, Fit, Flatten, Flip, Flop, Kernel,
+    Modulate, Quarter, Resize, ResizeOptions, Rotate,
+};
 
 #[cfg(feature = "raw")]
 pub use otf_pixels_codec_raw::{RawCodec, RawDecoder, RawEncoder, RawFormat};
@@ -249,9 +252,7 @@ impl Image {
     pub fn crop(self, x: u32, y: u32, width: u32, height: u32) -> Self {
         match Crop::at(x, y, width, height) {
             Ok(op) => self.apply(Arc::new(op)),
-            Err(error) => Self {
-                inner: Err(Arc::new(error)),
-            },
+            Err(error) => Self::failed(error),
         }
     }
 
@@ -265,6 +266,111 @@ impl Image {
     #[must_use]
     pub fn flop(self) -> Self {
         self.apply(Arc::new(Flop))
+    }
+
+    /// Resample to `width` by `height` with the default filter (Lanczos3).
+    #[must_use]
+    pub fn resize(self, width: u32, height: u32) -> Self {
+        self.resize_with(width, height, ResizeOptions::default())
+    }
+
+    /// Resample to `width` by `height` with explicit options.
+    #[must_use]
+    pub fn resize_with(self, width: u32, height: u32, options: ResizeOptions) -> Self {
+        match Resize::new(width, height, options) {
+            Ok(op) => self.apply(Arc::new(op)),
+            Err(error) => Self::failed(error),
+        }
+    }
+
+    /// Scale to fit inside `width` by `height`, preserving aspect ratio.
+    #[must_use]
+    pub fn thumbnail(self, width: u32, height: u32) -> Self {
+        let options = ResizeOptions::default()
+            .with_fit(Fit::Inside)
+            .without_enlargement(true);
+        self.resize_with(width, height, options)
+    }
+
+    /// Rotate by `degrees`, which must be a multiple of 90.
+    #[must_use]
+    pub fn rotate(self, degrees: i32) -> Self {
+        match Rotate::degrees(degrees) {
+            Ok(op) => self.apply(Arc::new(op)),
+            Err(error) => Self::failed(error),
+        }
+    }
+
+    /// Adjust brightness, saturation and hue.
+    #[must_use]
+    pub fn modulate(self, options: Modulate) -> Self {
+        self.apply(Arc::new(options))
+    }
+
+    /// Convolve with `kernel`.
+    #[must_use]
+    pub fn convolve(self, kernel: Kernel) -> Self {
+        self.apply(Arc::new(Convolve::new(kernel)))
+    }
+
+    /// Blur with a Gaussian of the given sigma.
+    #[must_use]
+    pub fn blur(self, sigma: f32) -> Self {
+        match Kernel::gaussian(sigma) {
+            Ok(kernel) => self.convolve(kernel),
+            Err(error) => Self::failed(error),
+        }
+    }
+
+    /// Sharpen by `amount`, a 3x3 unsharp-style kernel.
+    #[must_use]
+    pub fn sharpen(self, amount: f32) -> Self {
+        match Kernel::sharpen(amount) {
+            Ok(kernel) => self.convolve(kernel),
+            Err(error) => Self::failed(error),
+        }
+    }
+
+    /// Extract one channel as a greyscale image.
+    #[must_use]
+    pub fn extract_channel(self, index: usize) -> Self {
+        self.apply(Arc::new(ExtractChannel::new(index)))
+    }
+
+    /// Composite this image against an opaque background, discarding alpha.
+    #[must_use]
+    pub fn flatten(self, red: u8, green: u8, blue: u8) -> Self {
+        self.apply(Arc::new(Flatten::onto(red, green, blue)))
+    }
+
+    /// Draw `overlay` over this image at `(x, y)`.
+    ///
+    /// This is the join point for two branches of a graph: both pipelines stay
+    /// lazy, and neither is evaluated until a terminal pulls on the result.
+    #[must_use]
+    pub fn composite(self, overlay: Self, x: i64, y: i64) -> Self {
+        self.composite_with(overlay, x, y, Blend::Over)
+    }
+
+    /// Draw `overlay` over this image with an explicit blend mode.
+    #[must_use]
+    pub fn composite_with(self, overlay: Self, x: i64, y: i64, blend: Blend) -> Self {
+        let (base, over) = match (self.inner, overlay.inner) {
+            (Ok(base), Ok(over)) => (base, over),
+            // The first error wins, matching how a single chain behaves.
+            (Err(error), _) | (Ok(_), Err(error)) => return Self { inner: Err(error) },
+        };
+        let op: Arc<dyn Op> = Arc::new(Composite::at(x, y, blend));
+        Self {
+            inner: otf_pixels_core::Image::combine(&[base, over], op).map_err(Arc::new),
+        }
+    }
+
+    /// A pipeline carrying an error, surfaced at the terminal.
+    fn failed(error: PixelsError) -> Self {
+        Self {
+            inner: Err(Arc::new(error)),
+        }
     }
 
     /// Chain an arbitrary op onto this pipeline.

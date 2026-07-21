@@ -58,13 +58,58 @@ fn finish_u16(accumulator: f32) -> u16 {
 /// output pixel shares a run, so the channel loop is the innermost and the one
 /// the compiler widens.
 pub fn row_u8(input: &[u8], output: &mut [u8], channels: usize, weights: &Weights) {
+    // Dispatched once per row into a monomorphized kernel, so the channel loop
+    // is unrolled into independent accumulator chains rather than a three-trip
+    // loop the compiler cannot widen. This is ADR-0002's dispatch discipline
+    // applied to channel count as well as sample type.
+    match channels {
+        1 => row_u8_n::<1>(input, output, weights),
+        2 => row_u8_n::<2>(input, output, weights),
+        3 => row_u8_n::<3>(input, output, weights),
+        4 => row_u8_n::<4>(input, output, weights),
+        // No v1 format has another channel count; a future one falls back to
+        // the general form rather than silently producing nothing.
+        other => row_u8_general(input, output, other, weights),
+    }
+}
+
+/// The 8-bit horizontal kernel with the channel count known at compile time.
+fn row_u8_n<const C: usize>(input: &[u8], output: &mut [u8], weights: &Weights) {
+    for (out_index, run) in weights.runs().iter().enumerate() {
+        let coefficients = weights.quantized(run);
+        let first = run.start as usize * C;
+        let taps = run.len as usize;
+
+        // Slice the exact window once, so the inner loop carries no bounds
+        // checks and the compiler can see a fixed trip count.
+        let Some(window) = input.get(first..first + taps * C) else {
+            continue;
+        };
+        let Some(target) = output.get_mut(out_index * C..(out_index + 1) * C) else {
+            continue;
+        };
+
+        // `C` independent accumulator chains, which is what lets the tap loop
+        // be software-pipelined instead of serialized on one dependency.
+        let mut accumulators = [0_i32; C];
+        for (pixel, &coefficient) in window.chunks_exact(C).zip(coefficients) {
+            for (slot, &sample) in accumulators.iter_mut().zip(pixel) {
+                *slot += i32::from(sample) * coefficient;
+            }
+        }
+        for (slot, &value) in target.iter_mut().zip(accumulators.iter()) {
+            *slot = finish_u8(value);
+        }
+    }
+}
+
+/// The same, for a channel count not known at compile time.
+fn row_u8_general(input: &[u8], output: &mut [u8], channels: usize, weights: &Weights) {
     for (out_index, run) in weights.runs().iter().enumerate() {
         let coefficients = weights.quantized(run);
         let first = run.start as usize * channels;
         let taps = run.len as usize;
 
-        // Slice the exact window once, so the inner loops carry no bounds
-        // checks and the compiler can see a fixed trip count.
         let Some(window) = input.get(first..first + taps * channels) else {
             continue;
         };
@@ -72,16 +117,10 @@ pub fn row_u8(input: &[u8], output: &mut [u8], channels: usize, weights: &Weight
             continue;
         };
 
-        // One accumulator per channel, held in registers across the tap loop.
         let mut accumulators = [0_i32; MAX_CHANNELS];
-        for (tap, &coefficient) in coefficients.iter().enumerate() {
-            let Some(pixel) = window.get(tap * channels..(tap + 1) * channels) else {
-                continue;
-            };
-            for (channel, &sample) in pixel.iter().enumerate() {
-                if let Some(slot) = accumulators.get_mut(channel) {
-                    *slot += i32::from(sample) * coefficient;
-                }
+        for (pixel, &coefficient) in window.chunks_exact(channels).zip(coefficients) {
+            for (slot, &sample) in accumulators.iter_mut().zip(pixel) {
+                *slot += i32::from(sample) * coefficient;
             }
         }
         for (channel, slot) in target.iter_mut().enumerate() {
@@ -159,6 +198,95 @@ pub fn row_f32(input: &[f32], output: &mut [f32], channels: usize, weights: &Wei
 /// The widest pixel in SPEC §Pixel formats. A fixed-size accumulator array
 /// keeps the hot loop free of allocation and lets it live in registers.
 pub const MAX_CHANNELS: usize = 4;
+
+// ---------------------------------------------------------------------------
+// Vertical pass
+// ---------------------------------------------------------------------------
+//
+// The vertical pass could be the horizontal one applied to columns, and that
+// is the obvious implementation — gather a column into a contiguous buffer,
+// resample it, scatter it back. It is also several times slower, because a
+// column of a row-major image touches one cache line per sample and evicts it
+// before the next output pixel needs its neighbour.
+//
+// Accumulating a whole output *row* at once instead reads the input rows
+// sequentially and writes the accumulator sequentially. The arithmetic is
+// identical — the same weights applied to the same samples in the same tap
+// order — so the result is bit-for-bit what the column form produced.
+
+/// Accumulate one output row from a vertical run of input rows, 8-bit.
+///
+/// `accumulator` and `out` are both `row_len` long; `source` is row-major with
+/// `row_len` samples per row. The inner loop is contiguous in both operands,
+/// which is what makes it the one the compiler widens.
+pub fn column_u8(
+    source: &[u8],
+    row_len: usize,
+    start: usize,
+    coefficients: &[i32],
+    accumulator: &mut [i32],
+    out: &mut [u8],
+) {
+    accumulator.fill(0);
+    for (tap, &coefficient) in coefficients.iter().enumerate() {
+        let at = (start + tap) * row_len;
+        let Some(row) = source.get(at..at + row_len) else {
+            continue;
+        };
+        for (slot, &sample) in accumulator.iter_mut().zip(row) {
+            *slot += i32::from(sample) * coefficient;
+        }
+    }
+    for (slot, &value) in out.iter_mut().zip(accumulator.iter()) {
+        *slot = finish_u8(value);
+    }
+}
+
+/// The same for 16-bit samples, accumulating in `f32`.
+pub fn column_u16(
+    source: &[u16],
+    row_len: usize,
+    start: usize,
+    coefficients: &[f32],
+    accumulator: &mut [f32],
+    out: &mut [u16],
+) {
+    accumulator.fill(0.0);
+    for (tap, &coefficient) in coefficients.iter().enumerate() {
+        let at = (start + tap) * row_len;
+        let Some(row) = source.get(at..at + row_len) else {
+            continue;
+        };
+        for (slot, &sample) in accumulator.iter_mut().zip(row) {
+            *slot += f32::from(sample) * coefficient;
+        }
+    }
+    for (slot, &value) in out.iter_mut().zip(accumulator.iter()) {
+        *slot = finish_u16(value);
+    }
+}
+
+/// The same for float samples, which are not clamped.
+pub fn column_f32(
+    source: &[f32],
+    row_len: usize,
+    start: usize,
+    coefficients: &[f32],
+    accumulator: &mut [f32],
+    out: &mut [f32],
+) {
+    accumulator.fill(0.0);
+    for (tap, &coefficient) in coefficients.iter().enumerate() {
+        let at = (start + tap) * row_len;
+        let Some(row) = source.get(at..at + row_len) else {
+            continue;
+        };
+        for (slot, &sample) in accumulator.iter_mut().zip(row) {
+            *slot += sample * coefficient;
+        }
+    }
+    out.copy_from_slice(accumulator);
+}
 
 #[cfg(test)]
 #[allow(

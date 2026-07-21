@@ -33,6 +33,14 @@ versioning: [SemVer](https://semver.org/).
 
 ### Added
 - ADR-0011 (SIMD by autovectorization; fixed-point arithmetic at 8 bits).
+- `otf-pixels`: `resize`, `thumbnail`, `rotate`, `modulate`, `convolve`,
+  `blur`, `sharpen`, `extract_channel`, `flatten` and `composite` on the
+  chainable facade. `composite` joins two lazy branches of a graph.
+- `benches/ops.rs`: the M4 comparative benchmark against `image` and
+  `fast_image_resize`, both dev-dependencies only. Numbers published in the
+  README, including the part that does not flatter us.
+- M4 exit-criterion tests: every pipeline is byte-identical run to run, across
+  thread counts, across tile shapes, and against the M1 oracle.
 - `otf-pixels-ops`: the rest of the v1 op set (SPEC §Core ops) — `Rotate`
   (quarter turns), `Modulate` (brightness/saturation/hue), `Convolve` with
   blur, Gaussian and sharpen presets, `Composite` (Porter-Duff source-over,
