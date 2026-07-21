@@ -70,8 +70,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.85
       - uses: Swatinem/rust-cache@v2
-      # The declared `rust-version` is a promise; this is what keeps it true.
-      - run: cargo check --workspace --all-targets
+      # The declared `rust-version` is a promise about *consuming* the
+      # library, so it is checked without dev-dependencies: the benchmark
+      # pulls in fast_image_resize, which needs a newer toolchain and which no
+      # user of otf-pixels ever compiles. `--all-targets` would build it and
+      # fail for a reason that has nothing to do with our MSRV.
+      - run: cargo check --workspace
 
   interop:
     name: reference interop

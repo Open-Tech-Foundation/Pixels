@@ -7,6 +7,9 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The MSRV job now checks without dev-dependencies. `rust-version` is a
+  promise about consuming the library; the benchmark's `fast_image_resize`
+  needs 1.87 and no user of `otf-pixels` ever compiles it.
 - The declared MSRV of 1.85 was not actually met: three `let` chains need
   1.88. Rewritten as nested `if let`, and CI now checks 1.85 so the promise
   stays true rather than aspirational.

@@ -239,10 +239,10 @@ fn modulate_row_u8(
             }
         }
         // Alpha is unassociated (SPEC §Formats), so it passes through.
-        if has_alpha(layout)
-            && let (Some(alpha), Some(slot)) = (from.get(channels - 1), to.get_mut(channels - 1))
-        {
-            *slot = *alpha;
+        if has_alpha(layout) {
+            if let (Some(alpha), Some(slot)) = (from.get(channels - 1), to.get_mut(channels - 1)) {
+                *slot = *alpha;
+            }
         }
     }
 }
