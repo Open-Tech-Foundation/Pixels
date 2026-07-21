@@ -10,9 +10,13 @@
 //! unrepresentable rather than merely avoided.
 
 mod checksum;
+mod decoder;
 mod deflate;
+mod format;
 mod inflate;
 
 pub use checksum::{Adler32, Crc32};
+pub use decoder::{PngDecoder, probe};
 pub use deflate::{Level, deflate, zlib_compress};
+pub use format::{ColorType, Filter, Header, SIGNATURE};
 pub use inflate::{inflate_to, zlib_decompress};

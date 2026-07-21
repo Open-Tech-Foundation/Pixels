@@ -34,6 +34,13 @@ versioning: [SemVer](https://semver.org/).
   `zlib_compress`, `Level`) with levels 0-9. Verified in both directions
   against reference zlib — we decode its streams, and it decodes ours
   (`scripts/check-deflate-interop.sh`).
+- `otf-pixels-codec-png`: `PngDecoder`, covering every v1 PNG feature — bit
+  depths 1/2/4/8/16, colour types 0/2/3/4/6, `PLTE`, `tRNS`, Adam7 interlace
+  and all five filter types. Ancillary chunks are skipped, not honoured.
+- `otf-pixels-codec-png`: the PngSuite conformance corpus (100 files, ~62 KB,
+  vendored with its licence) checked against reference decodings from libpng
+  rather than against ourselves. All 14 corruption modes are rejected, and no
+  truncation or single-byte mutation of any fixture panics.
 - `otf-pixels-core`: `TileCache`, a byte-budgeted LRU of graph intermediates
   keyed by `(NodeId, Region)`. Eviction bounds what the cache *retains*, never
   what a caller holds alive, so tiles need no pinning.
