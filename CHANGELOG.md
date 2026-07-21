@@ -33,6 +33,12 @@ versioning: [SemVer](https://semver.org/).
 
 ### Added
 - ADR-0011 (SIMD by autovectorization; fixed-point arithmetic at 8 bits).
+- `otf-pixels-ops`: the rest of the v1 op set (SPEC §Core ops) — `Rotate`
+  (quarter turns), `Modulate` (brightness/saturation/hue), `Convolve` with
+  blur, Gaussian and sharpen presets, `Composite` (Porter-Duff source-over,
+  the first two-input op), `ExtractChannel` and `Flatten`. Every op with a
+  non-trivial demand mapping asserts that its output does not depend on how
+  the image is tiled.
 - `otf-pixels-ops`: `Resize`, separable resampling with seven filters
   (nearest, box, bilinear, Catmull-Rom, Mitchell, Lanczos2, Lanczos3), `Fit`
   modes and `without_enlargement`. Weight tables are built per *image*, not
