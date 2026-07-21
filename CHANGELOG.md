@@ -35,6 +35,23 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Added
+- `otf-pixels-codec-jpeg`: `JpegDecoder`, baseline JPEG from scratch — Huffman
+  entropy decode, a fixed-point IDCT, every chroma subsampling, restart
+  intervals, greyscale and RGB-labelled files, and EXIF orientation read (but
+  not applied: `auto_orient` is a pipeline decision, and a decoder that
+  rotated its own output would leave no way to turn it off). Decode is
+  streaming at one MCU row, so peak memory is a band and not the image.
+  Progressive, arithmetic-coded, 12-bit and CMYK files are reported
+  `Unsupported` rather than `Malformed`: they are valid JPEGs this codec does
+  not own, and a host binding routes on that difference.
+- `otf-pixels-codec-jpeg` fixtures are compared against libjpeg-turbo with a
+  tolerance rather than a hash, because JPEG defines the IDCT only to an
+  accuracy bound and a hash would fail a conforming decoder. Chroma is
+  upsampled nearest-neighbour where libjpeg interpolates, so subsampled
+  fixtures are compared across their flat interiors, where the two filters
+  must agree, and left alone at chroma edges, where they legitimately differ.
+- A `jpeg_decode` fuzz target and an in-tree mutation harness, both asserting
+  only that no input panics.
 - M5 exit-criterion tests and `benches/thumbnail.rs`, the giant-tiled-TIFF
   thumbnail benchmark against libvips. It skips cleanly when `vips` is not
   installed rather than omitting the row or inventing a number.

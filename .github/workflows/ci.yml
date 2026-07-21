@@ -143,3 +143,5 @@ jobs:
         working-directory: fuzz
       - run: cargo fuzz run png_roundtrip -- -max_total_time=120
         working-directory: fuzz
+      - run: cargo fuzz run jpeg_decode -- -max_total_time=120
+        working-directory: fuzz

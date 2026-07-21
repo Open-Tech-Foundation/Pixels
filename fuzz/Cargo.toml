@@ -11,6 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 otf-pixels-core = { path = "../crates/otf-pixels-core" }
 otf-pixels-codec-png = { path = "../crates/otf-pixels-codec-png" }
+otf-pixels-codec-jpeg = { path = "../crates/otf-pixels-codec-jpeg" }
 
 [[bin]]
 name = "png_decode"
@@ -22,6 +23,13 @@ bench = false
 [[bin]]
 name = "inflate"
 path = "fuzz_targets/inflate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jpeg_decode"
+path = "fuzz_targets/jpeg_decode.rs"
 test = false
 doc = false
 bench = false

@@ -1,0 +1,14 @@
+# Regenerate with scripts/regenerate-jpeg-reference.py
+# name width height channels
+blocks420 70 42 3
+blocks444 61 37 3
+gradient420 64 48 3
+gradient422 64 48 3
+gradient444 61 37 3
+gray 61 37 1
+graynoise 40 24 1
+noise444 48 32 3
+restart420 64 48 3
+restart444 61 37 3
+tiny420 3 2 3
+tiny444 1 1 3

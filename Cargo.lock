@@ -132,6 +132,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "otf-pixels-codec-jpeg"
+version = "0.0.1"
+dependencies = [
+ "otf-pixels-core",
+]
+
+[[package]]
 name = "otf-pixels-codec-png"
 version = "0.0.1"
 dependencies = [
