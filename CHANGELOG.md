@@ -53,6 +53,22 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Added
+- Progressive JPEG decode, wrapped rather than owned (ADR-0004), behind the
+  `jpeg-progressive` feature of `otf-pixels` — on by default. `jpeg-decoder`
+  with default features off is the only external dependency in the default
+  build and brings no transitive ones; `default-features = false` drops it and
+  progressive files then report `Unsupported` naming the feature.
+- The handover is the part worth testing, and is tested: our header parser
+  consumes bytes from a forward-only stream before it learns the frame is
+  progressive, so the reader records what it has read and replays it to the
+  wrapped decoder. A short, long or misordered replay would produce a wrong
+  picture or a rejected file, so both progressive fixtures are compared
+  against libjpeg to within 4 per sample. The tape is dropped the moment a
+  baseline frame is confirmed, so an ordinary decode buffers nothing.
+- `JpegDecoder::is_progressive` reports which decoder ran. Progressive frames
+  are internally buffered (SPEC §Formats) and offer no reduced-scale decode,
+  so shrink-on-load correctly declines them rather than promising a fast path
+  the wrapped decoder cannot provide.
 - Shrink-on-load: `shrink_on_load` rewrites a graph over a reduced source when
   the whole pipeline permits it, so a JPEG thumbnail decodes at 1/8 rather
   than at full size and then discards the pixels. The decision needs the

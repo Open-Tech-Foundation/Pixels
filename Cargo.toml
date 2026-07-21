@@ -29,7 +29,9 @@ crossbeam-deque = "0.8.7"
 otf-pixels-core = { version = "0.0.1", path = "crates/otf-pixels-core" }
 otf-pixels-ops = { version = "0.0.1", path = "crates/otf-pixels-ops" }
 otf-pixels-codec-gif = { version = "0.0.1", path = "crates/otf-pixels-codec-gif" }
-otf-pixels-codec-jpeg = { version = "0.0.1", path = "crates/otf-pixels-codec-jpeg" }
+# Default features off here so the facade can decide whether to pull in the
+# wrapped progressive decoder; members cannot override a workspace default.
+otf-pixels-codec-jpeg = { version = "0.0.1", path = "crates/otf-pixels-codec-jpeg", default-features = false }
 otf-pixels-codec-png = { version = "0.0.1", path = "crates/otf-pixels-codec-png" }
 otf-pixels-codec-tiff = { version = "0.0.1", path = "crates/otf-pixels-codec-tiff" }
 otf-pixels-compress = { version = "0.0.1", path = "crates/otf-pixels-compress" }

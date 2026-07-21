@@ -37,6 +37,16 @@ pub struct Reader<S: Source> {
     bits: u32,
     /// A marker met while feeding bits, held until the scan loop asks for it.
     marker: Option<u8>,
+    /// Every byte pulled so far, when the caller may need to replay them.
+    ///
+    /// Progressive JPEG is decoded by a wrapped codec (ADR-0004) that wants
+    /// the stream from byte zero, but nothing announces "progressive" until
+    /// the `SOF2` marker — by which point the header is already consumed and a
+    /// forward-only source cannot give it back. Recording until the frame type
+    /// is known is what makes the handover possible; the tape is dropped the
+    /// moment a baseline frame is confirmed, so an ordinary decode carries
+    /// nothing.
+    tape: Option<Vec<u8>>,
 }
 
 impl<S: Source> std::fmt::Debug for Reader<S> {
@@ -63,7 +73,32 @@ impl<S: Source> Reader<S> {
             accumulator: 0,
             bits: 0,
             marker: None,
+            tape: None,
         }
+    }
+
+    /// Start recording pulled bytes, so the stream can be replayed.
+    pub fn record(&mut self) {
+        self.tape = Some(Vec::new());
+    }
+
+    /// Stop recording and discard what was recorded.
+    pub fn forget(&mut self) {
+        self.tape = None;
+    }
+
+    /// Consume the reader, returning the bytes needed to replay the stream
+    /// from where recording began, and the source positioned after them.
+    ///
+    /// The replay is everything pulled while recording plus everything read
+    /// from the source into the buffer but not yet pulled — otherwise the
+    /// buffered tail would be lost.
+    pub fn into_replay(self) -> (Vec<u8>, S) {
+        let mut replay = self.tape.unwrap_or_default();
+        if let Some(pending) = self.buffer.get(self.position..self.filled) {
+            replay.extend_from_slice(pending);
+        }
+        (replay, self.source)
     }
 
     /// The next byte of the stream, or `None` at end of input.
@@ -82,6 +117,9 @@ impl<S: Source> Reader<S> {
         }
         let byte = self.buffer.get(self.position).copied();
         self.position += 1;
+        if let (Some(tape), Some(byte)) = (self.tape.as_mut(), byte) {
+            tape.push(byte);
+        }
         Ok(byte)
     }
 

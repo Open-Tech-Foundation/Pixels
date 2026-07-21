@@ -31,6 +31,8 @@ mod fdct;
 mod format;
 mod huffman;
 mod idct;
+#[cfg(feature = "progressive")]
+mod progressive;
 mod tables;
 
 pub use decoder::{JpegCodec, JpegDecoder, probe};

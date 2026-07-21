@@ -58,8 +58,183 @@ struct Plane {
     rows: Vec<u32>,
 }
 
-/// Decodes a baseline JPEG stream.
+/// What parsing the headers turned out to find.
+enum Parsed<S: Source> {
+    /// A baseline frame, decoded by this crate.
+    Baseline(Box<Baseline<S>>),
+    /// A progressive frame, to be handed to the wrapped decoder along with the
+    /// header bytes already consumed from the stream.
+    #[cfg(feature = "progressive")]
+    Progressive {
+        /// Everything read so far, so the stream can be replayed from zero.
+        replay: Vec<u8>,
+        /// The source, positioned after `replay`.
+        source: S,
+        /// Carried across the handover so a progressive photograph reports its
+        /// orientation like a baseline one does.
+        orientation: Option<u8>,
+    },
+}
+
+/// Decodes a JPEG stream.
+///
+/// Baseline frames are decoded by this crate, one MCU row at a time.
+/// Progressive frames are handed to a wrapped decoder (ADR-0004) and are
+/// internally buffered — the distinction is not visible through [`Decoder`],
+/// which is the point of the trait boundary.
+#[derive(Debug)]
 pub struct JpegDecoder<S: Source> {
+    inner: Inner<S>,
+}
+
+/// Which decoder is actually running.
+#[derive(Debug)]
+enum Inner<S: Source> {
+    Baseline(Box<Baseline<S>>),
+    #[cfg(feature = "progressive")]
+    Progressive(crate::progressive::Progressive),
+}
+
+impl<S: Source> JpegDecoder<S> {
+    /// Read every header up to and including the scan header.
+    ///
+    /// No coefficient is decoded here for a baseline frame, so this is the
+    /// `probe()`/metadata path as well as the start of a decode (SPEC
+    /// §Guarantees 3). A progressive frame is decoded in full, because it has
+    /// no prefix that yields a finished row.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::Malformed`] for a stream that is not a
+    /// well-formed JPEG, [`PixelsError::Unsupported`] for a variant neither
+    /// this crate nor the wrapped decoder handles (arithmetic coding, 12-bit,
+    /// CMYK), or [`PixelsError::LimitExceeded`] if the frame exceeds `limits`.
+    pub fn new(source: S, limits: Limits) -> Result<Self> {
+        Self::with_scale(source, limits, Scale::Full)
+    }
+
+    /// Read every header, and decode at a reduced resolution.
+    ///
+    /// At `M/8` scale the decoder inverse-transforms only the low-frequency
+    /// corner of each block, so a thumbnail costs a fraction of the arithmetic
+    /// and — the point of it — the full-resolution image is never
+    /// materialized. Entropy decoding is unchanged: every coefficient is still
+    /// read, because the format gives no way to skip one.
+    ///
+    /// [`Decoder::descriptor`] reports the *scaled* size, so a caller that
+    /// asks for a reduced decode is told what it will actually receive.
+    ///
+    /// `scale` is ignored for a progressive frame, which the wrapped decoder
+    /// produces at full size; [`Decoder::descriptor`] then reports that size,
+    /// so the caller is never misled about what it is getting.
+    ///
+    /// # Errors
+    ///
+    /// As [`JpegDecoder::new`].
+    pub fn with_scale(source: S, limits: Limits, scale: Scale) -> Result<Self> {
+        let inner = match Baseline::with_scale(source, limits, scale)? {
+            Parsed::Baseline(baseline) => Inner::Baseline(baseline),
+            #[cfg(feature = "progressive")]
+            Parsed::Progressive {
+                replay,
+                source,
+                orientation,
+            } => Inner::Progressive(crate::progressive::Progressive::new(
+                replay,
+                source,
+                limits,
+                orientation,
+            )?),
+        };
+        Ok(Self { inner })
+    }
+
+    /// The resolution this decoder produces, as eighths of full size.
+    ///
+    /// Always [`Scale::Full`] for a progressive frame.
+    #[must_use]
+    pub const fn scale(&self) -> Scale {
+        match &self.inner {
+            Inner::Baseline(baseline) => baseline.scale,
+            #[cfg(feature = "progressive")]
+            Inner::Progressive(_) => Scale::Full,
+        }
+    }
+
+    /// The EXIF orientation tag, 1..=8, if the file carries one.
+    ///
+    /// Applying it is the caller's job: `auto_orient` is a pipeline decision
+    /// (SPEC §Safety and limits), and a decoder that rotated its own output
+    /// would leave no way to turn that off.
+    #[must_use]
+    pub const fn orientation(&self) -> Option<u8> {
+        match &self.inner {
+            Inner::Baseline(baseline) => baseline.orientation,
+            #[cfg(feature = "progressive")]
+            Inner::Progressive(progressive) => progressive.orientation(),
+        }
+    }
+
+    /// Whether this stream was progressive, and so decoded by the wrapped
+    /// codec rather than by this crate.
+    #[must_use]
+    pub const fn is_progressive(&self) -> bool {
+        match &self.inner {
+            Inner::Baseline(_) => false,
+            #[cfg(feature = "progressive")]
+            Inner::Progressive(_) => true,
+        }
+    }
+}
+
+impl<S: Source + std::fmt::Debug> Decoder for JpegDecoder<S> {
+    fn descriptor(&self) -> ImageDescriptor {
+        match &self.inner {
+            Inner::Baseline(baseline) => baseline.descriptor(),
+            #[cfg(feature = "progressive")]
+            Inner::Progressive(progressive) => progressive.descriptor(),
+        }
+    }
+
+    fn capability(&self) -> DecodeCapability {
+        match &self.inner {
+            Inner::Baseline(baseline) => baseline.capability(),
+            #[cfg(feature = "progressive")]
+            Inner::Progressive(progressive) => progressive.capability(),
+        }
+    }
+
+    fn reduced_descriptor(&self, target: (u32, u32)) -> Option<ImageDescriptor> {
+        match &self.inner {
+            Inner::Baseline(baseline) => baseline.reduced_descriptor(target),
+            // The wrapped decoder has no reduced-scale path, so shrink-on-load
+            // does not fire for a progressive source.
+            #[cfg(feature = "progressive")]
+            Inner::Progressive(_) => None,
+        }
+    }
+
+    fn reduce_to(&mut self, descriptor: ImageDescriptor) -> Result<()> {
+        match &mut self.inner {
+            Inner::Baseline(baseline) => baseline.reduce_to(descriptor),
+            #[cfg(feature = "progressive")]
+            Inner::Progressive(_) => Err(PixelsError::unsupported(
+                "jpeg: a progressive frame decodes at one resolution",
+            )),
+        }
+    }
+
+    fn read_row(&mut self, out: &mut [u8]) -> Result<()> {
+        match &mut self.inner {
+            Inner::Baseline(baseline) => baseline.read_row(out),
+            #[cfg(feature = "progressive")]
+            Inner::Progressive(progressive) => progressive.read_row(out),
+        }
+    }
+}
+
+/// The baseline decoder: everything this crate implements itself.
+struct Baseline<S: Source> {
     reader: Reader<S>,
     descriptor: ImageDescriptor,
     frame: Frame,
@@ -97,9 +272,9 @@ pub struct JpegDecoder<S: Source> {
     row: u32,
 }
 
-impl<S: Source> std::fmt::Debug for JpegDecoder<S> {
+impl<S: Source> std::fmt::Debug for Baseline<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("JpegDecoder")
+        f.debug_struct("Baseline")
             .field("descriptor", &self.descriptor)
             .field("colour", &self.colour)
             .field("components", &self.frame.components)
@@ -111,7 +286,7 @@ impl<S: Source> std::fmt::Debug for JpegDecoder<S> {
     }
 }
 
-impl<S: Source> JpegDecoder<S> {
+impl<S: Source> Baseline<S> {
     /// Read every header up to and including the scan header.
     ///
     /// No coefficient is decoded here, so this is the `probe()`/metadata path
@@ -123,10 +298,6 @@ impl<S: Source> JpegDecoder<S> {
     /// well-formed baseline JPEG, [`PixelsError::Unsupported`] for a JPEG
     /// variant this crate does not own (progressive, arithmetic-coded, 12-bit,
     /// CMYK), or [`PixelsError::LimitExceeded`] if the frame exceeds `limits`.
-    pub fn new(source: S, limits: Limits) -> Result<Self> {
-        Self::with_scale(source, limits, Scale::Full)
-    }
-
     /// Read every header, and decode at a reduced resolution.
     ///
     /// At `M/8` scale the decoder inverse-transforms only the low-frequency
@@ -142,8 +313,12 @@ impl<S: Source> JpegDecoder<S> {
     /// # Errors
     ///
     /// As [`JpegDecoder::new`].
-    pub fn with_scale(source: S, limits: Limits, scale: Scale) -> Result<Self> {
+    fn with_scale(source: S, limits: Limits, scale: Scale) -> Result<Parsed<S>> {
         let mut reader = Reader::new(source);
+        // Recorded only until the frame type is known; a baseline frame drops
+        // the tape immediately, so an ordinary decode buffers nothing.
+        #[cfg(feature = "progressive")]
+        reader.record();
         let mut quant = [[0_u16; 64]; 4];
         let mut dc_tables: [Option<HuffmanTable>; 4] = [None, None, None, None];
         let mut ac_tables: [Option<HuffmanTable>; 4] = [None, None, None, None];
@@ -170,6 +345,8 @@ impl<S: Source> JpegDecoder<S> {
                             "stream declares more than one frame",
                         ));
                     }
+                    #[cfg(feature = "progressive")]
+                    reader.forget();
                     let parsed = Frame::parse(&reader.read_segment()?)?;
                     // Checked here rather than once the scan header arrives,
                     // so an enormous frame costs one segment parse and stops
@@ -182,9 +359,21 @@ impl<S: Source> JpegDecoder<S> {
                     // decoders differ far more than the marker suggests — the
                     // coefficients arrive in spectral bands across many scans,
                     // which rules out the one-band-at-a-time streaming this
-                    // decoder is built around.
+                    // decoder is built around. So the stream is handed over
+                    // whole, replayed from the header already consumed.
+                    #[cfg(feature = "progressive")]
+                    {
+                        let (replay, source) = reader.into_replay();
+                        return Ok(Parsed::Progressive {
+                            replay,
+                            source,
+                            orientation,
+                        });
+                    }
+                    #[cfg(not(feature = "progressive"))]
                     return Err(PixelsError::unsupported(
-                        "jpeg: progressive JPEG; this codec decodes baseline only",
+                        "jpeg: progressive JPEG; enable the `progressive` feature of \
+                         otf-pixels-codec-jpeg to decode it",
                     ));
                 }
                 marker::DAC => {
@@ -352,7 +541,7 @@ impl<S: Source> JpegDecoder<S> {
             row: 0,
         };
         decoder.apply_scale(scale)?;
-        Ok(decoder)
+        Ok(Parsed::Baseline(Box::new(decoder)))
     }
 
     /// Set the resolution this decoder will produce, rebuilding the geometry
@@ -424,22 +613,6 @@ impl<S: Source> JpegDecoder<S> {
         self.band_height = band_height;
         self.scale = scale;
         Ok(())
-    }
-
-    /// The resolution this decoder produces, as eighths of full size.
-    #[must_use]
-    pub const fn scale(&self) -> Scale {
-        self.scale
-    }
-
-    /// The EXIF orientation tag, 1..=8, if the file carries one.
-    ///
-    /// Applying it is the caller's job: `auto_orient` is a pipeline decision
-    /// (SPEC §Safety and limits), and a decoder that rotated its own output
-    /// would leave no way to turn that off.
-    #[must_use]
-    pub const fn orientation(&self) -> Option<u8> {
-        self.orientation
     }
 
     /// Decode one MCU row into the component planes, then convert it into the
@@ -831,7 +1004,7 @@ fn read_huffman_tables(
     Ok(())
 }
 
-impl<S: Source + std::fmt::Debug> Decoder for JpegDecoder<S> {
+impl<S: Source + std::fmt::Debug> Decoder for Baseline<S> {
     fn descriptor(&self) -> ImageDescriptor {
         self.descriptor
     }

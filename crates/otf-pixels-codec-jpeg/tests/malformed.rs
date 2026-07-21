@@ -58,14 +58,31 @@ fn ycbcr() -> Vec<[u8; 3]> {
     vec![[1, 0x22, 0], [2, 0x11, 1], [3, 0x11, 1]]
 }
 
+/// Progressive JPEG is decoded by a wrapped codec (ADR-0004), so it is no
+/// longer refused — but only when the feature that pulls the wrapped codec in
+/// is compiled. Without it the refusal must still be `Unsupported` and must
+/// still say what to do about it.
 #[test]
-fn progressive_jpeg_is_unsupported_not_malformed() {
-    let error = open(&read_fixture("progressive")).unwrap_err();
-    assert_eq!(error.code(), ErrorCode::Unsupported, "{error}");
-    assert!(
-        error.to_string().contains("progressive"),
-        "the message should name the reason: {error}"
-    );
+fn progressive_jpeg_is_decoded_or_names_the_feature() {
+    let bytes = read_fixture("progressive");
+    #[cfg(feature = "progressive")]
+    {
+        let decoder = open(&bytes).expect("progressive JPEG should decode");
+        assert!(decoder.is_progressive(), "routed to the baseline decoder");
+        assert_eq!(
+            (decoder.descriptor().width, decoder.descriptor().height),
+            (48, 32)
+        );
+    }
+    #[cfg(not(feature = "progressive"))]
+    {
+        let error = open(&bytes).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::Unsupported, "{error}");
+        assert!(
+            error.to_string().contains("progressive"),
+            "the message should name the reason: {error}"
+        );
+    }
 }
 
 #[test]

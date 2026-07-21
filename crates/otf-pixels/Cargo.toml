@@ -21,7 +21,7 @@ otf-pixels-codec-jpeg = { workspace = true, optional = true }
 otf-pixels-codec-tiff = { workspace = true, optional = true }
 
 [features]
-default = ["raw", "png", "gif", "jpeg", "tiff"]
+default = ["raw", "png", "gif", "jpeg", "jpeg-progressive", "tiff"]
 # Raw pixel codec. Kept behind a feature for symmetry with the other codecs
 # (ARCHITECTURE §Layer 2: "each format is a plugin behind a cargo feature").
 raw = ["dep:otf-pixels-codec-raw"]
@@ -32,6 +32,11 @@ gif = ["dep:otf-pixels-codec-gif"]
 # Baseline JPEG codec, including M/8 scaled decode. Progressive JPEG is a
 # wrapped codec and is not part of this feature.
 jpeg = ["dep:otf-pixels-codec-jpeg"]
+# Progressive JPEG, which is wrapped rather than owned (ADR-0004) and is the
+# only external dependency in the default build. Drop it with
+# `default-features = false` plus the features you want, and progressive files
+# then report `Unsupported`.
+jpeg-progressive = ["jpeg", "otf-pixels-codec-jpeg?/progressive"]
 # TIFF codec. The only v1 format with region random access.
 tiff = ["dep:otf-pixels-codec-tiff"]
 

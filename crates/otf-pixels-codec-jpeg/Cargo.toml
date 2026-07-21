@@ -12,6 +12,17 @@ keywords.workspace = true
 
 [dependencies]
 otf-pixels-core.workspace = true
+# The only wrapped codec in this crate (ADR-0004). Default features off keeps
+# it a single crate with no transitive dependencies of its own — the `rayon`
+# feature is the only thing that would pull anything in.
+jpeg-decoder = { version = "0.3.2", default-features = false, optional = true }
+
+[features]
+default = ["progressive"]
+# Progressive JPEG decode, wrapped rather than owned (ADR-0004). Turn it off
+# for a build with no dependencies at all; progressive files then report
+# `Unsupported`, which is what this crate did before the feature existed.
+progressive = ["dep:jpeg-decoder"]
 
 [lints]
 workspace = true

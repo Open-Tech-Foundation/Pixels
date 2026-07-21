@@ -69,6 +69,15 @@ fn references() -> Vec<Reference> {
         .collect()
 }
 
+/// Whether this build can decode `name` at all.
+///
+/// The progressive fixtures need the wrapped decoder, which is behind a
+/// feature; without it they are expected to be refused, and the suites that
+/// sweep every fixture skip them rather than asserting the impossible.
+fn decodable(name: &str) -> bool {
+    cfg!(feature = "progressive") || !name.starts_with("progressive")
+}
+
 /// Decode a whole fixture into interleaved bytes.
 fn decode(bytes: &[u8]) -> otf_pixels_core::Result<(Vec<u8>, u32, u32, PixelFormat)> {
     let mut decoder = JpegDecoder::new(bytes, Limits::default())?;
@@ -283,7 +292,7 @@ fn hard_edged_subsampled_fixtures_match_libjpeg_away_from_chroma_edges() {
 fn every_fixture_decodes_to_its_declared_shape() {
     let all = references();
     assert!(all.len() >= 10, "the fixture set has shrunk");
-    for reference in all {
+    for reference in all.into_iter().filter(|r| decodable(&r.name)) {
         let (ours, width, height, _) = decode(&read_fixture(&reference.name, "jpg"))
             .unwrap_or_else(|e| panic!("{}: {e}", reference.name));
         assert_eq!(
@@ -320,7 +329,7 @@ fn restart_markers_do_not_change_the_decoded_image() {
 
 #[test]
 fn decoding_is_deterministic() {
-    for reference in references() {
+    for reference in references().into_iter().filter(|r| decodable(&r.name)) {
         let bytes = read_fixture(&reference.name, "jpg");
         let (first, ..) = decode(&bytes).unwrap();
         let (second, ..) = decode(&bytes).unwrap();
@@ -393,6 +402,64 @@ fn exif_orientation_is_read_but_not_applied() {
         ours.extend_from_slice(&row);
     }
     assert_eq!(ours, expected, "the orientation tag changed the pixels");
+}
+
+/// Progressive JPEG, decoded by the wrapped codec.
+///
+/// The wrapped decoder is not on trial here — libjpeg-turbo and
+/// `jpeg-decoder` are both mature. What is on trial is the **seam**: our
+/// header parser consumes bytes from a forward-only stream before it learns
+/// the frame is progressive, and the wrapped decoder needs the stream from
+/// byte zero. If the replayed prefix were short, long, or misordered, the
+/// picture would be wrong or the file rejected — so an exact-ish comparison
+/// against libjpeg is exactly the check that seam needs.
+#[cfg(feature = "progressive")]
+#[test]
+fn progressive_fixtures_match_libjpeg() {
+    let mut compared = 0;
+    for reference in references() {
+        if !reference.name.starts_with("progressive") {
+            continue;
+        }
+        let (ours, width, height, pixel) = decode(&read_fixture(&reference.name, "jpg"))
+            .unwrap_or_else(|e| panic!("{}: {e}", reference.name));
+        let theirs = read_fixture(&reference.name, "raw");
+
+        assert_eq!((width, height), (reference.width, reference.height));
+        assert_eq!(pixel, PixelFormat::Rgb8, "{}", reference.name);
+        assert_eq!(ours.len(), theirs.len(), "{}: raster size", reference.name);
+
+        // Two decoders of the same progressive stream should agree to within
+        // the IDCT tolerance, chroma upsampling included: unlike our baseline
+        // path, this one does not substitute its own upsampler.
+        let (worst, mean) = difference(&ours, &theirs, |_| true);
+        assert!(
+            worst <= 4 && mean <= 0.5,
+            "{}: worst {worst}, mean {mean:.3}",
+            reference.name
+        );
+        compared += 1;
+    }
+    assert!(
+        compared >= 2,
+        "only {compared} progressive fixtures compared"
+    );
+}
+
+/// The handover must not disturb what the header said.
+#[cfg(feature = "progressive")]
+#[test]
+fn a_progressive_stream_reports_its_shape_and_route() {
+    let bytes = read_fixture("progressive", "jpg");
+    let decoder = JpegDecoder::new(&bytes[..], Limits::default()).unwrap();
+    assert!(decoder.is_progressive());
+    // The wrapped decoder produces one resolution, so shrink-on-load has
+    // nothing to offer and must not claim otherwise.
+    assert_eq!(decoder.scale(), otf_pixels_codec_jpeg::Scale::Full);
+
+    let baseline = read_fixture("gradient444", "jpg");
+    let decoder = JpegDecoder::new(&baseline[..], Limits::default()).unwrap();
+    assert!(!decoder.is_progressive(), "a baseline frame was misrouted");
 }
 
 #[test]

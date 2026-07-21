@@ -114,6 +114,17 @@ FIXTURES = {
         blocks(61, 37), "RGB",
         dict(quality=90, subsampling=0, restart_marker_blocks=3),
     ),
+    # Progressive, which a wrapped decoder handles (ADR-0004). Compared like
+    # any other fixture: what matters is that the seam between our header
+    # parsing and the wrapped decoder produces the same picture libjpeg does.
+    "progressive": (
+        gradient(48, 32), "RGB",
+        dict(quality=90, subsampling=0, progressive=True),
+    ),
+    "progressive420": (
+        blocks(64, 48), "RGB",
+        dict(quality=85, subsampling=2, progressive=True),
+    ),
     # Smaller than one MCU in both axes: the whole image is edge padding.
     "tiny420": (blocks(3, 2), "RGB", dict(quality=80, subsampling=2)),
     "tiny444": (blocks(1, 1), "RGB", dict(quality=80, subsampling=0)),
@@ -125,7 +136,6 @@ FIXTURES = {
 # asserts — but they are still fed to the fuzz corpus, where "does not panic"
 # applies to them like anything else.
 UNSUPPORTED = {
-    "progressive": (gradient(48, 32), dict(quality=90, progressive=True)),
     "cmyk": (gradient(48, 32).convert("CMYK"), dict(quality=90)),
 }
 
