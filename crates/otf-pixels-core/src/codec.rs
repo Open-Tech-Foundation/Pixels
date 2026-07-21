@@ -71,8 +71,14 @@ pub enum DecodeCapability {
     Sequential,
     /// Can produce an arbitrary region without decoding the whole image.
     ///
-    /// This covers tiled TIFF and scaled-decode JPEG, and is what makes the
-    /// giant-image thumbnail path constant-memory.
+    /// This covers tiled TIFF, and is what makes the giant-image thumbnail
+    /// path constant-memory.
+    ///
+    /// A JPEG decoding at a reduced `M/8` scale is *not* this, though an
+    /// earlier version of this comment said it was: scaled decode lowers the
+    /// resolution but still emits rows in order, and every coefficient is
+    /// still entropy-decoded. It is a decoder configuration, not a capability,
+    /// and claiming otherwise would be a lie the scheduler acts on.
     Regions,
 }
 

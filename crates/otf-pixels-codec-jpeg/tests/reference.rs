@@ -87,6 +87,62 @@ fn decode(bytes: &[u8]) -> otf_pixels_core::Result<(Vec<u8>, u32, u32, PixelForm
     ))
 }
 
+/// The reduced scales, with the reference suffix and divisor of each.
+fn scales() -> Vec<(otf_pixels_codec_jpeg::Scale, &'static str, u32)> {
+    vec![
+        (otf_pixels_codec_jpeg::Scale::Eighth, "s1", 8),
+        (otf_pixels_codec_jpeg::Scale::Quarter, "s2", 4),
+        (otf_pixels_codec_jpeg::Scale::Half, "s4", 2),
+    ]
+}
+
+/// Decode a fixture at a reduced scale.
+fn decode_scaled(
+    bytes: &[u8],
+    scale: otf_pixels_codec_jpeg::Scale,
+) -> (Vec<u8>, otf_pixels_core::ImageDescriptor) {
+    let mut decoder = JpegDecoder::with_scale(bytes, Limits::default(), scale).unwrap();
+    let descriptor = decoder.descriptor();
+    let mut pixels = Vec::new();
+    let mut row = vec![0_u8; descriptor.row_bytes()];
+    for _ in 0..descriptor.height {
+        decoder.read_row(&mut row).unwrap();
+        pixels.extend_from_slice(&row);
+    }
+    (pixels, descriptor)
+}
+
+/// Box-average a raster down to `(width, height)`.
+fn box_average(
+    source: &[u8],
+    source_width: usize,
+    source_height: usize,
+    channels: usize,
+    width: usize,
+    height: usize,
+) -> Vec<u8> {
+    let mut out = vec![0_u8; width * height * channels];
+    for y in 0..height {
+        for x in 0..width {
+            for channel in 0..channels {
+                let (mut total, mut count) = (0_u32, 0_u32);
+                let y0 = y * source_height / height;
+                let y1 = ((y + 1) * source_height / height).max(y0 + 1);
+                let x0 = x * source_width / width;
+                let x1 = ((x + 1) * source_width / width).max(x0 + 1);
+                for sy in y0..y1.min(source_height) {
+                    for sx in x0..x1.min(source_width) {
+                        total += u32::from(source[(sy * source_width + sx) * channels + channel]);
+                        count += 1;
+                    }
+                }
+                out[(y * width + x) * channels + channel] = (total / count.max(1)) as u8;
+            }
+        }
+    }
+    out
+}
+
 /// Largest and mean absolute difference between two rasters, over the samples
 /// selected by `channel_of`.
 fn difference(ours: &[u8], theirs: &[u8], keep: impl Fn(usize) -> bool) -> (u32, f64) {
@@ -354,4 +410,140 @@ fn probe_recognises_fixtures_and_nothing_else() {
     // A truncated signature must be declined, not indexed past.
     assert!(!otf_pixels_codec_jpeg::probe(&[0xFF, 0xD8]));
     assert!(!otf_pixels_codec_jpeg::probe(&[]));
+}
+
+/// Scaled decode, against libjpeg's own scaled decode.
+///
+/// Our reduced transform could be self-consistent and still wrong about what
+/// `M/8` means — the coefficients have to be folded together the same way both
+/// decoders fold them, or a thumbnail comes out softened, sharpened or
+/// shifted. So the comparison is against libjpeg, on the fixtures where
+/// nothing else intrudes: full-resolution chroma, where the upsampling
+/// difference documented above cannot contribute.
+///
+/// Ground truth for both is libjpeg's *full* decode, box-averaged down. Two
+/// reduced decoders can be compared to each other, but only against a true
+/// downsample can either be called right.
+#[test]
+fn scaled_decode_is_as_faithful_as_libjpegs() {
+    let mut compared = 0;
+    for reference in references() {
+        // 4:2:0 and 4:2:2 are excluded here and covered by the test below:
+        // their chroma passes through an upsampler we deliberately implement
+        // differently, which would swamp what this test is measuring.
+        if !reference.name.contains("444") && reference.channels != 1 {
+            continue;
+        }
+        let bytes = read_fixture(&reference.name, "jpg");
+        let full = read_fixture(&reference.name, "raw");
+
+        for (scale, suffix, denominator) in scales() {
+            if reference.width < denominator || reference.height < denominator {
+                continue;
+            }
+            let (ours, descriptor) = decode_scaled(&bytes, scale);
+            let theirs = read_fixture(&reference.name, &format!("{suffix}.raw"));
+            assert_eq!(
+                ours.len(),
+                theirs.len(),
+                "{} at {scale:?}: raster size",
+                reference.name
+            );
+
+            let truth = box_average(
+                &full,
+                reference.width as usize,
+                reference.height as usize,
+                reference.channels,
+                descriptor.width as usize,
+                descriptor.height as usize,
+            );
+            let (_, ours_error) = difference(&ours, &truth, |_| true);
+            let (_, their_error) = difference(&theirs, &truth, |_| true);
+
+            // Not "within a factor of" but "no worse than": the reduced
+            // transform is defined as the exact box average, so anything
+            // beyond libjpeg's own distance from the truth is a defect and
+            // not an approximation choice.
+            assert!(
+                ours_error <= their_error + 0.5,
+                "{} at {scale:?}: our mean error {ours_error:.3} against \
+                 libjpeg's {their_error:.3} from the true downsample",
+                reference.name
+            );
+            compared += 1;
+        }
+    }
+    assert!(
+        compared >= 12,
+        "only {compared} scaled decodes were compared"
+    );
+}
+
+/// Scaled decode of a subsampled image, where chroma cannot keep up.
+///
+/// Two things put our reduced decode of a 4:2:0 or 4:2:2 file further from
+/// libjpeg's than a 4:4:4 file, and neither is the reduced transform:
+///
+/// - The **chroma upsampler**, which we deliberately implement as replication
+///   where libjpeg interpolates (see the module docs). At full resolution
+///   these same fixtures agree with libjpeg to within one step per sample; at
+///   1/8 one chroma sample covers a 2x2 output block, so the same difference
+///   is worth an order of magnitude more.
+/// - **Chroma resolution**, which the format caps: a chroma block cannot
+///   produce less than one sample, so a 4:2:0 image decoded at 1/8 has chroma
+///   at 1/16 of the image. libjpeg is bound by this too.
+///
+/// So the bound here is looser than the 4:4:4 one and is stated in absolute
+/// terms, on the smoothly-shaded fixtures where it is interpretable. It is a
+/// regression gate on a known deviation, not a claim of agreement.
+#[test]
+fn scaled_decode_of_subsampled_images_stays_near_libjpeg() {
+    let mut compared = 0;
+    for name in ["gradient420", "gradient422", "restart420"] {
+        let bytes = read_fixture(name, "jpg");
+        for (scale, suffix, denominator) in scales() {
+            let (ours, descriptor) = decode_scaled(&bytes, scale);
+            let theirs = read_fixture(name, &format!("{suffix}.raw"));
+            assert_eq!(ours.len(), theirs.len(), "{name} at {scale:?}: raster size");
+            let _ = (descriptor, denominator);
+
+            let (worst, mean) = difference(&ours, &theirs, |_| true);
+            assert!(
+                mean <= 10.0 && worst <= 30,
+                "{name} at {scale:?}: worst {worst}, mean {mean:.3} against \
+                 libjpeg's scaled decode"
+            );
+            compared += 1;
+        }
+    }
+    assert!(
+        compared >= 9,
+        "only {compared} scaled decodes were compared"
+    );
+}
+
+/// A scaled decode must cost a fraction of the memory a full one does, which
+/// is the entire reason it exists.
+#[test]
+fn a_scaled_decode_never_materializes_the_full_image() {
+    let bytes = read_fixture("gradient420", "jpg");
+    let full = JpegDecoder::new(&bytes[..], Limits::default()).unwrap();
+    let full_row = full.descriptor().row_bytes();
+
+    let eighth = JpegDecoder::with_scale(
+        &bytes[..],
+        Limits::default(),
+        otf_pixels_codec_jpeg::Scale::Eighth,
+    )
+    .unwrap();
+    let small = eighth.descriptor();
+
+    assert_eq!((small.width, small.height), (8, 6));
+    assert!(
+        small.row_bytes() * 8 <= full_row,
+        "a 1/8 row is {} bytes against a full row's {full_row}",
+        small.row_bytes()
+    );
+    assert_eq!(eighth.scale(), otf_pixels_codec_jpeg::Scale::Eighth);
 }

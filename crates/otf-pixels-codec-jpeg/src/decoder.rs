@@ -20,7 +20,7 @@ use crate::format::{
     AdobeTransform, Frame, Scan, ZIGZAG, adobe_transform, exif_orientation, marker,
 };
 use crate::huffman::HuffmanTable;
-use crate::idct;
+use crate::idct::{self, Scale};
 use otf_pixels_core::{
     Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, PixelFormat, PixelsError,
     Result, Source,
@@ -89,6 +89,8 @@ pub struct JpegDecoder<S: Source> {
     mcu_rows: u32,
     /// The next MCU row to decode.
     mcu_row: u32,
+    /// How much of full resolution this decode produces.
+    scale: Scale,
     /// Output rows already served.
     row: u32,
 }
@@ -99,6 +101,7 @@ impl<S: Source> std::fmt::Debug for JpegDecoder<S> {
             .field("descriptor", &self.descriptor)
             .field("colour", &self.colour)
             .field("components", &self.frame.components)
+            .field("scale", &self.scale)
             .field("restart_interval", &self.restart_interval)
             .field("orientation", &self.orientation)
             .field("row", &self.row)
@@ -119,6 +122,25 @@ impl<S: Source> JpegDecoder<S> {
     /// variant this crate does not own (progressive, arithmetic-coded, 12-bit,
     /// CMYK), or [`PixelsError::LimitExceeded`] if the frame exceeds `limits`.
     pub fn new(source: S, limits: Limits) -> Result<Self> {
+        Self::with_scale(source, limits, Scale::Full)
+    }
+
+    /// Read every header, and decode at a reduced resolution.
+    ///
+    /// At `M/8` scale the decoder inverse-transforms only the low-frequency
+    /// corner of each block, so a thumbnail costs a fraction of the arithmetic
+    /// and — the point of it — the full-resolution image is never
+    /// materialized for the rest of the pipeline to carry. Entropy decoding is
+    /// unchanged: every coefficient is still read, because the format gives no
+    /// way to skip one.
+    ///
+    /// [`Decoder::descriptor`] reports the *scaled* size, so a caller that
+    /// asks for a reduced decode is told what it will actually receive.
+    ///
+    /// # Errors
+    ///
+    /// As [`JpegDecoder::new`].
+    pub fn with_scale(source: S, limits: Limits, scale: Scale) -> Result<Self> {
         let mut reader = Reader::new(source);
         let mut quant = [[0_u16; 64]; 4];
         let mut dc_tables: [Option<HuffmanTable>; 4] = [None, None, None, None];
@@ -231,10 +253,13 @@ impl<S: Source> JpegDecoder<S> {
             Colour::Grayscale => PixelFormat::Gray8,
             Colour::YCbCr | Colour::Rgb => PixelFormat::Rgb8,
         };
-        // Enforced before any plane is allocated (SPEC §Safety).
+        // The frame's own size drives the MCU grid — that is a property of the
+        // encoded data, not of how much of it we intend to produce — while the
+        // descriptor reports what the caller will actually receive.
+        let (full_width, full_height) = (u32::from(frame.width), u32::from(frame.height));
         let descriptor = ImageDescriptor::with_limits(
-            u32::from(frame.width),
-            u32::from(frame.height),
+            scale.apply(full_width),
+            scale.apply(full_height),
             pixel,
             &limits,
         )?;
@@ -294,17 +319,20 @@ impl<S: Source> JpegDecoder<S> {
             ));
         }
 
-        let mcu_width = h_max * 8;
-        let band_height = v_max * 8;
-        let mcus_per_line = descriptor.width.div_ceil(mcu_width);
-        let mcu_rows = descriptor.height.div_ceil(band_height);
+        // How many samples one block becomes: 8 at full resolution, fewer at a
+        // reduced scale. Every plane dimension below is in these units, which
+        // is the whole of what a scaled decode changes downstream.
+        let sample = scale.block_size();
+        let mcus_per_line = full_width.div_ceil(h_max * 8);
+        let mcu_rows = full_height.div_ceil(v_max * 8);
+        let band_height = v_max * sample;
 
         let mut planes = Vec::with_capacity(frame.components.len());
         for component in &frame.components {
             let (h, v) = (u32::from(component.h), u32::from(component.v));
-            let stride = usize::try_from(mcus_per_line * h * 8)
+            let stride = usize::try_from(mcus_per_line * h * sample)
                 .map_err(|_| PixelsError::malformed("jpeg", "component plane overflows"))?;
-            let height = usize::try_from(v * 8).unwrap_or(32);
+            let height = usize::try_from(v * sample).unwrap_or(32);
             let samples = stride
                 .checked_mul(height)
                 .ok_or_else(|| PixelsError::malformed("jpeg", "component plane overflows"))?;
@@ -348,8 +376,15 @@ impl<S: Source> JpegDecoder<S> {
             mcus_per_line,
             mcu_rows,
             mcu_row: 0,
+            scale,
             row: 0,
         })
+    }
+
+    /// The resolution this decoder produces, as eighths of full size.
+    #[must_use]
+    pub const fn scale(&self) -> Scale {
+        self.scale
     }
 
     /// The EXIF orientation tag, 1..=8, if the file carries one.
@@ -373,6 +408,8 @@ impl<S: Source> JpegDecoder<S> {
         }
 
         let mut coefficients = [0_i32; 64];
+        let scale = self.scale;
+        let sample = scale.block_size() as usize;
         for mcu in 0..self.mcus_per_line {
             if self.restart_interval > 0 && self.restarts_left == 0 {
                 if !self.reader.restart()? {
@@ -433,10 +470,11 @@ impl<S: Source> JpegDecoder<S> {
                             predictor,
                             &mut coefficients,
                         )?;
-                        let x = ((mcu * h) + block_x) as usize * 8;
-                        let y = block_y as usize * 8;
-                        idct::block(
+                        let x = ((mcu * h) + block_x) as usize * sample;
+                        let y = block_y as usize * sample;
+                        idct::scaled_block(
                             &coefficients,
+                            scale,
                             &mut plane.samples,
                             y * plane.stride + x,
                             plane.stride,

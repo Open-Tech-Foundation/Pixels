@@ -161,6 +161,34 @@ def main() -> int:
 
         with open(os.path.join(args.fixtures, f"{name}.raw"), "wb") as out:
             out.write(raster)
+
+        # libjpeg's own M/8 scaled decode, which Pillow exposes as draft mode.
+        # This is the reference for our reduced IDCT: without it the only
+        # check on a scaled decode would be against our own full decode, which
+        # cannot catch a shared misreading of what M/8 even means.
+        #
+        # Pillow chooses the reduction by integer division of the current size
+        # by the requested one, so the request is a floor and the result a
+        # ceiling. A fixture smaller than the divisor cannot be driven to that
+        # reduction at all, and is skipped rather than fudged.
+        for denominator in (8, 4, 2):
+            if width < denominator or height < denominator:
+                continue
+            request = (width // denominator, height // denominator)
+            expected_size = (-(-width // denominator), -(-height // denominator))
+            with Image.open(path) as draft:
+                draft.draft(mode, request)
+                draft.load()
+                if draft.size != expected_size:
+                    sys.exit(
+                        f"{name}: draft at 1/{denominator} gave {draft.size}, "
+                        f"expected {expected_size}"
+                    )
+                data = draft.convert(mode).tobytes()
+            suffix = f"s{8 // denominator}"
+            with open(os.path.join(args.fixtures, f"{name}.{suffix}.raw"), "wb") as out:
+                out.write(data)
+
         manifest.append(f"{name} {width} {height} {channels}")
         print(f"{name}: {width}x{height}x{channels}, {os.path.getsize(path)} bytes")
 

@@ -36,3 +36,4 @@ mod tables;
 pub use decoder::{JpegCodec, JpegDecoder, probe};
 pub use encoder::{JpegEncoder, Subsampling};
 pub use format::{Component, Frame, SIGNATURE, Scan, ScanComponent};
+pub use idct::Scale;

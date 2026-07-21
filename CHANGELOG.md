@@ -7,6 +7,10 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- `DecodeCapability::Regions` no longer claims to cover scaled-decode JPEG. A
+  reduced-scale decode still emits rows in order and still entropy-decodes
+  every coefficient; it is a decoder configuration, not random access, and the
+  scheduler would have acted on the claim.
 - The MSRV job now checks without dev-dependencies. `rust-version` is a
   promise about consuming the library; the benchmark's `fast_image_resize`
   needs 1.87 and no user of `otf-pixels` ever compiles it.
@@ -67,6 +71,20 @@ versioning: [SemVer](https://semver.org/).
   encoder rather than a fixed tolerance because a fixed one is wrong at both
   ends: a steep gradient in a 7x3 image loses far more to 4:2:0 than the same
   gradient across 64x48 does.
+- `otf-pixels-codec-jpeg`: `JpegDecoder::with_scale`, decoding at 1/8, 1/4 or
+  1/2 resolution straight from the coefficients (SPEC §Core ops, "JPEG fast
+  path"). `Scale::fitting` picks the coarsest scale still at least the target
+  size, never below it. The win is downstream: at 1/8 every later op sees one
+  sixty-fourth of the pixels, and the full-resolution image is never
+  materialized.
+- The reduced transform is defined as the **exact box average** of the full
+  one — each basis entry sums the cosines of the samples that output replaces,
+  so all sixty-four coefficients contribute. The first implementation instead
+  inverse-transformed the top-left `MxM` corner, which is the obvious reading
+  and is measurably wrong: against libjpeg's scaled decode on a noise fixture
+  at 1/2, truncation was ten times further from the true downsample (15.4 mean
+  error against 0.57). With the box basis we match libjpeg to three decimal
+  places on every fixture that has no chroma subsampling.
 - A `jpeg_decode` fuzz target and an in-tree mutation harness, both asserting
   only that no input panics, plus a `jpeg_roundtrip` target asserting that
   every stream this encoder produces is one this decoder accepts at the
