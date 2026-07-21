@@ -50,6 +50,19 @@ impl BitOrder {
 
 /// The largest code width either dialect permits.
 const MAX_WIDTH: u32 = 12;
+
+/// The table size at which a decoder moves to the next code width.
+///
+/// TIFF widens one entry early — a documented quirk of the original
+/// implementation that every conforming decoder must reproduce.
+const fn widen_at(width: u32, order: BitOrder) -> u16 {
+    let full = 1_u16 << width;
+    if order.early_change() {
+        full.saturating_sub(1)
+    } else {
+        full
+    }
+}
 /// The largest table any dialect can reach.
 const MAX_CODES: usize = 1 << MAX_WIDTH;
 
@@ -306,23 +319,7 @@ impl LzwDecoder {
                     *s = first;
                 }
                 next += 1;
-                // Widen when the table fills. TIFF widens one code early.
-                //
-                // The comparison is against `next + 1`, not `next`, because a
-                // decoder's table is always one entry behind the encoder's:
-                // the encoder defines an entry at the moment it emits a code,
-                // while the decoder cannot define it until it has read the
-                // *following* code and knows its first byte. Comparing
-                // `next` here would widen one code late, and the streams would
-                // desynchronise the first time a table crossed a power of two
-                // — which is far enough into a stream to pass every small
-                // fixture and fail on real images.
-                let threshold = if self.order.early_change() {
-                    (1_u16 << width).saturating_sub(1)
-                } else {
-                    1_u16 << width
-                };
-                if next + 1 >= threshold && width < MAX_WIDTH {
+                if next >= widen_at(width, self.order) && width < MAX_WIDTH {
                     width += 1;
                 }
             }
@@ -453,12 +450,15 @@ impl LzwEncoder {
             if (next as usize) < MAX_CODES {
                 table.insert(combined, next);
                 next += 1;
-                let threshold = if self.order.early_change() {
-                    (1_u16 << width).saturating_sub(1)
-                } else {
-                    1_u16 << width
-                };
-                if next >= threshold && width < MAX_WIDTH {
+                // Strictly greater, where the decoder uses "at least". The
+                // asymmetry is not a choice: a decoder cannot define an entry
+                // until it has read the *following* code and knows its first
+                // byte, so its table is one behind the encoder's at the moment
+                // the width is decided. Using the same comparison on both
+                // sides makes an encoder and decoder agree with each other and
+                // disagree with the rest of the world — which passes every
+                // round-trip test and fails on the first real image.
+                if next > widen_at(width, self.order) && width < MAX_WIDTH {
                     width += 1;
                 }
             } else {

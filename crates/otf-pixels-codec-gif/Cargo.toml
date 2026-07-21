@@ -1,0 +1,18 @@
+[package]
+name = "otf-pixels-codec-gif"
+description = "GIF codec for otf-pixels, implemented from scratch."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+[dependencies]
+otf-pixels-core.workspace = true
+otf-pixels-compress.workspace = true
+
+[lints]
+workspace = true

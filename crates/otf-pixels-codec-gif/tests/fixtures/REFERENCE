@@ -1,0 +1,10 @@
+# name width height fnv1a64_per_frame...
+# Canonical form: 8-bit RGBA of the whole canvas after
+# each frame is composited, with disposal applied.
+# Ground truth from libgif via Pillow; see
+# scripts/regenerate-gif-reference.py
+animation 20 20 4d28da06bcd65256 724e64fcc0f1ffa0 6d696163ceb1662e 084baf8f92247256
+checker 8 8 962b558a4ce55125
+interlaced 16 12 ef90fcf7292627a5
+photo 48 32 851a73979182ad8d
+static 16 12 ef90fcf7292627a5

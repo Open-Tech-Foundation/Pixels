@@ -37,6 +37,12 @@ versioning: [SemVer](https://semver.org/).
 ### Added
 - ADR-0012 (extract `otf-pixels-compress`), executing the "move on a third
   consumer" clause ADR-0010 wrote for exactly this moment.
+- `otf-pixels-codec-gif`: `GifDecoder` covering the whole format — all frames,
+  both interlace layouts, transparency and every disposal method — and
+  `GifEncoder`, single-frame with median-cut quantization and Floyd-Steinberg
+  dithering, which is SPEC §Formats' stated v1 scope. `Decoder` yields the
+  first frame so ordinary pipelines work unchanged; `next_frame` walks the
+  rest, keeping "animation pipelines are v2" honest.
 - `otf-pixels-compress`: inflate, deflate, zlib, `Crc32` and `Adler32` moved
   from `otf-pixels-codec-png` (which re-exports them, so nothing downstream
   changes), plus LZW in both the GIF and TIFF dialects — one implementation
