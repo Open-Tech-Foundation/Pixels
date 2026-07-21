@@ -6,6 +6,7 @@ members = [
     "crates/otf-pixels-ops",
     "crates/otf-pixels-codec-gif",
     "crates/otf-pixels-codec-jpeg",
+    "crates/otf-pixels-codec-webp",
     "crates/otf-pixels-codec-png",
     "crates/otf-pixels-codec-tiff",
     "crates/otf-pixels-compress",
@@ -34,6 +35,7 @@ otf-pixels-codec-gif = { version = "0.0.1", path = "crates/otf-pixels-codec-gif"
 otf-pixels-codec-jpeg = { version = "0.0.1", path = "crates/otf-pixels-codec-jpeg", default-features = false }
 otf-pixels-codec-png = { version = "0.0.1", path = "crates/otf-pixels-codec-png" }
 otf-pixels-codec-tiff = { version = "0.0.1", path = "crates/otf-pixels-codec-tiff" }
+otf-pixels-codec-webp = { version = "0.0.1", path = "crates/otf-pixels-codec-webp" }
 otf-pixels-compress = { version = "0.0.1", path = "crates/otf-pixels-compress" }
 otf-pixels-codec-raw = { version = "0.0.1", path = "crates/otf-pixels-codec-raw" }
 

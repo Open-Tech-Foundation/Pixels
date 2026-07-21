@@ -87,6 +87,9 @@ pub use otf_pixels_codec_jpeg::{JpegCodec, JpegDecoder, JpegEncoder, Scale, Subs
 #[cfg(feature = "tiff")]
 pub use otf_pixels_codec_tiff::{TiffCodec, TiffDecoder, TiffEncoder, TiffLayout};
 
+#[cfg(feature = "webp")]
+pub use otf_pixels_codec_webp::{WebPCodec, WebPDecoder, WebPEncoder};
+
 /// A lazily evaluated image pipeline.
 ///
 /// Cheap to clone: clones share graph nodes rather than pixels. Chaining
@@ -224,6 +227,11 @@ impl Image {
             Format::Tiff => {
                 let decoder = TiffDecoder::new(stream, Limits::default())?;
                 Ok(Self::from_decoder(Box::new(decoder), Format::Tiff))
+            }
+            #[cfg(feature = "webp")]
+            Format::WebP => {
+                let decoder = WebPDecoder::new(stream, Limits::default())?;
+                Ok(Self::from_decoder(Box::new(decoder), Format::WebP))
             }
             other => Err(PixelsError::unsupported(format!(
                 "{other} was detected but no decoder for it is compiled in"
@@ -710,6 +718,8 @@ fn sniffing_codecs() -> Vec<Box<dyn Codec>> {
         Box::new(JpegCodec),
         #[cfg(feature = "tiff")]
         Box::new(TiffCodec),
+        #[cfg(feature = "webp")]
+        Box::new(WebPCodec),
     ];
     codecs
 }
@@ -730,6 +740,8 @@ fn encoder_for(format: Format, options: EncodeOptions) -> Result<Box<dyn Encoder
         Format::Jpeg => Ok(Box::new(JpegEncoder::from_options(&options))),
         #[cfg(feature = "tiff")]
         Format::Tiff => Ok(Box::new(TiffEncoder::from_options(&options))),
+        #[cfg(feature = "webp")]
+        Format::WebP => Ok(Box::new(WebPEncoder::from_options(&options))),
         #[cfg(not(feature = "raw"))]
         Format::Raw => Err(PixelsError::unsupported(
             "raw encoding requires the `raw` feature of otf-pixels",
@@ -811,17 +823,16 @@ mod tests {
 
     #[test]
     fn unimplemented_formats_are_catchable_errors() {
-        // Png, Gif, Jpeg and Tiff are absent: they encode as of M3, M5 and
-        // M6, and are checked by their round-trip tests instead. Every
+        // Png, Gif, Jpeg, Tiff and WebP are absent: they encode as of M3, M5
+        // and M6, and are checked by their round-trip tests instead. Every
         // remaining format must fail cleanly rather than producing something.
-        for format in [Format::WebP, Format::Avif] {
-            let err = ramp(2, 2)
-                .output(format, EncodeOptions::default())
-                .bytes()
-                .unwrap_err();
-            assert_eq!(err.code(), ErrorCode::Unsupported, "{format}");
-            assert!(err.to_string().contains(format.as_str()), "{err}");
-        }
+        let format = Format::Avif;
+        let err = ramp(2, 2)
+            .output(format, EncodeOptions::default())
+            .bytes()
+            .unwrap_err();
+        assert_eq!(err.code(), ErrorCode::Unsupported, "{format}");
+        assert!(err.to_string().contains(format.as_str()), "{err}");
     }
 
     /// TIFF shipped an encoder in M5 but was never added to `encoder_for`, so
@@ -940,6 +951,62 @@ mod tests {
                 "{width}x{height} -> {target}: the scheduler and the oracle disagree"
             );
         }
+    }
+
+    /// WebP round-trips through the facade, found by sniffing rather than by
+    /// being told the format.
+    ///
+    /// Exact, because our WebP encoder is lossless — the one place in the
+    /// codec set where a wrapped encoder still permits an exact assertion.
+    #[cfg(feature = "webp")]
+    #[test]
+    fn webp_round_trips_through_the_facade() {
+        let bytes = ramp(20, 12)
+            .output(Format::WebP, EncodeOptions::default())
+            .bytes()
+            .unwrap();
+        let image = Image::from_stream(std::io::Cursor::new(bytes)).unwrap();
+        let metadata = image.metadata().unwrap();
+        assert_eq!(metadata.format, Format::WebP, "sniffing missed the WebP");
+        assert_eq!((metadata.width, metadata.height), (20, 12));
+        // WebP has no greyscale mode, so one channel in comes back as three.
+        assert_eq!(metadata.pixel, PixelFormat::Rgb8);
+
+        let decoded = image
+            .output(Format::Raw, EncodeOptions::default())
+            .bytes()
+            .unwrap();
+        let expected: Vec<u8> = (0..20_u32 * 12)
+            .flat_map(|i| {
+                let value = i as u8;
+                [value, value, value]
+            })
+            .collect();
+        assert_eq!(decoded, expected, "a lossless round trip lost pixels");
+    }
+
+    /// Alpha survives a WebP round trip, which is the reason to reach for the
+    /// format over JPEG in the first place.
+    #[cfg(feature = "webp")]
+    #[test]
+    fn webp_keeps_alpha_through_the_facade() {
+        let descriptor = ImageDescriptor::new(9, 7, PixelFormat::Rgba8).unwrap();
+        let pixels: Vec<u8> = (0..(9 * 7))
+            .flat_map(|i| [(i * 3) as u8, 40, 200, (i * 7) as u8])
+            .collect();
+        let bytes = Image::from_raw(descriptor, pixels.clone())
+            .unwrap()
+            .output(Format::WebP, EncodeOptions::default())
+            .bytes()
+            .unwrap();
+
+        let image = Image::from_stream(std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(image.metadata().unwrap().pixel, PixelFormat::Rgba8);
+        let decoded = image
+            .output(Format::Raw, EncodeOptions::default())
+            .bytes()
+            .unwrap();
+        assert_eq!(decoded, pixels);
     }
 
     /// A progressive JPEG reaches the wrapped decoder through the same

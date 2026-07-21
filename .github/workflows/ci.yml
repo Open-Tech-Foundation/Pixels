@@ -65,6 +65,7 @@ jobs:
       - run: cargo check --workspace --no-default-features --features jpeg
       - run: cargo check --workspace --no-default-features --features jpeg-progressive
       - run: cargo check --workspace --no-default-features --features tiff
+      - run: cargo check --workspace --no-default-features --features webp
       - run: cargo check --workspace --all-features
 
   msrv:
@@ -101,6 +102,7 @@ jobs:
       - run: ./scripts/check-gif-interop.sh
       - run: ./scripts/check-tiff-interop.sh
       - run: ./scripts/check-jpeg-interop.sh
+      - run: ./scripts/check-webp-interop.sh
       # The reference manifest is generated, so it must match what the
       # generator produces today — otherwise a stale manifest could quietly
       # start agreeing with a broken decoder.
@@ -114,6 +116,8 @@ jobs:
             crates/otf-pixels-codec-tiff/tests/fixtures
           python3 scripts/regenerate-jpeg-reference.py \
             crates/otf-pixels-codec-jpeg/tests/fixtures
+          python3 scripts/regenerate-webp-reference.py \
+            crates/otf-pixels-codec-webp/tests/fixtures
           git diff --exit-code -- '*/REFERENCE'
 
   benchmark:

@@ -53,6 +53,21 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Added
+- `otf-pixels-codec-webp`: WebP decode (lossy and lossless, alpha detected
+  from the container) and lossless encode, wrapping `image-webp` per ADR-0004.
+  Wired into the facade behind a `webp` feature, on by default. Pure Rust; its
+  only transitive dependencies are `byteorder-lite` and `quick-error`.
+- **WebP encoding is lossless only**, because the wrapped encoder has no
+  quality control at all — `EncodeOptions::quality` is accepted and ignored.
+  For a photograph that means a much larger file than the format's headline
+  feature would give, and it is recorded here rather than left to be
+  discovered from a file size. It is the strongest argument for revisiting
+  WebP ownership.
+- Greyscale has no native WebP mode, so one channel in comes back as three.
+  Asserted rather than glossed, since it differs from PNG and JPEG.
+- libwebp reads all 24 emitted WebP files back to the exact pixels put in
+  (`scripts/check-webp-interop.sh`). Exact, not tolerant: the encoder is
+  lossless, so there is nowhere for a bug to hide.
 - Progressive JPEG decode, wrapped rather than owned (ADR-0004), behind the
   `jpeg-progressive` feature of `otf-pixels` — on by default. `jpeg-decoder`
   with default features off is the only external dependency in the default
