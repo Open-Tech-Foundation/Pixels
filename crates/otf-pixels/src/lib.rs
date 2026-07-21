@@ -706,6 +706,8 @@ fn encoder_for(format: Format, options: EncodeOptions) -> Result<Box<dyn Encoder
         Format::Gif => Ok(Box::new(GifEncoder::from_options(&options))),
         #[cfg(feature = "jpeg")]
         Format::Jpeg => Ok(Box::new(JpegEncoder::from_options(&options))),
+        #[cfg(feature = "tiff")]
+        Format::Tiff => Ok(Box::new(TiffEncoder::from_options(&options))),
         #[cfg(not(feature = "raw"))]
         Format::Raw => Err(PixelsError::unsupported(
             "raw encoding requires the `raw` feature of otf-pixels",
@@ -786,10 +788,10 @@ mod tests {
 
     #[test]
     fn unimplemented_formats_are_catchable_errors() {
-        // Png, Gif and Jpeg are absent: they encode as of M3, M5 and M6, and
-        // are checked by their round-trip tests instead. Every remaining
-        // format must fail cleanly rather than producing something.
-        for format in [Format::Tiff, Format::WebP, Format::Avif] {
+        // Png, Gif, Jpeg and Tiff are absent: they encode as of M3, M5 and
+        // M6, and are checked by their round-trip tests instead. Every
+        // remaining format must fail cleanly rather than producing something.
+        for format in [Format::WebP, Format::Avif] {
             let err = ramp(2, 2)
                 .output(format, EncodeOptions::default())
                 .bytes()
@@ -797,6 +799,31 @@ mod tests {
             assert_eq!(err.code(), ErrorCode::Unsupported, "{format}");
             assert!(err.to_string().contains(format.as_str()), "{err}");
         }
+    }
+
+    /// TIFF shipped an encoder in M5 but was never added to `encoder_for`, so
+    /// `output(Format::Tiff, ..)` reported the format unimplemented while the
+    /// encoder sat in the crate unreachable. This is the test that would have
+    /// caught it.
+    #[cfg(feature = "tiff")]
+    #[test]
+    fn tiff_round_trips_through_the_facade() {
+        let bytes = ramp(12, 9)
+            .output(Format::Tiff, EncodeOptions::default())
+            .bytes()
+            .unwrap();
+        let image = Image::from_stream(std::io::Cursor::new(bytes)).unwrap();
+        let metadata = image.metadata().unwrap();
+        assert_eq!(metadata.format, Format::Tiff);
+        assert_eq!((metadata.width, metadata.height), (12, 9));
+
+        // TIFF is lossless, so the pixels must come back exactly.
+        let decoded = image
+            .output(Format::Raw, EncodeOptions::default())
+            .bytes()
+            .unwrap();
+        let expected: Vec<u8> = (0..12_u32 * 9).map(|i| i as u8).collect();
+        assert_eq!(decoded, expected);
     }
 
     /// A JPEG written through the facade must be readable back through it,
