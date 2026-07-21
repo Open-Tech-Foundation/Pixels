@@ -58,6 +58,10 @@ versioning: [SemVer](https://semver.org/).
 - `fuzz/`: `cargo fuzz` targets for PNG decode, inflate and encode/decode
   round-trip, plus `tests/fuzz.rs`, an in-tree deterministic mutation harness
   that runs the same no-panic property on stable in seconds.
+- M3 exit-criterion tests: PNG round-trips through the engine for every
+  format it can represent, ops compose over a decoded PNG exactly as over raw
+  pixels, the scheduler agrees with the M1 oracle over a PNG source, and
+  decoding a tall PNG reads a fraction of the file before the first row.
 - `otf-pixels`: `Image::open` and `Image::from_stream`, which identify a format
   from its magic bytes and never from a file extension (SPEC §Formats).
   `Format::Png` now resolves to a real encoder behind the `png` feature.

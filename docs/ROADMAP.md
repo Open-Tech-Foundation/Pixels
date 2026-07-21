@@ -20,11 +20,14 @@ Estimates deliberately omitted — scope, not dates, is the commitment.
   constant-memory test on a synthetic huge raw source; scaling benchmark
   across cores.
 
-### M3 — PNG (first real codec, from scratch)
+### M3 — PNG (first real codec, from scratch) — **complete**
 - Inflate, all filter types, interlace (buffered), palette, 8/16-bit;
   encoder with configurable zlib level.
 - `probe()`/metadata path; `max_pixels` enforcement; fuzzing in CI.
-- **Exit**: decodes PNG test suite (PngSuite) correctly; fuzz-clean.
+- **Exit**: decodes PNG test suite (PngSuite) correctly; fuzz-clean. ✅
+  All 86 decodable PngSuite files match libpng, all 14 corrupt files are
+  rejected, and libpng reads back every PNG we write. Non-interlaced decode
+  streams, so SPEC §Formats' claim holds rather than being aspirational.
 
 ### M4 — Core op set + SIMD
 - resize (all filters), rotate/flip, modulate, convolve, composite,
