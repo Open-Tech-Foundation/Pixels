@@ -32,6 +32,12 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Added
+- ADR-0011 (SIMD by autovectorization; fixed-point arithmetic at 8 bits).
+- `otf-pixels-ops`: `Resize`, separable resampling with seven filters
+  (nearest, box, bilinear, Catmull-Rom, Mitchell, Lanczos2, Lanczos3), `Fit`
+  modes and `without_enlargement`. Weight tables are built per *image*, not
+  per tile, so the output does not depend on how the image is cut up — which
+  is asserted directly rather than assumed.
 - ADR-0008 (crossbeam-deque for work stealing), ADR-0009 (scheduler-inserted
   materialization at order-incompatible seams) and ADR-0010 (own inflate and
   deflate).

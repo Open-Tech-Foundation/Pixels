@@ -29,6 +29,11 @@
 //! rather than only under M1's whole-image evaluator, so they must be right
 //! even while the evaluator only ever asks for whole images.
 
+mod filter;
 mod geometry;
+mod resample;
+mod resize;
 
+pub use filter::{Filter, Run, Weights};
 pub use geometry::{Crop, Flip, Flop};
+pub use resize::{Fit, Resize, ResizeOptions};
