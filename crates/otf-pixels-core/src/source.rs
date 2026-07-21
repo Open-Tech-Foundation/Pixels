@@ -123,7 +123,10 @@ enum DecodeState {
 /// [`Plan`]: crate::Plan
 #[derive(Debug)]
 pub struct DecodedSource {
-    descriptor: ImageDescriptor,
+    /// Behind a lock because shrink-on-load can lower it once, before any
+    /// pixel is produced. Everything else about a source is fixed at
+    /// construction; this is the one thing the planner may still change.
+    descriptor: Mutex<ImageDescriptor>,
     capability: DecodeCapability,
     state: Mutex<DecodeState>,
     /// The most recently decoded band, reused for repeated demand.
@@ -137,17 +140,39 @@ impl DecodedSource {
     #[must_use]
     pub fn new(decoder: Box<dyn Decoder>) -> Self {
         Self {
-            descriptor: decoder.descriptor(),
+            descriptor: Mutex::new(decoder.descriptor()),
             capability: decoder.capability(),
             state: Mutex::new(DecodeState::Reading { decoder, cursor: 0 }),
             window: Mutex::new(None),
         }
     }
 
+    /// The shape currently being produced.
+    ///
+    /// A poisoned lock still holds a valid descriptor — the value is `Copy`
+    /// and is never left half-written — so the poison is stepped over rather
+    /// than turned into an error the caller cannot act on.
+    fn shape(&self) -> ImageDescriptor {
+        *self
+            .descriptor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Decode rows `band.y .. band.bottom()` into a fresh buffer.
     ///
     /// Rows before `band.y` are decoded and discarded, since a forward-only
     /// stream has no way to skip them.
+    ///
+    /// # Overlapping bands
+    ///
+    /// Consecutive requests routinely *overlap* rather than abut: a resize
+    /// needs input rows either side of each output row for filter support, so
+    /// it asks for `[0, 224)` and then `[214, 438)`. The ten rows in common
+    /// have already been consumed from the stream and cannot be read again, so
+    /// they are carried over from the retained band instead. Without that,
+    /// every streaming decode resized to more than one tile column failed with
+    /// a rewind error — which is most real resizes.
     fn decode_band(&self, band: Region) -> Result<Arc<TileBuf>> {
         let mut state = self
             .state
@@ -161,15 +186,37 @@ impl DecodedSource {
             return Err(PixelsError::graph("decoder state changed unexpectedly"));
         };
 
-        if band.y < *cursor {
-            return Err(PixelsError::graph(format!(
-                "source cannot rewind: row {} was requested but the stream is at row {cursor}; \
-                 this pipeline needed a materialization point",
-                band.y
-            )));
-        }
+        // Rows already consumed have to come from the retained band, if it
+        // still holds them.
+        let carry = if band.y < *cursor {
+            let held = self
+                .window
+                .lock()
+                .ok()
+                .and_then(|window| window.clone())
+                .filter(|(covered, _)| covered.y <= band.y);
+            match held {
+                Some((_, buffer)) => Some(buffer),
+                None => {
+                    return Err(PixelsError::graph(format!(
+                        "source cannot rewind: row {} was requested but the stream is at row \
+                         {cursor} and the retained band no longer covers it; this pipeline \
+                         needed a materialization point",
+                        band.y
+                    )));
+                }
+            }
+        } else {
+            None
+        };
 
-        let outcome = Self::fill_band(decoder.as_mut(), cursor, band, self.descriptor);
+        let outcome = Self::fill_band(
+            decoder.as_mut(),
+            cursor,
+            band,
+            self.shape(),
+            carry.as_deref(),
+        );
         match outcome {
             Ok(buffer) => Ok(Arc::new(buffer)),
             Err(error) => {
@@ -180,11 +227,15 @@ impl DecodedSource {
     }
 
     /// Advance `decoder` to `band` and read it, updating `cursor`.
+    ///
+    /// Rows below `cursor` are copied from `carry` — the previously retained
+    /// band — because the stream is already past them.
     fn fill_band(
         decoder: &mut dyn Decoder,
         cursor: &mut u32,
         band: Region,
         descriptor: ImageDescriptor,
+        carry: Option<&TileBuf>,
     ) -> Result<TileBuf> {
         let mut scratch = vec![0_u8; descriptor.row_bytes()];
         while *cursor < band.y {
@@ -194,10 +245,32 @@ impl DecodedSource {
         let mut buffer = TileBuf::zeroed(band, descriptor.pixel)?;
         {
             let mut tile = buffer.as_tile_mut()?;
+            let carried = carry.map(TileBuf::as_tile).transpose()?;
             for y in band.y..band.y.saturating_add(band.height) {
                 let row = tile.row_mut(y).ok_or_else(|| {
                     PixelsError::malformed("stream", format!("row {y} is outside the band"))
                 })?;
+                if y < *cursor {
+                    // Already consumed from the stream; the retained band is
+                    // the only place these rows still exist.
+                    let source =
+                        carried
+                            .as_ref()
+                            .and_then(|tile| tile.row(y))
+                            .ok_or_else(|| {
+                                PixelsError::graph(format!(
+                                    "row {y} is behind the stream and outside the retained band"
+                                ))
+                            })?;
+                    let take = row.len().min(source.len());
+                    row.get_mut(..take)
+                        .zip(source.get(..take))
+                        .map(|(target, source)| target.copy_from_slice(source))
+                        .ok_or_else(|| {
+                            PixelsError::graph(format!("row {y} could not be carried over"))
+                        })?;
+                    continue;
+                }
                 decoder.read_row(row)?;
                 *cursor += 1;
             }
@@ -255,7 +328,7 @@ impl DecodedSource {
         }
         // Decode full-width bands: a forward-only stream produces whole rows
         // anyway, so narrowing would discard pixels a later request may want.
-        let band = Region::new(0, region.y, self.descriptor.width, region.height);
+        let band = Region::new(0, region.y, self.shape().width, region.height);
         let buffer = self.decode_band(band)?;
         if let Ok(mut window) = self.window.lock() {
             *window = Some((band, Arc::clone(&buffer)));
@@ -270,11 +343,53 @@ impl Producer for DecodedSource {
     }
 
     fn descriptor(&self) -> ImageDescriptor {
-        self.descriptor
+        self.shape()
     }
 
     fn capability(&self) -> DecodeCapability {
         self.capability
+    }
+
+    fn reduced_descriptor(&self, target: (u32, u32)) -> Option<ImageDescriptor> {
+        let state = self.state.lock().ok()?;
+        let DecodeState::Reading { decoder, cursor } = &*state else {
+            return None;
+        };
+        // Past the first row the resolution is settled: rows already handed
+        // out cannot be retracted.
+        if *cursor > 0 {
+            return None;
+        }
+        decoder.reduced_descriptor(target)
+    }
+
+    fn reduce_to(&self, descriptor: ImageDescriptor) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| PixelsError::graph("decoder state was poisoned by a panicking thread"))?;
+        let DecodeState::Reading { decoder, cursor } = &mut *state else {
+            return Err(PixelsError::graph("decoder state changed unexpectedly"));
+        };
+        if *cursor > 0 {
+            return Err(PixelsError::invalid_argument(
+                "descriptor",
+                format!("{cursor} rows have already been produced; the resolution is settled"),
+            ));
+        }
+        decoder.reduce_to(descriptor)?;
+
+        let mut shape = self
+            .descriptor
+            .lock()
+            .map_err(|_| PixelsError::graph("descriptor was poisoned by a panicking thread"))?;
+        *shape = descriptor;
+        // Any band cached at the old resolution describes an image that no
+        // longer exists.
+        if let Ok(mut window) = self.window.lock() {
+            *window = None;
+        }
+        Ok(())
     }
 
     fn produce(&self, region: Region, output: &mut TileMut<'_>) -> Result<()> {
@@ -323,6 +438,69 @@ mod tests {
             self.row += 1;
             Ok(())
         }
+    }
+
+    /// A stub of `width` x `height` where every row holds its own index.
+    fn sized_stub(width: u32, height: u32) -> (DecodedSource, Arc<std::sync::atomic::AtomicU32>) {
+        let rows_read = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let decoder = StubDecoder {
+            descriptor: ImageDescriptor::new(width, height, PixelFormat::Gray8).unwrap(),
+            row: 0,
+            fail_at: None,
+            rows_read: Arc::clone(&rows_read),
+        };
+        (DecodedSource::new(Box::new(decoder)), rows_read)
+    }
+
+    /// Read `region` and return its rows as their first byte.
+    fn rows_of(source: &DecodedSource, region: Region) -> Vec<u8> {
+        let mut buffer = TileBuf::zeroed(region, PixelFormat::Gray8).unwrap();
+        {
+            let mut tile = buffer.as_tile_mut().unwrap();
+            source.produce(region, &mut tile).unwrap();
+        }
+        let tile = buffer.as_tile().unwrap();
+        (region.y..region.y + region.height)
+            .map(|y| tile.row(y).unwrap()[0])
+            .collect()
+    }
+
+    /// A resize asks for bands that overlap, because each output row needs
+    /// input rows either side of it. The overlapping rows are already past the
+    /// stream cursor, so they have to be carried over from the retained band —
+    /// and they have to be the *right* rows.
+    #[test]
+    fn overlapping_bands_carry_the_rows_already_consumed() {
+        let (source, rows_read) = sized_stub(2, 16);
+
+        assert_eq!(
+            rows_of(&source, Region::new(0, 0, 2, 6)),
+            [0, 1, 2, 3, 4, 5]
+        );
+        assert_eq!(rows_read.load(std::sync::atomic::Ordering::Relaxed), 6);
+
+        // Overlaps the first band by two rows: 4 and 5 are behind the cursor.
+        assert_eq!(
+            rows_of(&source, Region::new(0, 4, 2, 6)),
+            [4, 5, 6, 7, 8, 9],
+            "the carried rows are wrong"
+        );
+        // Only the four new rows were decoded; the overlap was not re-read,
+        // which a forward-only stream could not have done anyway.
+        assert_eq!(rows_read.load(std::sync::atomic::Ordering::Relaxed), 10);
+    }
+
+    /// Overlap is servable; going back further than the retained band is not.
+    #[test]
+    fn a_request_behind_the_retained_band_is_still_an_error() {
+        let (source, _) = sized_stub(2, 16);
+        assert_eq!(rows_of(&source, Region::new(0, 8, 2, 4)), [8, 9, 10, 11]);
+
+        let region = Region::new(0, 2, 2, 4);
+        let mut buffer = TileBuf::zeroed(region, PixelFormat::Gray8).unwrap();
+        let mut tile = buffer.as_tile_mut().unwrap();
+        let error = source.produce(region, &mut tile).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::Graph, "{error}");
     }
 
     fn stub(fail_at: Option<u32>) -> (DecodedSource, Arc<std::sync::atomic::AtomicU32>) {
