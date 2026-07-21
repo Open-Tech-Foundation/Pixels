@@ -37,6 +37,12 @@ versioning: [SemVer](https://semver.org/).
 - `otf-pixels-codec-png`: `PngDecoder`, covering every v1 PNG feature — bit
   depths 1/2/4/8/16, colour types 0/2/3/4/6, `PLTE`, `tRNS`, Adam7 interlace
   and all five filter types. Ancillary chunks are skipped, not honoured.
+- `otf-pixels-codec-png`: `PngEncoder`, writing non-interlaced PNG at DEFLATE
+  levels 0-9 with per-row adaptive filter selection. Verified in the encode
+  direction too: libpng reads all 140 emitted files — seven pixel formats,
+  five sizes, four levels — back to the pixels we put in
+  (`scripts/check-png-interop.sh`). `EncodeOptions::quality` is read as
+  compression effort, since PNG is lossless and has no fidelity to trade.
 - `otf-pixels-codec-png`: the PngSuite conformance corpus (100 files, ~62 KB,
   vendored with its licence) checked against reference decodings from libpng
   rather than against ourselves. All 14 corruption modes are rejected, and no

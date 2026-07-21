@@ -12,11 +12,13 @@
 mod checksum;
 mod decoder;
 mod deflate;
+mod encoder;
 mod format;
 mod inflate;
 
 pub use checksum::{Adler32, Crc32};
 pub use decoder::{PngDecoder, probe};
 pub use deflate::{Level, deflate, zlib_compress};
+pub use encoder::PngEncoder;
 pub use format::{ColorType, Filter, Header, SIGNATURE};
 pub use inflate::{inflate_to, zlib_decompress};
