@@ -43,6 +43,16 @@ versioning: [SemVer](https://semver.org/).
   errors. A **tiled** file reports `DecodeCapability::Regions`, so producing a
   region decompresses only the tiles it touches; a strip file reports
   `Sequential`, because claiming otherwise would be a lie the scheduler acts on.
+- `otf-pixels-codec-tiff`: `TiffEncoder`, writing baseline TIFF in strips or
+  tiles, uncompressed or Deflate. libtiff reads all 240 emitted files — six
+  sizes, five formats, four layouts, two compressions — back to the pixels we
+  put in (`scripts/check-tiff-interop.sh`). Tiled output is what lets a
+  pipeline store an intermediate it will re-read with random access.
+- `otf-pixels-core`: `DecodedSource` now asks a region-capable decoder for
+  regions directly instead of driving it row by row. Without that a tiled TIFF
+  was declared random-access and then read sequentially anyway.
+- `otf-pixels`: GIF and TIFF wired into sniffing, decode and (for GIF) encode,
+  behind `gif` and `tiff` features.
 - `otf-pixels-codec-gif`: `GifDecoder` covering the whole format — all frames,
   both interlace layouts, transparency and every disposal method — and
   `GifEncoder`, single-frame with median-cut quantization and Floyd-Steinberg

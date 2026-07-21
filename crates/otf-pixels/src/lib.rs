@@ -78,6 +78,12 @@ pub use otf_pixels_codec_raw::{RawCodec, RawDecoder, RawEncoder, RawFormat};
 #[cfg(feature = "png")]
 pub use otf_pixels_codec_png::{PngCodec, PngDecoder, PngEncoder};
 
+#[cfg(feature = "gif")]
+pub use otf_pixels_codec_gif::{GifCodec, GifDecoder, GifEncoder};
+
+#[cfg(feature = "tiff")]
+pub use otf_pixels_codec_tiff::{TiffCodec, TiffDecoder};
+
 /// A lazily evaluated image pipeline.
 ///
 /// Cheap to clone: clones share graph nodes rather than pixels. Chaining
@@ -200,6 +206,16 @@ impl Image {
             Format::Png => {
                 let decoder = PngDecoder::new(stream, Limits::default())?;
                 Ok(Self::from_decoder(Box::new(decoder), Format::Png))
+            }
+            #[cfg(feature = "gif")]
+            Format::Gif => {
+                let decoder = GifDecoder::new(stream, Limits::default())?;
+                Ok(Self::from_decoder(Box::new(decoder), Format::Gif))
+            }
+            #[cfg(feature = "tiff")]
+            Format::Tiff => {
+                let decoder = TiffDecoder::new(stream, Limits::default())?;
+                Ok(Self::from_decoder(Box::new(decoder), Format::Tiff))
             }
             other => Err(PixelsError::unsupported(format!(
                 "{other} was detected but no decoder for it is compiled in"
@@ -658,6 +674,10 @@ fn sniffing_codecs() -> Vec<Box<dyn Codec>> {
     let codecs: Vec<Box<dyn Codec>> = vec![
         #[cfg(feature = "png")]
         Box::new(PngCodec),
+        #[cfg(feature = "gif")]
+        Box::new(GifCodec),
+        #[cfg(feature = "tiff")]
+        Box::new(TiffCodec),
     ];
     codecs
 }
@@ -672,6 +692,8 @@ fn encoder_for(format: Format, options: EncodeOptions) -> Result<Box<dyn Encoder
         Format::Raw => Ok(Box::new(RawEncoder::new())),
         #[cfg(feature = "png")]
         Format::Png => Ok(Box::new(PngEncoder::from_options(&options))),
+        #[cfg(feature = "gif")]
+        Format::Gif => Ok(Box::new(GifEncoder::from_options(&options))),
         #[cfg(not(feature = "raw"))]
         Format::Raw => Err(PixelsError::unsupported(
             "raw encoding requires the `raw` feature of otf-pixels",
@@ -752,15 +774,11 @@ mod tests {
 
     #[test]
     fn unimplemented_formats_are_catchable_errors() {
-        // Png is absent: it landed in M3 and is checked by the round-trip
-        // tests instead. Every remaining format must still fail cleanly.
-        for format in [
-            Format::Jpeg,
-            Format::Gif,
-            Format::Tiff,
-            Format::WebP,
-            Format::Avif,
-        ] {
+        // Png and Gif are absent: they encode as of M3 and M5, and are checked
+        // by their round-trip tests instead. Tiff decodes but does not yet
+        // encode, so it belongs here. Every remaining format must fail
+        // cleanly rather than producing something.
+        for format in [Format::Jpeg, Format::Tiff, Format::WebP, Format::Avif] {
             let err = ramp(2, 2)
                 .output(format, EncodeOptions::default())
                 .bytes()

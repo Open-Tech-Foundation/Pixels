@@ -115,8 +115,10 @@ version = "0.0.1"
 dependencies = [
  "fast_image_resize",
  "image",
+ "otf-pixels-codec-gif",
  "otf-pixels-codec-png",
  "otf-pixels-codec-raw",
+ "otf-pixels-codec-tiff",
  "otf-pixels-core",
  "otf-pixels-ops",
 ]

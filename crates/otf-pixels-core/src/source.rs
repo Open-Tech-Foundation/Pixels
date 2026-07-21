@@ -205,6 +205,41 @@ impl DecodedSource {
         Ok(buffer)
     }
 
+    /// Ask the decoder for `region` directly, for a random-access decoder.
+    ///
+    /// This is the path that makes [`DecodeCapability::Regions`] mean
+    /// something. Without it a tiled TIFF would be declared random-access and
+    /// then driven row by row anyway, so a thumbnail of a huge scan would
+    /// decode every tile rather than the handful it needs.
+    ///
+    /// The rolling window is bypassed entirely: a decoder that can seek has no
+    /// use for one, and keeping a band would reintroduce the memory the
+    /// random access exists to avoid.
+    fn produce_region(&self, region: Region, output: &mut TileMut<'_>) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| PixelsError::graph("decoder state was poisoned by a panicking thread"))?;
+
+        if let DecodeState::Failed(detail) = &*state {
+            return Err(PixelsError::malformed("stream", detail.clone()));
+        }
+        let DecodeState::Reading { decoder, .. } = &mut *state else {
+            return Err(PixelsError::graph("decoder state changed unexpectedly"));
+        };
+
+        match decoder.read_region(region, output) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // A region decoder that fails has no defined cursor to
+                // recover to, so the source is poisoned rather than left in a
+                // state a later pull would misread.
+                *state = DecodeState::Failed(error.to_string());
+                Err(error)
+            }
+        }
+    }
+
     /// The band covering `region`, from the window or freshly decoded.
     fn band_for(&self, region: Region) -> Result<Arc<TileBuf>> {
         {
@@ -243,6 +278,11 @@ impl Producer for DecodedSource {
     }
 
     fn produce(&self, region: Region, output: &mut TileMut<'_>) -> Result<()> {
+        // A decoder that can answer regions is asked for one. Anything else
+        // gets the forward-only rolling window.
+        if self.capability == DecodeCapability::Regions {
+            return self.produce_region(region, output);
+        }
         let buffer = self.band_for(region)?;
         let tile = buffer.as_tile()?;
         copy_region(&tile, output, region)

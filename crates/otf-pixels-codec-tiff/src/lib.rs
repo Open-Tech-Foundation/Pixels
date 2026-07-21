@@ -21,10 +21,12 @@
 //! [`DecodeCapability::Regions`]: otf_pixels_core::DecodeCapability::Regions
 
 mod decoder;
+mod encoder;
 mod ifd;
 mod image;
 
 pub use decoder::{TiffCodec, TiffDecoder, probe};
+pub use encoder::{TiffEncoder, TiffLayout};
 pub use ifd::{ByteOrder, Directory, tag};
 pub use image::{Compression, Layout, Photometric, TiffImage};
 
