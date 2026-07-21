@@ -148,9 +148,65 @@ impl HuffmanTable {
     }
 }
 
+/// The same canonical assignment, indexed the other way: symbol to code.
+///
+/// Encoding and decoding need opposite lookups over one shared definition —
+/// the counts-and-values form — so both are built from it rather than one
+/// being derived from the other. That way a table this encoder emits in a
+/// `DHT` segment and the table it codes with cannot disagree.
+#[derive(Debug, Clone)]
+pub struct HuffmanEncoder {
+    /// `(code, length)` per symbol; a length of zero means the symbol has no
+    /// code and must never be emitted.
+    codes: [(u16, u8); 256],
+}
+
+impl HuffmanEncoder {
+    /// Build an encoding table from a `DHT` segment's counts and symbols.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::Malformed`] under exactly the conditions
+    /// [`HuffmanTable::new`] does, so a table cannot be usable for encoding
+    /// and rejected on decode.
+    pub fn new(counts: &[u8; 16], values: &[u8]) -> Result<Self> {
+        // Validate through the decoding constructor, so there is one
+        // definition of "a well-formed table" rather than two.
+        HuffmanTable::new(counts, values.to_vec())?;
+
+        let mut codes = [(0_u16, 0_u8); 256];
+        let mut code: u16 = 0;
+        let mut index = 0_usize;
+        for length in 1..=16_usize {
+            let count = usize::from(*counts.get(length - 1).unwrap_or(&0));
+            for step in 0..count {
+                if let Some(&symbol) = values.get(index + step) {
+                    if let Some(slot) = codes.get_mut(symbol as usize) {
+                        *slot = (code, length as u8);
+                    }
+                }
+                code = code.wrapping_add(1);
+            }
+            index += count;
+            code <<= 1;
+        }
+        Ok(Self { codes })
+    }
+
+    /// The code and bit length for `symbol`, if the table defines one.
+    #[must_use]
+    pub fn code(&self, symbol: u8) -> Option<(u32, u32)> {
+        match self.codes.get(symbol as usize).copied() {
+            Some((_, 0)) | None => None,
+            Some((code, length)) => Some((u32::from(code), u32::from(length))),
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
+    clippy::expect_used,
     clippy::indexing_slicing,
     reason = "tests operate on known-good values and assert shapes directly"
 )]
@@ -204,6 +260,40 @@ mod tests {
         // Codes are 0, 10, 110, ... so the 9-bit code is 0b111111110.
         assert_eq!(table.resolve(9, 0b1_1111_1110), Some(8));
         assert_eq!(table.lookup(0b1111_1111), None);
+    }
+
+    #[test]
+    fn the_encoding_and_decoding_tables_are_inverses() {
+        // The property that matters: whatever the encoder emits for a symbol,
+        // the decoder resolves back to that symbol. Checked over the standard
+        // tables, which is every table this crate writes.
+        use crate::tables::{
+            CHROMA_AC_COUNTS, CHROMA_AC_VALUES, CHROMA_DC_COUNTS, CHROMA_DC_VALUES, LUMA_AC_COUNTS,
+            LUMA_AC_VALUES, LUMA_DC_COUNTS, LUMA_DC_VALUES,
+        };
+        for (counts, values) in [
+            (&LUMA_DC_COUNTS, &LUMA_DC_VALUES[..]),
+            (&CHROMA_DC_COUNTS, &CHROMA_DC_VALUES[..]),
+            (&LUMA_AC_COUNTS, &LUMA_AC_VALUES[..]),
+            (&CHROMA_AC_COUNTS, &CHROMA_AC_VALUES[..]),
+        ] {
+            let encoder = HuffmanEncoder::new(counts, values).unwrap();
+            let decoder = HuffmanTable::new(counts, values.to_vec()).unwrap();
+            for &symbol in values {
+                let (code, length) = encoder.code(symbol).expect("every symbol has a code");
+                assert_eq!(
+                    decoder.resolve(length as usize, code as i32),
+                    Some(symbol),
+                    "symbol {symbol:#04x} coded as {code:#x}/{length} bits"
+                );
+            }
+            // A symbol the table never defines has no code, rather than
+            // silently sharing another symbol's.
+            let undefined = (0..=255_u8).find(|s| !values.contains(s));
+            if let Some(symbol) = undefined {
+                assert_eq!(encoder.code(symbol), None, "{symbol:#04x}");
+            }
+        }
     }
 
     #[test]

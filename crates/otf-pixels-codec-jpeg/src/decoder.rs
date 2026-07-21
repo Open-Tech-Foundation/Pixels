@@ -587,7 +587,7 @@ fn decode_block<S: Source>(
 /// The coefficients are JFIF's, scaled by 2^16. Fixed point rather than float
 /// for ADR-0011's reason: the same input has to produce the same byte on every
 /// target.
-fn ycbcr_to_rgb([y, cb, cr]: [u8; 3]) -> [u8; 3] {
+pub(crate) fn ycbcr_to_rgb([y, cb, cr]: [u8; 3]) -> [u8; 3] {
     const HALF: i32 = 1 << 15;
     let luma = i32::from(y) << 16;
     let blue = i32::from(cb) - 128;

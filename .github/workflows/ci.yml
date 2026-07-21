@@ -92,12 +92,13 @@ jobs:
       - run: pip install pillow
       # Our decoder cannot validate our encoder: a shared misreading of the
       # specification round-trips perfectly and is still wrong. These check our
-      # output against the reference implementations of zlib, libpng, libgif
-      # and libtiff.
+      # output against the reference implementations of zlib, libpng, libgif,
+      # libtiff and libjpeg.
       - run: ./scripts/check-deflate-interop.sh
       - run: ./scripts/check-png-interop.sh
       - run: ./scripts/check-gif-interop.sh
       - run: ./scripts/check-tiff-interop.sh
+      - run: ./scripts/check-jpeg-interop.sh
       # The reference manifest is generated, so it must match what the
       # generator produces today — otherwise a stale manifest could quietly
       # start agreeing with a broken decoder.
@@ -109,6 +110,8 @@ jobs:
             crates/otf-pixels-codec-gif/tests/fixtures
           python3 scripts/regenerate-tiff-reference.py \
             crates/otf-pixels-codec-tiff/tests/fixtures
+          python3 scripts/regenerate-jpeg-reference.py \
+            crates/otf-pixels-codec-jpeg/tests/fixtures
           git diff --exit-code -- '*/REFERENCE'
 
   benchmark:
@@ -144,4 +147,6 @@ jobs:
       - run: cargo fuzz run png_roundtrip -- -max_total_time=120
         working-directory: fuzz
       - run: cargo fuzz run jpeg_decode -- -max_total_time=120
+        working-directory: fuzz
+      - run: cargo fuzz run jpeg_roundtrip -- -max_total_time=120
         working-directory: fuzz

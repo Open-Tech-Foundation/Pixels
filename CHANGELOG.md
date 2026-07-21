@@ -50,8 +50,27 @@ versioning: [SemVer](https://semver.org/).
   upsampled nearest-neighbour where libjpeg interpolates, so subsampled
   fixtures are compared across their flat interiors, where the two filters
   must agree, and left alone at chroma edges, where they legitimately differ.
+- `otf-pixels-codec-jpeg`: `JpegEncoder`, writing baseline JPEG with a
+  fixed-point forward DCT, the Annex K quantization and Huffman tables scaled
+  by the IJG quality mapping, and 4:4:4/4:2:2/4:2:0 chroma subsampling
+  (4:4:4 from quality 90 up, where subsampling rather than quantization would
+  otherwise become the dominant loss). Encoding streams at one MCU row, so
+  bytes reach the sink before the last row arrives. Alpha is composited
+  against black rather than dropped, as the GIF encoder already does.
+  Optimal Huffman tables are deliberately not derived: that needs a counting
+  pass over every coefficient before the first byte can be written, which
+  trades ADR-0005's streaming contract for a few percent.
+- libjpeg reads all 140 emitted JPEGs — seven sizes, three subsamplings, five
+  qualities, greyscale and RGB — and decodes them to within 1.6x of the loss
+  libjpeg's *own* encoder produces on the same input
+  (`scripts/check-jpeg-interop.sh`). The comparison is against the reference
+  encoder rather than a fixed tolerance because a fixed one is wrong at both
+  ends: a steep gradient in a 7x3 image loses far more to 4:2:0 than the same
+  gradient across 64x48 does.
 - A `jpeg_decode` fuzz target and an in-tree mutation harness, both asserting
-  only that no input panics.
+  only that no input panics, plus a `jpeg_roundtrip` target asserting that
+  every stream this encoder produces is one this decoder accepts at the
+  declared shape.
 - M5 exit-criterion tests and `benches/thumbnail.rs`, the giant-tiled-TIFF
   thumbnail benchmark against libvips. It skips cleanly when `vips` is not
   installed rather than omitting the row or inventing a number.

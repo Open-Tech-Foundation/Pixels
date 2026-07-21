@@ -35,6 +35,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "jpeg_roundtrip"
+path = "fuzz_targets/jpeg_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "png_roundtrip"
 path = "fuzz_targets/png_roundtrip.rs"
 test = false

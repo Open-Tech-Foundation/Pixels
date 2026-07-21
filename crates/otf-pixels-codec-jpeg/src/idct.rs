@@ -20,7 +20,11 @@
 //! format does not require them to.
 
 /// Fixed-point scale for the transform constants.
-const SCALE: u32 = 12;
+///
+/// Shared with the forward transform in [`crate::fdct`]: the two directions
+/// are built from the same eight constants, and letting them drift apart
+/// would be a silent accuracy bug in whichever one was not being tested.
+pub(crate) const SCALE: u32 = 12;
 
 /// Right shift applied after the column pass, keeping two bits of headroom.
 const COLUMN_SHIFT: u32 = SCALE - 2;
@@ -29,7 +33,7 @@ const COLUMN_SHIFT: u32 = SCALE - 2;
 const ROW_SHIFT: u32 = SCALE + 5;
 
 /// The rounding term for a right shift of `bits`.
-const fn rounding(bits: u32) -> i64 {
+pub(crate) const fn rounding(bits: u32) -> i64 {
     1 << (bits - 1)
 }
 
@@ -39,18 +43,18 @@ const fn fixed(value: f64) -> i64 {
 }
 
 // The eight distinct constants the decomposition needs.
-const C_0_298: i64 = fixed(0.298_631_336);
-const C_0_390: i64 = fixed(0.390_180_644);
-const C_0_541: i64 = fixed(0.541_196_100);
-const C_0_765: i64 = fixed(0.765_366_865);
-const C_0_899: i64 = fixed(0.899_976_223);
-const C_1_175: i64 = fixed(1.175_875_602);
-const C_1_501: i64 = fixed(1.501_321_110);
-const C_1_847: i64 = fixed(1.847_759_065);
-const C_1_961: i64 = fixed(1.961_570_560);
-const C_2_053: i64 = fixed(2.053_119_869);
-const C_2_562: i64 = fixed(2.562_915_447);
-const C_3_072: i64 = fixed(3.072_711_026);
+pub(crate) const C_0_298: i64 = fixed(0.298_631_336);
+pub(crate) const C_0_390: i64 = fixed(0.390_180_644);
+pub(crate) const C_0_541: i64 = fixed(0.541_196_100);
+pub(crate) const C_0_765: i64 = fixed(0.765_366_865);
+pub(crate) const C_0_899: i64 = fixed(0.899_976_223);
+pub(crate) const C_1_175: i64 = fixed(1.175_875_602);
+pub(crate) const C_1_501: i64 = fixed(1.501_321_110);
+pub(crate) const C_1_847: i64 = fixed(1.847_759_065);
+pub(crate) const C_1_961: i64 = fixed(1.961_570_560);
+pub(crate) const C_2_053: i64 = fixed(2.053_119_869);
+pub(crate) const C_2_562: i64 = fixed(2.562_915_447);
+pub(crate) const C_3_072: i64 = fixed(3.072_711_026);
 
 /// One 8-point inverse DCT, returning values scaled by 2^`SCALE`.
 ///

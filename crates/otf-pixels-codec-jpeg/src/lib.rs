@@ -25,10 +25,14 @@
 //! outside its plane — are unrepresentable rather than merely avoided.
 
 mod decoder;
+mod encoder;
 mod entropy;
+mod fdct;
 mod format;
 mod huffman;
 mod idct;
+mod tables;
 
 pub use decoder::{JpegCodec, JpegDecoder, probe};
+pub use encoder::{JpegEncoder, Subsampling};
 pub use format::{Component, Frame, SIGNATURE, Scan, ScanComponent};
