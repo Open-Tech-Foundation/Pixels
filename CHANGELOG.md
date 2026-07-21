@@ -37,6 +37,12 @@ versioning: [SemVer](https://semver.org/).
 ### Added
 - ADR-0012 (extract `otf-pixels-compress`), executing the "move on a third
   consumer" clause ADR-0010 wrote for exactly this moment.
+- `otf-pixels-codec-tiff`: `TiffDecoder` covering baseline TIFF 6.0 — both
+  byte orders, strip and tile layouts, none/LZW/Deflate/PackBits compression,
+  greyscale at 1/8/16 bits, RGB, and palette. Exotic tags are skipped, not
+  errors. A **tiled** file reports `DecodeCapability::Regions`, so producing a
+  region decompresses only the tiles it touches; a strip file reports
+  `Sequential`, because claiming otherwise would be a lie the scheduler acts on.
 - `otf-pixels-codec-gif`: `GifDecoder` covering the whole format — all frames,
   both interlace layouts, transparency and every disposal method — and
   `GifEncoder`, single-frame with median-cut quantization and Floyd-Steinberg

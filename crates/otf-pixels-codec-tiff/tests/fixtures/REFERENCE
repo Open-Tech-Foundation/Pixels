@@ -1,0 +1,19 @@
+# name width height source_mode fnv1a64_of_canonical_rgba
+# Canonical form: 8-bit RGBA, 16-bit samples narrowed by
+# discarding the low byte. source_mode is Pillow's mode,
+# recorded for diagnosis only.
+# Ground truth from libtiff via Pillow; see
+# scripts/regenerate-tiff-reference.py
+bilevel 64 48 1 aad47bfc5f1bbd1d
+gray16 32 24 I;16 922b520d85f83171
+gray_lzw 64 48 L 83c769a9771c532c
+gray_none 64 48 L 83c769a9771c532c
+palette 64 48 P 7d8232b2276248eb
+rgb_bigendian 40 30 RGB 846cfea51c663275
+rgb_deflate 64 48 RGB 27252768dd3dd7a5
+rgb_lzw 64 48 RGB 27252768dd3dd7a5
+rgb_none 64 48 RGB 27252768dd3dd7a5
+rgb_packbits 64 48 RGB 27252768dd3dd7a5
+tiled_deflate 160 128 RGB f0c078e618a07e25
+tiled_lzw 160 128 RGB f0c078e618a07e25
+tiled_none 160 128 RGB f0c078e618a07e25

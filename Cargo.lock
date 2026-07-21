@@ -145,6 +145,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "otf-pixels-codec-tiff"
+version = "0.0.1"
+dependencies = [
+ "otf-pixels-compress",
+ "otf-pixels-core",
+]
+
+[[package]]
 name = "otf-pixels-compress"
 version = "0.0.1"
 
