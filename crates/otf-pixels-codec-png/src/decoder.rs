@@ -8,12 +8,16 @@
 //!
 //! # Memory
 //!
-//! PNG decode is **internally buffered**: the compressed data is collected and
-//! inflated in one pass, so peak memory is the compressed stream plus the
-//! decoded raster. That is within ADR-0005's contract ("codecs that cannot
-//! decode incrementally buffer internally") but it is more than PNG strictly
-//! requires — a non-interlaced PNG could stream row by row given an
-//! incremental inflate. See the crate docs for why that is deferred.
+//! A non-interlaced PNG **streams**: chunks are walked one piece at a time,
+//! inflate runs incrementally, and each scanline is unfiltered and expanded as
+//! it arrives. Peak memory is two scanlines plus the 32 KiB inflate window and
+//! a read buffer — none of which grow with image height. That is what makes
+//! SPEC §Guarantees 1 true for PNG rather than merely claimed.
+//!
+//! Interlaced PNG is **internally buffered**, as SPEC §Formats says: Adam7
+//! scatters each pass across the whole image, so no row is final until every
+//! pass has been read. That is ADR-0005's stated allowance for formats that
+//! leave no choice.
 
 use otf_pixels_core::{
     Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, PixelFormat, PixelsError,
@@ -21,9 +25,17 @@ use otf_pixels_core::{
 };
 
 use crate::format::{
-    ChunkReader, ColorType, Filter, Header, SIGNATURE, adam7_pass_size, adam7_position, unfilter,
+    ChunkReader, ChunkStream, ColorType, Filter, Header, SIGNATURE, adam7_pass_size,
+    adam7_position, unfilter,
 };
-use crate::inflate::zlib_decompress;
+use crate::inflate::{ZlibStream, zlib_decompress};
+
+/// The specification's cap on a `PLTE` chunk: 256 entries of three bytes.
+const MAX_PLTE: usize = 256 * 3;
+/// The largest `tRNS` chunk any colour type permits: 256 palette alphas.
+const MAX_TRNS: usize = 256;
+/// How much compressed data is pulled from the source per refill.
+const READ_CHUNK: usize = 64 * 1024;
 
 /// Transparency from a `tRNS` chunk (§11.3.2.1).
 #[derive(Debug, Clone)]
@@ -46,10 +58,36 @@ pub struct PngDecoder<S: Source> {
     /// Bytes already read while parsing the header, kept for the full parse.
     prefix: Vec<u8>,
     /// The decoded image in output format, produced on first row read.
+    ///
+    /// Only used by the interlaced path; a non-interlaced image never
+    /// materializes here.
     raster: Option<Vec<u8>>,
+    /// Per-row state for the non-interlaced streaming path.
+    stream: Option<Box<Streaming<S>>>,
     row: u32,
     /// Set when the `tRNS` chunk was seen, which changes the output format.
     has_transparency: bool,
+}
+
+/// Everything the streaming path carries between rows.
+///
+/// This is the whole memory cost of decoding a non-interlaced PNG: two
+/// scanlines, the inflate window, and one read buffer — none of which grow
+/// with image height.
+#[derive(Debug)]
+struct Streaming<S: Source> {
+    chunks: ChunkStream<S>,
+    zlib: ZlibStream,
+    /// Decompressed but not yet consumed filtered bytes.
+    filtered: Vec<u8>,
+    /// Read cursor into `filtered`.
+    at: usize,
+    /// The previous reconstructed scanline, which filters predict from.
+    previous: Vec<u8>,
+    palette: Option<Vec<[u8; 3]>>,
+    transparency: Option<Transparency>,
+    /// Set once `IEND` is reached or the final `IDAT` is consumed.
+    input_done: bool,
 }
 
 impl<S: Source> PngDecoder<S> {
@@ -86,6 +124,7 @@ impl<S: Source> PngDecoder<S> {
             source: Some(source),
             prefix,
             raster: None,
+            stream: None,
             row: 0,
             has_transparency: false,
         })
@@ -95,6 +134,78 @@ impl<S: Source> PngDecoder<S> {
     #[must_use]
     pub const fn header(&self) -> Header {
         self.header
+    }
+
+    /// Walk chunks up to the first `IDAT`, resolving the final format.
+    ///
+    /// `PLTE` and `tRNS` both precede `IDAT` (§5.6), which is what makes
+    /// streaming possible at all: everything needed to expand a pixel is
+    /// known before the first one arrives.
+    fn begin_streaming(&mut self) -> Result<Streaming<S>> {
+        let Some(source) = self.source.take() else {
+            return Err(PixelsError::graph("png source was already consumed"));
+        };
+        let mut chunks = ChunkStream::new(source);
+        let mut palette: Option<Vec<[u8; 3]>> = None;
+        let mut transparency: Option<Transparency> = None;
+
+        loop {
+            let kind = chunks.open_next()?;
+            match &kind {
+                b"IHDR" => {
+                    return Err(PixelsError::malformed("png", "more than one IHDR"));
+                }
+                b"PLTE" => {
+                    let data = chunks.read_payload_to_end(MAX_PLTE)?;
+                    palette = Some(parse_plte(&data)?);
+                    chunks.close()?;
+                }
+                b"tRNS" => {
+                    let data = chunks.read_payload_to_end(MAX_TRNS)?;
+                    transparency = Some(parse_trns(&data, self.header.color_type)?);
+                    chunks.close()?;
+                }
+                b"IDAT" => break,
+                b"IEND" => {
+                    return Err(PixelsError::malformed("png", "no IDAT data"));
+                }
+                _ => {
+                    if !chunks.is_ancillary() {
+                        return Err(PixelsError::malformed(
+                            "png",
+                            format!("unknown critical chunk `{}`", chunks.name()),
+                        ));
+                    }
+                    chunks.skip_payload()?;
+                    chunks.close()?;
+                }
+            }
+        }
+
+        if self.header.color_type == ColorType::Palette && palette.is_none() {
+            return Err(PixelsError::malformed(
+                "png",
+                "palette image has no PLTE chunk",
+            ));
+        }
+        self.has_transparency = transparency.is_some();
+        self.descriptor = self
+            .header
+            .descriptor(self.has_transparency, &self.limits)?;
+
+        let row_bytes = self.header.row_bytes(self.header.width);
+        Ok(Streaming {
+            chunks,
+            // The limit is the exact filtered size the header implies, which
+            // is what makes a decompression bomb a malformed-input error.
+            zlib: ZlibStream::new(self.header.filtered_size()),
+            filtered: Vec::new(),
+            at: 0,
+            previous: vec![0_u8; row_bytes],
+            palette,
+            transparency,
+            input_done: false,
+        })
     }
 
     /// Read every remaining chunk and produce the output-format raster.
@@ -133,34 +244,7 @@ impl<S: Source> PngDecoder<S> {
                     seen_ihdr = true;
                 }
                 b"PLTE" => {
-                    if chunk.data.len() % 3 != 0 || chunk.data.is_empty() {
-                        return Err(PixelsError::malformed(
-                            "png",
-                            format!(
-                                "PLTE length {} is not a positive multiple of 3",
-                                chunk.data.len()
-                            ),
-                        ));
-                    }
-                    if chunk.data.len() / 3 > 256 {
-                        return Err(PixelsError::malformed(
-                            "png",
-                            "PLTE has more than 256 entries",
-                        ));
-                    }
-                    palette = Some(
-                        chunk
-                            .data
-                            .chunks_exact(3)
-                            .map(|rgb| {
-                                [
-                                    rgb.first().copied().unwrap_or(0),
-                                    rgb.get(1).copied().unwrap_or(0),
-                                    rgb.get(2).copied().unwrap_or(0),
-                                ]
-                            })
-                            .collect(),
-                    );
+                    palette = Some(parse_plte(&chunk.data)?);
                 }
                 b"tRNS" => {
                     transparency = Some(parse_trns(&chunk.data, self.header.color_type)?);
@@ -295,41 +379,237 @@ impl<S: Source> PngDecoder<S> {
         palette: Option<&[[u8; 3]]>,
         transparency: Option<&Transparency>,
     ) -> Result<Vec<u8>> {
-        let format = self.descriptor.pixel;
-        let width = self.header.width as usize;
         let height = self.header.height as usize;
         let row_bytes = self.header.row_bytes(self.header.width);
-        let depth = self.header.bit_depth;
-        let channels = self.header.color_type.channels();
-        let max = ((1_u32 << depth) - 1) as u16;
-
-        let mut out = vec![0_u8; height * self.descriptor.row_bytes()];
-        let mut at = 0;
+        let out_row = self.descriptor.row_bytes();
+        let mut out = vec![0_u8; height * out_row];
 
         for y in 0..height {
             let row = samples
                 .get(y * row_bytes..(y + 1) * row_bytes)
                 .ok_or_else(|| PixelsError::malformed("png", "sample row missing"))?;
-            for x in 0..width {
-                let mut channel = [0_u16; 4];
-                for (c, slot) in channel.iter_mut().take(channels).enumerate() {
-                    *slot = read_sample(row, x * channels + c, depth);
-                }
-                write_pixel(
-                    &mut out,
-                    &mut at,
-                    format,
-                    self.header.color_type,
-                    &channel,
-                    depth,
-                    max,
-                    palette,
-                    transparency,
-                )?;
-            }
+            let Some(slot) = out.get_mut(y * out_row..(y + 1) * out_row) else {
+                return Err(PixelsError::graph("output row is missing"));
+            };
+            self.expand_row(row, palette, transparency, slot)?;
         }
         Ok(out)
     }
+
+    /// Convert one unfiltered PNG scanline into the engine's output format.
+    ///
+    /// Shared by both paths: the streaming one calls it per scanline as it
+    /// arrives, the interlaced one per row of the deinterlaced raster. Having
+    /// one implementation is what makes "interlaced and non-interlaced decode
+    /// identically" a structural fact rather than a coincidence.
+    fn expand_row(
+        &self,
+        samples: &[u8],
+        palette: Option<&[[u8; 3]]>,
+        transparency: Option<&Transparency>,
+        out: &mut [u8],
+    ) -> Result<()> {
+        let format = self.descriptor.pixel;
+        let width = self.header.width as usize;
+        let depth = self.header.bit_depth;
+        let channels = self.header.color_type.channels();
+        let max = ((1_u32 << depth) - 1) as u16;
+
+        let mut at = 0;
+        for x in 0..width {
+            let mut channel = [0_u16; 4];
+            for (c, slot) in channel.iter_mut().take(channels).enumerate() {
+                *slot = read_sample(samples, x * channels + c, depth);
+            }
+            write_pixel(
+                out,
+                &mut at,
+                format,
+                self.header.color_type,
+                &channel,
+                depth,
+                max,
+                palette,
+                transparency,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The buffered path, used for interlaced images.
+    fn read_row_buffered(&mut self, out: &mut [u8]) -> Result<()> {
+        if self.raster.is_none() {
+            self.raster = Some(self.decode_image()?);
+        }
+        let Some(raster) = self.raster.as_ref() else {
+            return Err(PixelsError::graph("raster vanished after decoding"));
+        };
+        if self.row >= self.descriptor.height {
+            return Err(PixelsError::invalid_argument(
+                "out",
+                format!("all {} rows have already been read", self.descriptor.height),
+            ));
+        }
+        let row_bytes = self.descriptor.row_bytes();
+        if out.len() != row_bytes {
+            return Err(PixelsError::invalid_argument(
+                "out",
+                format!("row buffer is {} bytes, expected {row_bytes}", out.len()),
+            ));
+        }
+        let start = self.row as usize * row_bytes;
+        let row = raster
+            .get(start..start + row_bytes)
+            .ok_or_else(|| PixelsError::malformed("png", "decoded raster is short"))?;
+        out.copy_from_slice(row);
+        self.row += 1;
+        Ok(())
+    }
+}
+
+impl<S: Source> Streaming<S> {
+    /// Pull more compressed bytes and decompress them.
+    ///
+    /// Returns `false` once the stream is exhausted, so a caller asking for a
+    /// scanline that never arrives gets a truncation error rather than a hang.
+    fn refill(&mut self) -> Result<bool> {
+        if self.input_done {
+            return Ok(false);
+        }
+        let mut buffer = vec![0_u8; READ_CHUNK];
+
+        // Walk forward until this feed produced some output, or the stream
+        // ends. An IDAT boundary or a run of ancillary chunks can legitimately
+        // yield nothing, so one pass is not enough.
+        loop {
+            if self.chunks.payload_done() {
+                self.chunks.close()?;
+                // Find the next IDAT, skipping whatever sits between them.
+                loop {
+                    let kind = self.chunks.open_next()?;
+                    match &kind {
+                        b"IDAT" => break,
+                        b"IEND" => {
+                            // Closed, not just recognised: IEND carries a CRC
+                            // like any other chunk, and a stream truncated
+                            // inside it is still a truncated stream.
+                            self.chunks.skip_payload()?;
+                            self.chunks.close()?;
+                            self.input_done = true;
+                            let tail = self.zlib.finish()?;
+                            self.filtered.extend_from_slice(&tail);
+                            return Ok(!tail.is_empty());
+                        }
+                        _ => {
+                            if !self.chunks.is_ancillary() {
+                                return Err(PixelsError::malformed(
+                                    "png",
+                                    format!("unknown critical chunk `{}`", self.chunks.name()),
+                                ));
+                            }
+                            self.chunks.skip_payload()?;
+                            self.chunks.close()?;
+                        }
+                    }
+                }
+            }
+
+            let read = self.chunks.read_payload(&mut buffer)?;
+            if read == 0 {
+                continue;
+            }
+            let produced = self.zlib.push(buffer.get(..read).unwrap_or(&[]))?;
+            if !produced.is_empty() {
+                self.filtered.extend_from_slice(&produced);
+                return Ok(true);
+            }
+        }
+    }
+
+    /// Consume whatever follows the last scanline, so the stream is verified.
+    ///
+    /// The zlib Adler-32 and the trailing `IEND` both sit *after* the final
+    /// row. A caller that stops reading at the last row would otherwise never
+    /// reach them, and a corrupt checksum would pass unnoticed — which is
+    /// exactly what PngSuite's `xcsn0g01` checks.
+    fn finalize(&mut self) -> Result<()> {
+        while self.refill()? {}
+        if !self.input_done {
+            return Err(PixelsError::malformed(
+                "png",
+                "stream ends without an IEND chunk",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Reconstruct the next scanline, returning it in PNG sample layout.
+    fn next_scanline(&mut self, row_bytes: usize, stride: usize) -> Result<Vec<u8>> {
+        let want = row_bytes + 1;
+        while self.filtered.len() - self.at < want {
+            if !self.refill()? {
+                return Err(PixelsError::malformed(
+                    "png",
+                    "image data ends before the last scanline",
+                ));
+            }
+        }
+
+        let filter_byte = self
+            .filtered
+            .get(self.at)
+            .copied()
+            .ok_or_else(|| PixelsError::malformed("png", "scanline ends early"))?;
+        let filter = Filter::from_byte(filter_byte)?;
+        let start = self.at + 1;
+        let mut current = self
+            .filtered
+            .get(start..start + row_bytes)
+            .ok_or_else(|| PixelsError::malformed("png", "scanline ends early"))?
+            .to_vec();
+        self.at = start + row_bytes;
+
+        // Consumed bytes are dropped rather than accumulated, which is what
+        // keeps this buffer at one scanline rather than one image.
+        if self.at >= self.filtered.len() {
+            self.filtered.clear();
+            self.at = 0;
+        } else if self.at > READ_CHUNK {
+            self.filtered.drain(..self.at);
+            self.at = 0;
+        }
+
+        unfilter(filter, &mut current, &self.previous, stride)?;
+        self.previous.clear();
+        self.previous.extend_from_slice(&current);
+        Ok(current)
+    }
+}
+
+/// Parse a `PLTE` payload into RGB triples.
+fn parse_plte(data: &[u8]) -> Result<Vec<[u8; 3]>> {
+    if data.len() % 3 != 0 || data.is_empty() {
+        return Err(PixelsError::malformed(
+            "png",
+            format!("PLTE length {} is not a positive multiple of 3", data.len()),
+        ));
+    }
+    if data.len() / 3 > 256 {
+        return Err(PixelsError::malformed(
+            "png",
+            "PLTE has more than 256 entries",
+        ));
+    }
+    Ok(data
+        .chunks_exact(3)
+        .map(|rgb| {
+            [
+                rgb.first().copied().unwrap_or(0),
+                rgb.get(1).copied().unwrap_or(0),
+                rgb.get(2).copied().unwrap_or(0),
+            ]
+        })
+        .collect())
 }
 
 /// Copy one pixel's bits between rasters, handling sub-byte depths.
@@ -629,12 +909,15 @@ impl<S: Source + std::fmt::Debug> Decoder for PngDecoder<S> {
     }
 
     fn read_row(&mut self, out: &mut [u8]) -> Result<()> {
-        if self.raster.is_none() {
-            self.raster = Some(self.decode_image()?);
+        // Interlaced images need every pass before any row is final, so they
+        // take the buffered path; everything else streams.
+        if self.header.interlaced {
+            return self.read_row_buffered(out);
         }
-        let Some(raster) = self.raster.as_ref() else {
-            return Err(PixelsError::graph("raster vanished after decoding"));
-        };
+        if self.stream.is_none() {
+            let started = self.begin_streaming()?;
+            self.stream = Some(Box::new(started));
+        }
         if self.row >= self.descriptor.height {
             return Err(PixelsError::invalid_argument(
                 "out",
@@ -648,12 +931,26 @@ impl<S: Source + std::fmt::Debug> Decoder for PngDecoder<S> {
                 format!("row buffer is {} bytes, expected {row_bytes}", out.len()),
             ));
         }
-        let start = self.row as usize * row_bytes;
-        let row = raster
-            .get(start..start + row_bytes)
-            .ok_or_else(|| PixelsError::malformed("png", "decoded raster is short"))?;
-        out.copy_from_slice(row);
+
+        let sample_bytes = self.header.row_bytes(self.header.width);
+        let stride = self.header.filter_stride();
+        let Some(stream) = self.stream.as_mut() else {
+            return Err(PixelsError::graph("png stream vanished after starting"));
+        };
+        let samples = stream.next_scanline(sample_bytes, stride)?;
+        let palette = stream.palette.clone();
+        let transparency = stream.transparency.clone();
+
+        self.expand_row(&samples, palette.as_deref(), transparency.as_ref(), out)?;
         self.row += 1;
+
+        // The checksum and IEND follow the last scanline, so the stream is
+        // only fully verified once it has been read to its end.
+        if self.row == self.descriptor.height {
+            if let Some(stream) = self.stream.as_mut() {
+                stream.finalize()?;
+            }
+        }
         Ok(())
     }
 }

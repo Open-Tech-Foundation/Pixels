@@ -45,6 +45,12 @@ versioning: [SemVer](https://semver.org/).
 - `otf-pixels-codec-png`: `PngDecoder`, covering every v1 PNG feature — bit
   depths 1/2/4/8/16, colour types 0/2/3/4/6, `PLTE`, `tRNS`, Adam7 interlace
   and all five filter types. Ancillary chunks are skipped, not honoured.
+  Non-interlaced images **stream**: peak memory is two scanlines, the 32 KiB
+  inflate window and a read buffer, none of which grow with image height.
+  Interlaced images buffer, exactly as SPEC §Formats already said.
+- `otf-pixels-codec-png`: `Inflater` and `ZlibStream`, the incremental
+  decompressors the streaming decoder is built on, plus `ChunkStream`, which
+  walks PNG chunks from a forward-only source a piece at a time.
 - CI (`.github/workflows/ci.yml`): test, fmt, clippy, docs, feature
   combinations, MSRV, reference interop and fuzzing. The interop job also
   regenerates the PngSuite manifest and fails on a diff, so a stale reference

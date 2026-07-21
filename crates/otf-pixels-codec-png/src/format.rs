@@ -4,7 +4,7 @@
 //! anything malformed. The PNG specification is ISO/IEC 15948; section
 //! references below are to it.
 
-use otf_pixels_core::{ImageDescriptor, Limits, PixelFormat, PixelsError, Result};
+use otf_pixels_core::{ImageDescriptor, Limits, PixelFormat, PixelsError, Result, Source};
 
 use crate::checksum::Crc32;
 
@@ -415,6 +415,194 @@ impl<'a> ChunkReader<'a> {
             kind,
             data: payload.to_vec(),
         })
+    }
+}
+
+/// The largest ancillary chunk read whole before being discarded.
+///
+/// Ancillary chunks are skipped, but a streaming reader still has to walk past
+/// them. Reading in bounded pieces means a chunk declaring 2 GiB of text costs
+/// time rather than memory.
+const SKIP_BUFFER: usize = 32 * 1024;
+
+/// Reads chunks from a forward-only [`Source`], one piece at a time.
+///
+/// The in-memory [`ChunkReader`] needs the whole file; this one needs only the
+/// chunk it is currently walking through, which is what lets a PNG decode in
+/// constant memory (SPEC §Guarantees 1). `IDAT` payloads are handed out in
+/// pieces rather than collected, so a 2 GiB image never exists as bytes.
+#[derive(Debug)]
+pub struct ChunkStream<S: Source> {
+    source: S,
+    /// Payload bytes of the current chunk still unread.
+    remaining: usize,
+    /// Running CRC over the type and payload seen so far.
+    crc: Crc32,
+    kind: [u8; 4],
+    open: bool,
+}
+
+impl<S: Source> ChunkStream<S> {
+    /// Start reading chunks from `source`, which must be positioned just past
+    /// the signature.
+    #[must_use]
+    pub const fn new(source: S) -> Self {
+        Self {
+            source,
+            remaining: 0,
+            crc: Crc32::new(),
+            kind: [0; 4],
+            open: false,
+        }
+    }
+
+    /// Whether the open chunk's payload has been fully read.
+    #[must_use]
+    pub const fn payload_done(&self) -> bool {
+        self.remaining == 0
+    }
+
+    /// Whether the open chunk may be skipped if unrecognised (§5.4).
+    #[must_use]
+    pub const fn is_ancillary(&self) -> bool {
+        self.kind[0] & 0x20 != 0
+    }
+
+    /// The open chunk's type as a display string, for diagnostics.
+    #[must_use]
+    pub fn name(&self) -> String {
+        String::from_utf8_lossy(&self.kind).into_owned()
+    }
+
+    /// Open the next chunk, returning its type.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::Malformed`] for a truncated header or a length
+    /// beyond the specification's 2^31-1 limit, and [`PixelsError::Io`] on
+    /// source failure.
+    pub fn open_next(&mut self) -> Result<[u8; 4]> {
+        let mut head = [0_u8; 8];
+        self.source.read_exact(&mut head)?;
+        let length = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+        // §5.3: lengths must not exceed 2^31-1.
+        if length > 0x7FFF_FFFF {
+            return Err(PixelsError::malformed(
+                "png",
+                format!("chunk length {length} exceeds the 2^31-1 maximum"),
+            ));
+        }
+        let mut kind = [0_u8; 4];
+        kind.copy_from_slice(head.get(4..8).unwrap_or(&[0; 4]));
+
+        self.kind = kind;
+        self.remaining = length;
+        self.crc = Crc32::new();
+        self.crc.update(&kind);
+        self.open = true;
+        Ok(kind)
+    }
+
+    /// Read up to `buf.len()` payload bytes of the open chunk.
+    ///
+    /// Returns zero when the payload is exhausted, at which point
+    /// [`ChunkStream::close`] verifies the CRC.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::Io`] on source failure, or
+    /// [`PixelsError::Malformed`] if the stream ends inside the payload.
+    pub fn read_payload(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let want = self.remaining.min(buf.len());
+        if want == 0 {
+            return Ok(0);
+        }
+        let Some(slot) = buf.get_mut(..want) else {
+            return Ok(0);
+        };
+        self.source.read_exact(slot)?;
+        self.crc.update(slot);
+        self.remaining -= want;
+        Ok(want)
+    }
+
+    /// Read the whole remaining payload. For small chunks only.
+    ///
+    /// `max` is the specification's own cap for the chunk type, so exceeding
+    /// it is malformed input rather than a configurable limit.
+    ///
+    /// # Errors
+    ///
+    /// As [`ChunkStream::read_payload`], plus [`PixelsError::Malformed`] if
+    /// the chunk is larger than `max`.
+    pub fn read_payload_to_end(&mut self, max: usize) -> Result<Vec<u8>> {
+        if self.remaining > max {
+            return Err(PixelsError::malformed(
+                "png",
+                format!(
+                    "chunk `{}` declares {} bytes, above the {max} the specification allows",
+                    String::from_utf8_lossy(&self.kind),
+                    self.remaining
+                ),
+            ));
+        }
+        let mut out = vec![0_u8; self.remaining];
+        let mut filled = 0;
+        while filled < out.len() {
+            let Some(rest) = out.get_mut(filled..) else {
+                break;
+            };
+            match self.read_payload(rest)? {
+                0 => break,
+                n => filled += n,
+            }
+        }
+        Ok(out)
+    }
+
+    /// Discard the rest of the payload in bounded pieces.
+    ///
+    /// # Errors
+    ///
+    /// As [`ChunkStream::read_payload`].
+    pub fn skip_payload(&mut self) -> Result<()> {
+        let mut scratch = vec![0_u8; SKIP_BUFFER.min(self.remaining.max(1))];
+        while self.remaining > 0 {
+            if self.read_payload(&mut scratch)? == 0 {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Finish the open chunk, verifying its CRC.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::Malformed`] if the payload was not fully read or
+    /// the CRC does not match.
+    pub fn close(&mut self) -> Result<()> {
+        if self.remaining != 0 {
+            return Err(PixelsError::malformed(
+                "png",
+                "chunk closed before its payload was read",
+            ));
+        }
+        let mut trailer = [0_u8; 4];
+        self.source.read_exact(&mut trailer)?;
+        let expected = u32::from_be_bytes(trailer);
+        let actual = self.crc.finish();
+        self.open = false;
+        if actual != expected {
+            return Err(PixelsError::malformed(
+                "png",
+                format!(
+                    "chunk `{}` CRC mismatch: declares {expected:#010x}, data is {actual:#010x}",
+                    String::from_utf8_lossy(&self.kind)
+                ),
+            ));
+        }
+        Ok(())
     }
 }
 

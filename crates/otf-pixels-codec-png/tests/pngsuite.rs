@@ -504,3 +504,112 @@ fn transparency_produces_an_alpha_channel() {
         );
     }
 }
+
+#[test]
+fn a_non_interlaced_png_decodes_without_buffering_the_image() {
+    // The point of the streaming path: the decoder produces a row without
+    // having read the whole file. A buffered decoder drains its source before
+    // producing anything, so this is the difference expressed as a test
+    // rather than as a comment.
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A source that reports how far it has been read.
+    #[derive(Debug)]
+    struct Metered {
+        data: Vec<u8>,
+        at: Arc<AtomicUsize>,
+    }
+
+    impl otf_pixels_core::Source for Metered {
+        fn read(&mut self, buf: &mut [u8]) -> otf_pixels_core::Result<usize> {
+            let from = self.at.load(Ordering::SeqCst);
+            let take = (self.data.len() - from).min(buf.len());
+            buf[..take].copy_from_slice(&self.data[from..from + take]);
+            self.at.store(from + take, Ordering::SeqCst);
+            Ok(take)
+        }
+    }
+
+    // A tall image, so "one row" and "the whole file" are far apart.
+    let bytes = build_tall_png(64, 4096);
+    let at = Arc::new(AtomicUsize::new(0));
+    let source = Metered {
+        data: bytes.clone(),
+        at: Arc::clone(&at),
+    };
+
+    let mut decoder = PngDecoder::new(source, Limits::default()).unwrap();
+    let mut row = vec![0_u8; decoder.descriptor().row_bytes()];
+    decoder.read_row(&mut row).unwrap();
+
+    let consumed = at.load(Ordering::SeqCst);
+    assert!(
+        consumed < bytes.len(),
+        "the decoder read all {} bytes before producing one row, so it is still buffering",
+        bytes.len()
+    );
+
+    // Reading the rest must then consume the rest, so the check above is
+    // measuring laziness rather than a decoder that simply stopped early.
+    for _ in 1..decoder.descriptor().height {
+        decoder.read_row(&mut row).unwrap();
+    }
+    assert_eq!(
+        at.load(Ordering::SeqCst),
+        bytes.len(),
+        "the stream was not fully read"
+    );
+}
+
+/// Build a tall non-interlaced greyscale PNG with our own encoder.
+fn build_tall_png(width: u32, height: u32) -> Vec<u8> {
+    use otf_pixels_codec_png::PngEncoder;
+    use otf_pixels_core::{Encoder, ImageDescriptor, PixelFormat};
+
+    let descriptor = ImageDescriptor::new(width, height, PixelFormat::Gray8).unwrap();
+    let mut encoder = PngEncoder::new();
+    let mut out = Vec::new();
+    encoder.write_header(&descriptor, &mut out).unwrap();
+    // Noise, so the rows do not all compress into one tiny block.
+    for y in 0..height {
+        let row: Vec<u8> = (0..width)
+            .map(|x| ((x * 31 + y * 17) % 251) as u8)
+            .collect();
+        encoder.write_row(&row, &mut out).unwrap();
+    }
+    encoder.finish(&mut out).unwrap();
+    out
+}
+
+#[test]
+fn decoding_a_tall_png_row_by_row_matches_decoding_it_whole() {
+    // Streaming must not change the pixels. Same image, same bytes, whether
+    // the source hands them over in one piece or in 13-byte dribbles.
+    let bytes = build_tall_png(37, 500);
+    let (_, whole) = decode(&bytes).unwrap();
+
+    struct Trickle<'a>(&'a [u8], usize);
+    impl otf_pixels_core::Source for Trickle<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> otf_pixels_core::Result<usize> {
+            let take = (self.0.len() - self.1).min(buf.len()).min(13);
+            buf[..take].copy_from_slice(&self.0[self.1..self.1 + take]);
+            self.1 += take;
+            Ok(take)
+        }
+    }
+    impl std::fmt::Debug for Trickle<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Trickle")
+        }
+    }
+
+    let mut decoder = PngDecoder::new(Trickle(&bytes, 0), Limits::default()).unwrap();
+    let mut dribbled = Vec::new();
+    let mut row = vec![0_u8; decoder.descriptor().row_bytes()];
+    for _ in 0..decoder.descriptor().height {
+        decoder.read_row(&mut row).unwrap();
+        dribbled.extend_from_slice(&row);
+    }
+    assert_eq!(dribbled, whole, "a trickled source decoded differently");
+}
