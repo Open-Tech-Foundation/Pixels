@@ -29,11 +29,19 @@ Estimates deliberately omitted — scope, not dates, is the commitment.
   rejected, and libpng reads back every PNG we write. Non-interlaced decode
   streams, so SPEC §Formats' claim holds rather than being aspirational.
 
-### M4 — Core op set + SIMD
+### M4 — Core op set + SIMD — **complete**
 - resize (all filters), rotate/flip, modulate, convolve, composite,
   channel ops — scalar first, then SIMD for resize + pointwise.
-- Scalar/SIMD exact-equality CI gate.
-- **Exit**: benchmark vs `image` + `fast_image_resize`; publish numbers.
+- Scalar/SIMD exact-equality CI gate. ✅ Restated by ADR-0011: there is no
+  separate scalar path to compare against, because kernels are written in one
+  vectorizable form and 8-bit arithmetic is fixed point. What CI gates instead
+  is the property that gate protected — output identical run to run, across
+  thread counts, across tile shapes, and against the M1 oracle.
+- **Exit**: benchmark vs `image` + `fast_image_resize`; publish numbers. ✅
+  Published in the README. 4.85x faster than `image`, 1.49x slower than
+  `fast_image_resize` end to end; roughly 2x slower on the kernel alone once
+  the shared input copy is netted out. That is worse than ADR-0011 predicted,
+  and is recorded as such.
 
 ### M5 — GIF + TIFF (from scratch)
 - GIF: LZW, palettes, frame disposal; single-frame encode + quantization.
