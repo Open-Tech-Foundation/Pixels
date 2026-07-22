@@ -25,7 +25,9 @@ use super::plane::Plane;
 use super::predict::{IntraMode, Neighbours, predict_intra_4x4};
 use super::seq::SequenceHeader;
 use super::symbol::SymbolDecoder;
-use super::transform::{add_residual_4x4, inverse_wht_4x4};
+use super::transform::{
+    TxSize, TxType, ac_q, add_residual_4x4, dc_q, dequantize, inverse_transform_2d,
+};
 use otf_pixels_core::{PixelsError, Result};
 
 /// `MI_SIZE` (§3): the side of the smallest coded block, in samples.
@@ -1177,7 +1179,20 @@ impl TileState {
                 decode_coeffs_4x4(dec, &mut self.cdfs.coeff, ptype, all_zero_ctx, dc_sign_ctx)?;
             self.update_level_context(plane, x4, y4, block.cul_level, block.dc_category);
             if block.eob > 0 {
-                let residual = inverse_wht_4x4(&block.quant);
+                // Lossless is qindex 0: dc_q == ac_q == 4 and dqDenom == 1, so
+                // dequantise is a plain "times 4" and the WHT divides it back
+                // out. Routing it through the general transform driver keeps the
+                // path bit-exact while sharing the lossy machinery.
+                let dc = dc_q(self.bit_depth, 0);
+                let ac = ac_q(self.bit_depth, 0);
+                let dequant = dequantize(&block.quant, TxSize::Tx4x4, dc, ac, self.bit_depth);
+                let residual = inverse_transform_2d(
+                    &dequant,
+                    TxSize::Tx4x4,
+                    TxType::DctDct,
+                    true,
+                    self.bit_depth,
+                );
                 add_residual_4x4(&prediction, &residual, self.bit_depth)
             } else {
                 prediction

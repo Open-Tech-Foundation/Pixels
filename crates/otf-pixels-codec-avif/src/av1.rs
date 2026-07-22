@@ -42,7 +42,10 @@ pub use seq::{ColorConfig, OperatingPoint, SequenceHeader};
 pub use still::{StillPicture, sequence_header_from_config};
 pub use symbol::SymbolDecoder;
 pub use tile::{DecodedFrame, decode_still};
-pub use transform::{add_residual_4x4, inverse_wht_4x4};
+pub use transform::{
+    Dequant, Residual, TxSize, TxType, ac_q, add_residual_4x4, dc_q, dequantize,
+    inverse_transform_2d,
+};
 
 #[cfg(test)]
 #[allow(

@@ -69,6 +69,16 @@ versioning: [SemVer](https://semver.org/).
   read the tables.
 
 ### Added
+- `otf-pixels-codec-avif` gains the full lossy inverse-transform machinery, the
+  foundation of the lossy decode path. `inverse_transform_2d` runs the §7.13
+  butterfly network — the inverse DCT (4..64), ADST (4/8/16) and identity
+  transforms, with the flip and rectangular-scaling cases — over any of the 19
+  transform sizes, and `dequantize` applies the real `Dc_Qlookup`/`Ac_Qlookup`
+  quantiser steps (generated from the spec). The lossless reconstruct now flows
+  through the same pair — qindex 0 is just its `dc == ac == 4`, `dqDenom == 1`
+  corner where the Walsh–Hadamard transform divides the dequantiser back out —
+  so every lossless fixture stays bit-exact against libavif while the lossy
+  transforms come online.
 - `otf-pixels-codec-avif` decodes the screen-content lossless path: palette and
   chroma-from-luma prediction. Palette blocks decode their colour set (merging
   the neighbour palettes into the prediction cache, then cache hits, a base
