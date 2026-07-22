@@ -86,6 +86,13 @@ pub fn decode_still(
             "avif: multi-tile decode is not implemented yet",
         ));
     }
+    if frame.allow_screen_content_tools {
+        // Palette and intra block copy would be coded, and neither is
+        // implemented; decoding anyway would desynchronise the symbol stream.
+        return Err(PixelsError::unsupported(
+            "avif: screen-content tools (palette, intra block copy) are not implemented yet",
+        ));
+    }
 
     let mut state = TileState::new(seq, frame)?;
     state.decode(tile_data)?;
@@ -738,6 +745,19 @@ impl TileState {
 
     fn transform_block(&mut self, dec: &mut SymbolDecoder<'_>, tb: &TxBlock) -> Result<()> {
         let (plane, x, y, bw4, bh4, skip) = (tb.plane, tb.x, tb.y, tb.bw4, tb.bh4, tb.skip);
+
+        // A transform block whose top-left lies outside the frame is not coded:
+        // the block may extend past the right or bottom edge, but only the tx
+        // blocks that start inside it read symbols (spec §5.11.35). For 4:4:4 the
+        // luma and chroma edges coincide. Skipping this desynchronises every
+        // symbol after the edge — for a last-region block that surfaces as wrong
+        // chroma while the luma before it stays correct.
+        let max_x = self.mi_cols * MI_SIZE;
+        let max_y = self.mi_rows * MI_SIZE;
+        if x >= max_x || y >= max_y {
+            return Ok(());
+        }
+
         // Predict from the reconstructed neighbours.
         let prediction = self.predict(tb)?;
 

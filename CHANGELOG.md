@@ -53,6 +53,13 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Fixed
+- The AVIF reconstruction decoded transform blocks whose top-left corner lies
+  past the frame's right or bottom edge, which a partial superblock produces.
+  The spec codes no such block, so the extra symbol reads desynchronised
+  everything after them — surfacing as wrong chroma in the last region of a
+  frame with odd dimensions while the luma before it stayed correct. The
+  transform-block loop now skips them, and `gradient_odd_lossless` (37x29)
+  decodes bit-exact.
 - The AV1 CDF table generator dropped the multiplication in spec entries of the
   form `{ 128 * 125, 32768, 0 }`, splitting `128 * 125` into two separate values
   and lengthening every affected binary CDF by one bogus entry. The tokenizer
@@ -62,17 +69,20 @@ versioning: [SemVer](https://semver.org/).
   read the tables.
 
 ### Added
-- `otf-pixels-codec-avif` decodes its first real pixels: a lossless 4:4:4 AVIF
-  still now reconstructs bit-exact against libaom. The tile driver walks the
-  partition tree (including the T-shaped and 4-way splits), reads each block's
-  intra mode, and for every 4x4 transform block predicts, decodes coefficients,
-  inverts the Walsh–Hadamard transform, and writes the samples back — threading
-  the neighbour level, DC-sign, mode, and block-decoded context arrays that keep
-  the entropy contexts aligned with the encoder. All the intra modes a natural
-  image reaches are implemented: DC, Paeth, the smooth family, the slanted
-  directional modes with their edge-filter and upsample machinery, and recursive
-  filter-intra. Screen-content tools (palette, intra block copy) and
-  chroma-from-luma report `Unsupported` rather than desynchronise.
+- `otf-pixels-codec-avif` decodes real pixels end to end: `AvifDecoder::read_row`
+  reconstructs a lossless 4:4:4 AVIF still, converts the identity-matrix planes
+  to RGB, and serves the rows — bit-exact against libavif on every lossless
+  fixture (`tests/reference.rs`). The tile driver walks the partition tree
+  (including the T-shaped and 4-way splits), reads each block's intra mode, and
+  for every 4x4 transform block predicts, decodes coefficients, inverts the
+  Walsh–Hadamard transform, and writes the samples back — threading the
+  neighbour level, DC-sign, mode, and block-decoded context arrays that keep the
+  entropy contexts aligned with the encoder. All the intra modes a natural image
+  reaches are implemented: DC, Paeth, the smooth family, the slanted directional
+  modes with their edge-filter and upsample machinery, and recursive
+  filter-intra. Screen-content tools (palette, intra block copy), subsampled
+  chroma, lossy transforms, and grids report `Unsupported` rather than decode
+  wrong.
 - `otf-pixels-codec-avif` gains the 4x4 coefficient decoder — the syntax that
   turns a transform block's entropy-coded symbols into a signed level array.
   It reads `all_zero`, the end-of-block position, each coefficient's base level

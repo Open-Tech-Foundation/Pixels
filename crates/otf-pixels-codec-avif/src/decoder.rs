@@ -1,13 +1,15 @@
 //! The AVIF decoder: container parsing and the [`Decoder`] implementation.
 //!
-//! As of this milestone the container is complete and the AV1 bitstream is
-//! not, so [`AvifDecoder::new`] answers everything a header can answer —
-//! dimensions, bit depth, chroma format, whether there is an alpha plane —
-//! and [`AvifDecoder::read_row`] reports [`PixelsError::Unsupported`]. That
-//! split is deliberate: `metadata()` is a documented no-decode operation
-//! (SPEC §Guarantees 3), so it is worth having before pixels work, and a
-//! decoder that answers it honestly is more useful than one that refuses the
-//! file outright.
+//! [`AvifDecoder::new`] parses only boxes, so `metadata()` stays a no-decode
+//! operation (SPEC §Guarantees 3): it answers dimensions, bit depth, chroma
+//! format, and alpha without touching the bitstream. [`AvifDecoder::read_row`]
+//! reconstructs the whole primary frame on the first call and serves rows from
+//! the cache — an AVIF still is one AV1 key frame with no prefix that yields a
+//! partial raster, so the decode is inherently whole-image (SPEC §Memory).
+//!
+//! The reconstruction covers the lossless 4:4:4 intra subset; anything outside
+//! it (lossy transforms, subsampled chroma, screen-content tools, grids) is
+//! reported as [`PixelsError::Unsupported`] rather than decoded wrong.
 
 use crate::boxes::{FourCc, Reader};
 use crate::meta::Meta;
@@ -51,6 +53,11 @@ pub struct AvifInfo {
 pub struct AvifDecoder {
     descriptor: ImageDescriptor,
     info: AvifInfo,
+    /// The primary item's coded AV1 bytes, retained for the lazy pixel decode.
+    /// `None` for a grid, whose per-tile decode is not implemented.
+    frame_data: Option<Vec<u8>>,
+    /// The reconstructed interleaved raster, produced on the first row read.
+    raster: Option<Vec<u8>>,
     /// Rows already served.
     row: u32,
 }
@@ -70,11 +77,18 @@ impl AvifDecoder {
     pub fn new<S: Source>(source: S, limits: Limits) -> Result<Self> {
         let bytes = read_all(source)?;
         let info = parse_container(&bytes)?;
+        let frame_data = if info.is_grid {
+            None
+        } else {
+            Some(locate_primary_frame(&bytes)?)
+        };
         let pixel = pixel_format(&info);
         let descriptor = ImageDescriptor::with_limits(info.width, info.height, pixel, &limits)?;
         Ok(Self {
             descriptor,
             info,
+            frame_data,
+            raster: None,
             row: 0,
         })
     }
@@ -203,6 +217,63 @@ fn parse_container(bytes: &[u8]) -> Result<AvifInfo> {
     })
 }
 
+/// Locate and copy out the primary coded image item's AV1 bytes.
+fn locate_primary_frame(bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut reader = Reader::new(bytes);
+    reader.next_box();
+    let meta_reader = reader
+        .find(b"meta")?
+        .ok_or_else(|| PixelsError::malformed("avif", "the file has no meta box"))?;
+    let meta = Meta::parse(meta_reader)?;
+    let primary = meta
+        .primary_item()
+        .ok_or_else(|| PixelsError::malformed("avif", "the file names no primary image item"))?;
+    Ok(meta.item_data(bytes, primary)?.into_owned())
+}
+
+/// Decode the primary AV1 still and convert it to the interleaved raster the
+/// descriptor promises.
+fn decode_raster(info: &AvifInfo, frame_data: &[u8]) -> Result<Vec<u8>> {
+    use crate::av1::{StillPicture, decode_still};
+
+    let still = StillPicture::parse(&info.config.config_obus, frame_data)?;
+    let located = frame_data
+        .get(still.tile_data_offset..still.tile_data_offset + still.tile_data_len)
+        .ok_or_else(|| PixelsError::malformed("avif", "tile data runs past the coded frame"))?;
+    let frame = decode_still(&still.sequence, &still.frame, located)?;
+
+    let width = info.width as usize;
+    let height = info.height as usize;
+    let matrix = still.sequence.color.matrix_coefficients;
+    if matrix != 0 {
+        return Err(PixelsError::unsupported(
+            "avif: only the identity colour matrix is implemented in the lossless path",
+        ));
+    }
+    let plane = |i: usize| {
+        frame
+            .planes
+            .get(i)
+            .ok_or_else(|| PixelsError::malformed("avif", "a colour plane is missing"))
+    };
+    // Identity matrix (matrix_coefficients == 0): the planes are G, B, R.
+    let (g, b, r) = (plane(0)?, plane(1)?, plane(2)?);
+    let mut raster = vec![0_u8; width * height * 3];
+    for y in 0..height {
+        for x in 0..width {
+            let base = (y * width + x) * 3;
+            if let Some(px) = raster.get_mut(base..base + 3) {
+                px.copy_from_slice(&[
+                    r.get(x, y).unwrap_or(0) as u8,
+                    g.get(x, y).unwrap_or(0) as u8,
+                    b.get(x, y).unwrap_or(0) as u8,
+                ]);
+            }
+        }
+    }
+    Ok(raster)
+}
+
 /// The pixel format this image decodes to.
 ///
 /// AV1 codes YUV; the engine's formats are RGB and greyscale, so the mapping
@@ -258,9 +329,26 @@ impl Decoder for AvifDecoder {
                 format!("row buffer is {} bytes, expected {row_bytes}", out.len()),
             ));
         }
-        Err(PixelsError::unsupported(
-            "avif: the container is parsed but AV1 bitstream decoding is not implemented yet",
-        ))
+
+        // Reconstruct the whole frame on the first row: an AVIF still is coded
+        // as one AV1 frame with no prefix that yields a partial raster, so the
+        // decode is inherently whole-image (SPEC §Memory). Later rows are served
+        // from the cached raster.
+        if self.raster.is_none() {
+            let frame_data = self
+                .frame_data
+                .as_deref()
+                .ok_or_else(|| PixelsError::unsupported("avif: grid images are not decoded yet"))?;
+            self.raster = Some(decode_raster(&self.info, frame_data)?);
+        }
+        let raster = self.raster.as_deref().unwrap_or(&[]);
+        let start = self.row as usize * row_bytes;
+        let src = raster
+            .get(start..start + row_bytes)
+            .ok_or_else(|| PixelsError::malformed("avif", "the reconstructed raster is short"))?;
+        out.copy_from_slice(src);
+        self.row += 1;
+        Ok(())
     }
 }
 
@@ -567,22 +655,23 @@ mod tests {
     }
 
     #[test]
-    fn pixel_decode_is_unsupported_but_the_row_contract_is_enforced() {
+    fn the_row_buffer_size_contract_is_enforced_before_decoding() {
         let file = minimal_avif(4, 4);
         let mut decoder = AvifDecoder::new(&file[..], Limits::default()).unwrap();
 
-        // A wrong-sized buffer is an argument error, checked before the
-        // unimplemented decode is reached.
+        // A wrong-sized buffer is an argument error, checked before the decode
+        // is reached.
         let mut wrong = [0_u8; 3];
         assert_eq!(
             decoder.read_row(&mut wrong).unwrap_err().code(),
             ErrorCode::InvalidArgument
         );
 
+        // The synthetic fixture carries no real coded frame, so the decode
+        // itself fails cleanly rather than panicking. (Real decodes are proven
+        // bit-exact against libavif in tests/reference.rs.)
         let mut row = vec![0_u8; decoder.descriptor().row_bytes()];
-        let error = decoder.read_row(&mut row).unwrap_err();
-        assert_eq!(error.code(), ErrorCode::Unsupported);
-        assert!(error.to_string().contains("not implemented yet"), "{error}");
+        assert!(decoder.read_row(&mut row).is_err());
     }
 
     #[test]
