@@ -50,12 +50,29 @@ def parse_initializer(tokens: list[str], pos: int):
         elif tok == ",":
             pos += 1
         else:
-            items.append(int(tok))
+            items.append(eval_number(tok))
             pos += 1
 
 
+def eval_number(tok: str) -> int:
+    """Evaluate a numeric token, which may be a product like ``128 * 125``.
+
+    The AV1 spec writes several binary CDFs in the form ``{ 128 * 125, ... }``.
+    The multiplication is part of the value, not a separator, so it must be
+    evaluated rather than split into two entries.
+    """
+    if "*" in tok:
+        result = 1
+        for factor in tok.split("*"):
+            result *= int(factor.strip())
+        return result
+    return int(tok)
+
+
 def tokenize(body: str) -> list[str]:
-    return re.findall(r"\{|\}|,|-?\d+", body)
+    # Match a product (number * number) before a bare number so the whole
+    # expression is one token.
+    return re.findall(r"\{|\}|,|-?\d+\s*\*\s*-?\d+|-?\d+", body)
 
 
 def shape_of(data) -> list[int]:

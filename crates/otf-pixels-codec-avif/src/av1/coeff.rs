@@ -85,7 +85,7 @@ pub struct CoeffCdfs {
     coeff_base_eob: [[[[u16; 4]; 4]; 2]; 5],
     coeff_base: [[[[u16; 5]; 42]; 2]; 5],
     coeff_br: [[[[u16; 5]; 21]; 2]; 5],
-    dc_sign: [[[u16; 4]; 3]; 2],
+    dc_sign: [[[u16; 3]; 3]; 2],
 }
 
 impl CoeffCdfs {
