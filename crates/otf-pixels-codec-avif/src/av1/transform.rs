@@ -527,6 +527,15 @@ mod dsp {
     const TX_HEIGHT_LOG2: [u32; 19] = [2, 3, 4, 5, 6, 3, 2, 4, 3, 5, 4, 6, 5, 4, 2, 5, 3, 6, 4];
     const TRANSFORM_ROW_SHIFT: [u32; 19] =
         [0, 1, 2, 2, 2, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2];
+    // `Tx_Size_Sqr[txSz]` / `Tx_Size_Sqr_Up[txSz]` as the square size's index
+    // (TX_4X4=0..TX_64X64=4): the square tx with side Min(w,h) resp. Max(w,h).
+    const TX_SIZE_SQR: [u32; 19] = [0, 1, 2, 3, 4, 0, 0, 1, 1, 2, 2, 3, 3, 0, 0, 1, 1, 2, 2];
+    const TX_SIZE_SQR_UP: [u32; 19] = [0, 1, 2, 3, 4, 1, 1, 2, 2, 3, 3, 4, 4, 2, 2, 3, 3, 4, 4];
+    // `Adjusted_Tx_Size[txSz]`: the coded tx size, mapping any 64-wide/high size
+    // down to its 32 counterpart (only the top-left 32x32 of coeffs is coded).
+    const ADJUSTED_TX_SIZE: [usize; 19] = [
+        0, 1, 2, 3, 3, 5, 6, 7, 8, 9, 10, 3, 3, 13, 14, 15, 16, 9, 10,
+    ];
 
     impl TxSize {
         /// `Tx_Width_Log2[txSz]`.
@@ -539,6 +548,59 @@ mod dsp {
         #[must_use]
         pub fn log2_height(self) -> u32 {
             TX_HEIGHT_LOG2[self as usize]
+        }
+
+        /// `Tx_Size_Sqr[txSz]` as the square size's index (`Min(w,h)`).
+        #[must_use]
+        pub fn sqr_idx(self) -> u32 {
+            TX_SIZE_SQR[self as usize]
+        }
+
+        /// `Tx_Size_Sqr_Up[txSz]` as the square size's index (`Max(w,h)`).
+        #[must_use]
+        pub fn sqr_up_idx(self) -> u32 {
+            TX_SIZE_SQR_UP[self as usize]
+        }
+
+        /// `txSzCtx = (Tx_Size_Sqr + Tx_Size_Sqr_Up + 1) >> 1`, the coefficient
+        /// CDF bucket (0..=4).
+        #[must_use]
+        pub fn tx_size_ctx(self) -> usize {
+            ((self.sqr_idx() + self.sqr_up_idx() + 1) >> 1) as usize
+        }
+
+        /// `Tx_Width_Log2[Adjusted_Tx_Size[txSz]]`: the coded block's width log2,
+        /// which drives the coefficient position maths (`bwl`).
+        #[must_use]
+        pub fn adjusted_log2_width(self) -> u32 {
+            TX_WIDTH_LOG2[ADJUSTED_TX_SIZE[self as usize]]
+        }
+
+        /// `Tx_Height[Adjusted_Tx_Size[txSz]]`: the coded block's height.
+        #[must_use]
+        pub fn adjusted_height(self) -> usize {
+            1 << TX_HEIGHT_LOG2[ADJUSTED_TX_SIZE[self as usize]]
+        }
+
+        /// `Tx_Width[Adjusted_Tx_Size[txSz]]`: the coded block's width.
+        #[must_use]
+        pub fn adjusted_width(self) -> usize {
+            1 << self.adjusted_log2_width()
+        }
+
+        /// `segEob` (§5.11.39): the number of scan positions the block can code.
+        #[must_use]
+        pub fn seg_eob(self) -> usize {
+            match self {
+                TxSize::Tx16x64 | TxSize::Tx64x16 => 512,
+                _ => (self.width() * self.height()).min(1024),
+            }
+        }
+
+        /// `eobMultisize` (§5.11.39): selects the `eob_pt_*` alphabet (0..=6).
+        #[must_use]
+        pub fn eob_multisize(self) -> usize {
+            (self.log2_width().min(5) + self.log2_height().min(5) - 4) as usize
         }
 
         /// The transform width in samples, `1 << Tx_Width_Log2[txSz]`.

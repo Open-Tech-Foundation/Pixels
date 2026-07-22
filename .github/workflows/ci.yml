@@ -43,6 +43,14 @@ jobs:
           python3 scripts/generate-av1-cdf-tables.py
           git diff --exit-code -- crates/otf-pixels-codec-avif/src/av1/cdf.rs
 
+      # The AV1 scan-order tables are likewise generated from a vendored spec
+      # extract and validated to be permutations, so the checked-in file must
+      # match what the generator produces today.
+      - name: generated scan tables are current
+        run: |
+          python3 scripts/generate-av1-scan-tables.py
+          git diff --exit-code -- crates/otf-pixels-codec-avif/src/av1/scan_tables.rs
+
   docs:
     name: docs
     runs-on: ubuntu-latest

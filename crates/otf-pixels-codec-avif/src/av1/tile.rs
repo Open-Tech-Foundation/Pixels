@@ -15,7 +15,7 @@
 //! stream that uses it fails cleanly instead of desynchronising.
 
 use super::cdf;
-use super::coeff::{CoeffCdfs, decode_coeffs_4x4};
+use super::coeff::{CoeffCdfs, decode_coeffs};
 use super::direction::{
     ANGLE_STEP, Edge, mode_base_angle, predict_directional_4x4, predict_filter_intra_4x4,
 };
@@ -1175,8 +1175,15 @@ impl TileState {
             let all_zero_ctx = self.all_zero_ctx(plane, x4, y4, bw4, bh4);
             let dc_sign_ctx = self.dc_sign_ctx(plane, x4, y4);
             let ptype = usize::from(plane > 0);
-            let block =
-                decode_coeffs_4x4(dec, &mut self.cdfs.coeff, ptype, all_zero_ctx, dc_sign_ctx)?;
+            let block = decode_coeffs(
+                dec,
+                &mut self.cdfs.coeff,
+                TxSize::Tx4x4,
+                TxType::DctDct,
+                ptype,
+                all_zero_ctx,
+                dc_sign_ctx,
+            )?;
             self.update_level_context(plane, x4, y4, block.cul_level, block.dc_category);
             if block.eob > 0 {
                 // Lossless is qindex 0: dc_q == ac_q == 4 and dqDenom == 1, so

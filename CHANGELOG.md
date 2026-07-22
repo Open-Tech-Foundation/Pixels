@@ -69,6 +69,17 @@ versioning: [SemVer](https://semver.org/).
   read the tables.
 
 ### Added
+- `otf-pixels-codec-avif` generalizes the coefficient decoder to every transform
+  size and type, not just the 4x4 lossless corner. `decode_coeffs` now selects
+  the `eob_pt` alphabet by size, walks the size-and-type-specific scan order
+  (`get_scan` over the generated `Default`/`Mrow`/`Mcol` scan tables), and
+  derives the `coeff_base`/`coeff_br` contexts from the coded block's `bwl` and
+  transform class (2D vs. the 1D row/column identities). The scan tables are
+  generated from a vendored spec extract by `scripts/generate-av1-scan-tables.py`
+  and validated to be exact permutations, with CI re-running the generator and
+  diffing — the same discipline as the CDF tables. The lossless path is the
+  `TX_4X4`/`DCT_DCT` case of the general decoder and stays bit-exact against
+  libavif on every fixture.
 - `otf-pixels-codec-avif` gains the full lossy inverse-transform machinery, the
   foundation of the lossy decode path. `inverse_transform_2d` runs the §7.13
   butterfly network — the inverse DCT (4..64), ADST (4/8/16) and identity
