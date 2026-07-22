@@ -18,6 +18,7 @@ mod frame;
 mod obu;
 mod seq;
 mod still;
+mod symbol;
 
 pub use bits::{floor_log2, BitReader};
 pub use frame::{
@@ -27,3 +28,4 @@ pub use frame::{
 pub use obu::{Obu, ObuHeader, ObuType};
 pub use seq::{ColorConfig, OperatingPoint, SequenceHeader};
 pub use still::{sequence_header_from_config, StillPicture};
+pub use symbol::SymbolDecoder;

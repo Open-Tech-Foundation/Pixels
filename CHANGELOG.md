@@ -53,6 +53,17 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Added
+- `otf-pixels-codec-avif` gains the AV1 multi-symbol arithmetic decoder — the
+  entropy engine every tile symbol passes through. It is a range decoder over
+  15-bit inverse CDFs with a per-symbol floor probability, plus the CDF
+  adaptation that lets the distributions track the stream. The transcription
+  follows the AV1 specification's symbol-decoding process verbatim and was
+  cross-checked against libaom's `entdec.c`; the two agree on the inverse-CDF
+  arithmetic and the renormalization. Reads are fallible and the `SymbolMaxBits`
+  accounting means the implicit zero-padding past the real bytes is entered
+  deliberately rather than by reading off the end. Numeric conformance against
+  real streams is deferred to the libaom differential harness, the only
+  trustworthy check for an entropy coder, which lands with reconstruction.
 - `otf-pixels-codec-avif` gains the AV1 front end: the bitstream layers that
   read a still picture's headers down to — and stopping at — the tile-group
   data. A most-significant-bit-first `BitReader` with the AV1 primitives
