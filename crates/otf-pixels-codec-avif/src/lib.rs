@@ -31,11 +31,17 @@
 //! the file, a `grid` whose tiles do not tile — are rejected rather than
 //! trusted.
 
+mod av1;
 mod boxes;
 mod decoder;
 mod meta;
 mod props;
 
+pub use av1::{
+    floor_log2, BitReader, Cdef, ColorConfig, FilmGrain, FrameHeader, LoopFilter, LoopRestoration,
+    sequence_header_from_config, Obu, ObuHeader, ObuType, OperatingPoint, Quantization,
+    Segmentation, SequenceHeader, StillPicture, TileInfo, TxMode,
+};
 pub use boxes::{BoxHeader, FourCc, Reader};
 pub use decoder::{probe, AvifCodec, AvifDecoder, AvifInfo};
 pub use meta::{Construction, Extent, Item, Meta, Reference, URN_ALPHA, URN_ALPHA_LEGACY};

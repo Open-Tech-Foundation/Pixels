@@ -53,6 +53,23 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Added
+- `otf-pixels-codec-avif` gains the AV1 front end: the bitstream layers that
+  read a still picture's headers down to — and stopping at — the tile-group
+  data. A most-significant-bit-first `BitReader` with the AV1 primitives
+  (`f`, `uvlc`, `leb128`, `le`, `su`, `ns`, byte alignment), the OBU framing
+  layer, the full sequence header (`color_config` and all), and the frame
+  (uncompressed) header restricted to the intra key-frame path — size,
+  quantizer, segmentation, loop-filter/CDEF/restoration parameters, transform
+  mode, tile layout and film-grain parameters, each sub-block walked in order
+  so `CodedLossless` is known before the filter parameters that depend on it.
+  A `StillPicture` driver ties configuration OBUs and the coded frame together
+  the way an AVIF still is laid out and returns both parsed headers plus a
+  locator for the tile data. Every primitive is fallible: a bitstream that ends
+  mid-value, an OBU size past the buffer, or a non-zero alignment pad is a
+  returned error, never a panic. The front end is exposed as public API and
+  fully tested against hand-assembled streams; it is wired into pixel
+  reconstruction in the phase that follows. Still no pixels: `read_row` still
+  reports `Unsupported`.
 - `otf-pixels-codec-avif`: the first slice of an AVIF codec owned from scratch,
   container and (eventually) AV1 bitstream both — ADR-0013, reversing ADR-0004's
   decision to wrap the dav1d/rav1e family, because the wrapped route pulled a
