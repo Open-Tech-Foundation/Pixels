@@ -17,6 +17,7 @@ pub mod cdf;
 
 mod bits;
 mod coeff;
+mod direction;
 mod frame;
 mod obu;
 mod plane;
@@ -24,6 +25,7 @@ mod predict;
 mod seq;
 mod still;
 mod symbol;
+mod tile;
 mod transform;
 
 pub use bits::{BitReader, floor_log2};
@@ -38,6 +40,7 @@ pub use predict::{IntraMode, Neighbours, predict_intra_4x4};
 pub use seq::{ColorConfig, OperatingPoint, SequenceHeader};
 pub use still::{StillPicture, sequence_header_from_config};
 pub use symbol::SymbolDecoder;
+pub use tile::{DecodedFrame, decode_still};
 pub use transform::{add_residual_4x4, inverse_wht_4x4};
 
 #[cfg(test)]

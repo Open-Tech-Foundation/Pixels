@@ -52,7 +52,27 @@ versioning: [SemVer](https://semver.org/).
   format *and pipeline order* allow", naming the reverse-order-over-sequential
   -source exception rather than leaving the guarantee quietly overstated.
 
+### Fixed
+- The AV1 CDF table generator dropped the multiplication in spec entries of the
+  form `{ 128 * 125, 32768, 0 }`, splitting `128 * 125` into two separate values
+  and lengthening every affected binary CDF by one bogus entry. The tokenizer
+  now evaluates the product. This corrupted `dc_sign` and a dozen other binary
+  CDFs, which silently desynchronised coefficient decoding — the kind of bug the
+  generated-and-diffed approach exists to make visible, once something actually
+  read the tables.
+
 ### Added
+- `otf-pixels-codec-avif` decodes its first real pixels: a lossless 4:4:4 AVIF
+  still now reconstructs bit-exact against libaom. The tile driver walks the
+  partition tree (including the T-shaped and 4-way splits), reads each block's
+  intra mode, and for every 4x4 transform block predicts, decodes coefficients,
+  inverts the Walsh–Hadamard transform, and writes the samples back — threading
+  the neighbour level, DC-sign, mode, and block-decoded context arrays that keep
+  the entropy contexts aligned with the encoder. All the intra modes a natural
+  image reaches are implemented: DC, Paeth, the smooth family, the slanted
+  directional modes with their edge-filter and upsample machinery, and recursive
+  filter-intra. Screen-content tools (palette, intra block copy) and
+  chroma-from-luma report `Unsupported` rather than desynchronise.
 - `otf-pixels-codec-avif` gains the 4x4 coefficient decoder — the syntax that
   turns a transform block's entropy-coded symbols into a signed level array.
   It reads `all_zero`, the end-of-block position, each coefficient's base level
