@@ -16,6 +16,7 @@
 pub mod cdf;
 
 mod bits;
+mod coeff;
 mod frame;
 mod obu;
 mod plane;
@@ -26,6 +27,7 @@ mod symbol;
 mod transform;
 
 pub use bits::{BitReader, floor_log2};
+pub use coeff::{CoeffBlock, CoeffCdfs, decode_coeffs_4x4};
 pub use frame::{
     Cdef, FilmGrain, FrameHeader, LoopFilter, LoopRestoration, Quantization, Segmentation,
     TileInfo, TxMode,

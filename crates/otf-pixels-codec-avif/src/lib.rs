@@ -39,10 +39,11 @@ mod props;
 
 pub use av1::cdf;
 pub use av1::{
-    BitReader, Cdef, ColorConfig, FilmGrain, FrameHeader, IntraMode, LoopFilter, LoopRestoration,
-    Neighbours, Obu, ObuHeader, ObuType, OperatingPoint, Plane, Quantization, Segmentation,
-    SequenceHeader, StillPicture, SymbolDecoder, TileInfo, TxMode, add_residual_4x4, floor_log2,
-    inverse_wht_4x4, predict_intra_4x4, sequence_header_from_config,
+    BitReader, Cdef, CoeffBlock, CoeffCdfs, ColorConfig, FilmGrain, FrameHeader, IntraMode,
+    LoopFilter, LoopRestoration, Neighbours, Obu, ObuHeader, ObuType, OperatingPoint, Plane,
+    Quantization, Segmentation, SequenceHeader, StillPicture, SymbolDecoder, TileInfo, TxMode,
+    add_residual_4x4, decode_coeffs_4x4, floor_log2, inverse_wht_4x4, predict_intra_4x4,
+    sequence_header_from_config,
 };
 pub use boxes::{BoxHeader, FourCc, Reader};
 pub use decoder::{AvifCodec, AvifDecoder, AvifInfo, probe};

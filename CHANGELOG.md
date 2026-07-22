@@ -53,6 +53,15 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Added
+- `otf-pixels-codec-avif` gains the 4x4 coefficient decoder — the syntax that
+  turns a transform block's entropy-coded symbols into a signed level array.
+  It reads `all_zero`, the end-of-block position, each coefficient's base level
+  walking the scan backwards, the `coeff_br` and Golomb magnitude extension for
+  large levels, and the signs walking forwards, each against its
+  context-selected CDF. The context derivations (`get_coeff_base_ctx`, the
+  `coeff_br` and end-of-block buckets) are transcribed from the spec and unit
+  tested against its worked contexts. Scoped to `TX_4X4`, which is every block
+  the lossless path codes; the wider transform sizes arrive with the lossy path.
 - `otf-pixels-codec-avif` gains 4x4 intra prediction for the non-directional
   modes. DC, Paeth, and the three Smooth variants are complete, as are the two
   axis-aligned directional modes (V and H, which at exactly 90 and 180 degrees
