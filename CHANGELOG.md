@@ -53,6 +53,21 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Added
+- `otf-pixels-codec-avif`: the first slice of an AVIF codec owned from scratch,
+  container and (eventually) AV1 bitstream both — ADR-0013, reversing ADR-0004's
+  decision to wrap the dav1d/rav1e family, because the wrapped route pulled a
+  non-Rust build dependency the rest of the workspace does not have. This
+  release lands the ISOBMFF/HEIF container: the box reader (64-bit sizes and
+  parent-bound checks that reject the classic infinite-loop and
+  run-past-the-end malformations), the item model (`meta`/`pitm`/`iinf`/`iloc`/
+  `iref`/`idat`), and item properties (`iprp`/`ipco`/`ipma` with
+  `ispe`/`av1C`/`pixi`/`colr`/`irot`/`imir`/`auxC`). `AvifDecoder` reports
+  correct `metadata()` — dimensions, pixel format, alpha, grid — for any AVIF,
+  and `AvifCodec`/`probe` sniff the file by its `ftyp` brand. Wired into the
+  facade behind an `avif` feature, on by default. Pixel decode currently reports
+  `Unsupported`: the AV1 bitstream reconstruction lands in the phases that
+  follow. Still images only; image sequences (the `avis` brand) are out of scope
+  for v1.
 - `otf-pixels-codec-webp`: WebP decode (lossy and lossless, alpha detected
   from the container) and lossless encode, wrapping `image-webp` per ADR-0004.
   Wired into the facade behind a `webp` feature, on by default. Pure Rust; its

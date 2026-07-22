@@ -12,6 +12,7 @@ libfuzzer-sys = "0.4"
 otf-pixels-core = { path = "../crates/otf-pixels-core" }
 otf-pixels-codec-png = { path = "../crates/otf-pixels-codec-png" }
 otf-pixels-codec-jpeg = { path = "../crates/otf-pixels-codec-jpeg" }
+otf-pixels-codec-avif = { path = "../crates/otf-pixels-codec-avif" }
 
 [[bin]]
 name = "png_decode"
@@ -44,6 +45,13 @@ bench = false
 [[bin]]
 name = "png_roundtrip"
 path = "fuzz_targets/png_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "avif_decode"
+path = "fuzz_targets/avif_decode.rs"
 test = false
 doc = false
 bench = false

@@ -131,6 +131,7 @@ version = "0.0.1"
 dependencies = [
  "fast_image_resize",
  "image",
+ "otf-pixels-codec-avif",
  "otf-pixels-codec-gif",
  "otf-pixels-codec-jpeg",
  "otf-pixels-codec-png",
@@ -139,6 +140,13 @@ dependencies = [
  "otf-pixels-codec-webp",
  "otf-pixels-core",
  "otf-pixels-ops",
+]
+
+[[package]]
+name = "otf-pixels-codec-avif"
+version = "0.0.1"
+dependencies = [
+ "otf-pixels-core",
 ]
 
 [[package]]

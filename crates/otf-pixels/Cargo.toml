@@ -20,9 +20,10 @@ otf-pixels-codec-gif = { workspace = true, optional = true }
 otf-pixels-codec-jpeg = { workspace = true, optional = true }
 otf-pixels-codec-tiff = { workspace = true, optional = true }
 otf-pixels-codec-webp = { workspace = true, optional = true }
+otf-pixels-codec-avif = { workspace = true, optional = true }
 
 [features]
-default = ["raw", "png", "gif", "jpeg", "jpeg-progressive", "tiff", "webp"]
+default = ["raw", "png", "gif", "jpeg", "jpeg-progressive", "tiff", "webp", "avif"]
 # Raw pixel codec. Kept behind a feature for symmetry with the other codecs
 # (ARCHITECTURE §Layer 2: "each format is a plugin behind a cargo feature").
 raw = ["dep:otf-pixels-codec-raw"]
@@ -43,6 +44,9 @@ tiff = ["dep:otf-pixels-codec-tiff"]
 # WebP, wrapped rather than owned (ADR-0004). Decode is lossy and lossless;
 # encode is lossless only, so `quality` is ignored for it.
 webp = ["dep:otf-pixels-codec-webp"]
+# AVIF, owned outright — container and AV1 bitstream both (ADR-0013, reversing
+# ADR-0004). Still images only; image sequences (`avis`) report `Unsupported`.
+avif = ["dep:otf-pixels-codec-avif"]
 
 [dev-dependencies]
 # Benchmark comparisons only (ROADMAP M4 exit criterion). These never enter the

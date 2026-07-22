@@ -55,8 +55,17 @@ Estimates deliberately omitted — scope, not dates, is the commitment.
 ### M6 — JPEG baseline (from scratch) + wrapped codecs
 - Baseline JPEG decode/encode: Huffman, DCT, chroma subsampling; EXIF
   orientation; M/8 scaled decode fast path.
-- Progressive JPEG, WebP, AVIF wrapped behind the codec traits.
+- Progressive JPEG wrapped behind the codec traits.
 - **Exit**: full format table in SPEC.md is green; safety guards complete.
+
+### M6.5 — AVIF from scratch (ADR-0013)
+- Its own milestone because it is the largest single codec in the workspace by a
+  wide margin: the ISOBMFF/HEIF container plus the AV1 still-picture (key-frame)
+  bitstream, both owned. Reverses ADR-0004's "wrap AVIF" clause.
+- Decode first (container → AV1 front end → intra reconstruction → post-filters →
+  exotic tools → grid region decode), then a conformant encoder.
+- **Exit**: pixel-exact against libaom on the Argon conformance streams; grid
+  AVIFs decode region-by-region; libavif/dav1d read our encoder output.
 
 ### M7 — Release hardening
 - Embedding guide for host bindings; API docs; benchmark suite vs
@@ -80,4 +89,6 @@ Ordered by expected value, each gated on its own ADR before work starts:
 - Computer vision (feature detection, tracking, DNN inference) — OpenCV's
   territory, permanently out of scope.
 - Display/rendering — this is a processing engine, not a raster canvas.
-- AV1 codec implementation from scratch — wrapped forever (ADR-0004).
+- AV1 *inter* coding (motion, reference frames, compound prediction) — only the
+  still-picture key-frame subset is owned (ADR-0013); full video AV1 stays out
+  of scope.

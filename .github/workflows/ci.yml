@@ -66,6 +66,7 @@ jobs:
       - run: cargo check --workspace --no-default-features --features jpeg-progressive
       - run: cargo check --workspace --no-default-features --features tiff
       - run: cargo check --workspace --no-default-features --features webp
+      - run: cargo check --workspace --no-default-features --features avif
       - run: cargo check --workspace --all-features
 
   msrv:
@@ -155,4 +156,6 @@ jobs:
       - run: cargo fuzz run jpeg_decode -- -max_total_time=120
         working-directory: fuzz
       - run: cargo fuzz run jpeg_roundtrip -- -max_total_time=120
+        working-directory: fuzz
+      - run: cargo fuzz run avif_decode -- -max_total_time=120
         working-directory: fuzz

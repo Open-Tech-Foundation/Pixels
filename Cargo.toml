@@ -4,6 +4,7 @@ members = [
     "crates/otf-pixels",
     "crates/otf-pixels-core",
     "crates/otf-pixels-ops",
+    "crates/otf-pixels-codec-avif",
     "crates/otf-pixels-codec-gif",
     "crates/otf-pixels-codec-jpeg",
     "crates/otf-pixels-codec-webp",
@@ -29,6 +30,7 @@ keywords = ["image", "streaming", "pipeline", "resize", "codec"]
 crossbeam-deque = "0.8.7"
 otf-pixels-core = { version = "0.0.1", path = "crates/otf-pixels-core" }
 otf-pixels-ops = { version = "0.0.1", path = "crates/otf-pixels-ops" }
+otf-pixels-codec-avif = { version = "0.0.1", path = "crates/otf-pixels-codec-avif" }
 otf-pixels-codec-gif = { version = "0.0.1", path = "crates/otf-pixels-codec-gif" }
 # Default features off here so the facade can decide whether to pull in the
 # wrapped progressive decoder; members cannot override a workspace default.

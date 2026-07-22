@@ -14,7 +14,7 @@ implementation detail and may change without notice.
 | JPEG (baseline) | ✅ | ✅ | own | yes |
 | JPEG (progressive) | ✅ | ❌ (v2) | wrapped | internal buffer |
 | WebP | ✅ | ✅ lossless only | wrapped | internal buffer |
-| AVIF | ✅ | ✅ | wrapped (dav1d/rav1e family) | internal buffer |
+| AVIF | ✅ | ✅ | own | internal buffer |
 
 - Format detection is by magic bytes only; extensions and MIME are ignored.
 - Raw pixel contract: caller supplies width, height, pixel format, stride.
@@ -26,6 +26,12 @@ implementation detail and may change without notice.
   only**, because the wrapped encoder exposes no quality control, so
   `EncodeOptions::quality` is ignored for WebP. Greyscale has no native WebP
   mode and returns as RGB. Animation decodes to the first frame.
+- AVIF v1 scope: owned outright, container and AV1 bitstream both (ADR-0013).
+  Still images only — an AVIF still is an AV1 **key frame**, so inter-coded
+  content is out of scope. Image *sequences* (the `avis` brand) are animation
+  and report `Unsupported` in v1. 8/10/12-bit and 4:2:0/4:2:2/4:4:4/monochrome
+  decode into `Rgb8`/`Rgb16` (plus alpha via an auxiliary item); grid-derived
+  images give region random access, the payoff owning the container buys.
 
 ## Pixel formats
 

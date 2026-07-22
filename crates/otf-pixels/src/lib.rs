@@ -90,6 +90,9 @@ pub use otf_pixels_codec_tiff::{TiffCodec, TiffDecoder, TiffEncoder, TiffLayout}
 #[cfg(feature = "webp")]
 pub use otf_pixels_codec_webp::{WebPCodec, WebPDecoder, WebPEncoder};
 
+#[cfg(feature = "avif")]
+pub use otf_pixels_codec_avif::{AvifCodec, AvifDecoder};
+
 /// A lazily evaluated image pipeline.
 ///
 /// Cheap to clone: clones share graph nodes rather than pixels. Chaining
@@ -232,6 +235,11 @@ impl Image {
             Format::WebP => {
                 let decoder = WebPDecoder::new(stream, Limits::default())?;
                 Ok(Self::from_decoder(Box::new(decoder), Format::WebP))
+            }
+            #[cfg(feature = "avif")]
+            Format::Avif => {
+                let decoder = AvifDecoder::new(stream, Limits::default())?;
+                Ok(Self::from_decoder(Box::new(decoder), Format::Avif))
             }
             other => Err(PixelsError::unsupported(format!(
                 "{other} was detected but no decoder for it is compiled in"
@@ -720,6 +728,8 @@ fn sniffing_codecs() -> Vec<Box<dyn Codec>> {
         Box::new(TiffCodec),
         #[cfg(feature = "webp")]
         Box::new(WebPCodec),
+        #[cfg(feature = "avif")]
+        Box::new(AvifCodec),
     ];
     codecs
 }

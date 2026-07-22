@@ -15,7 +15,7 @@ than silent divergence — this replaces the previous DECISIONS.md practice.
 | [0001](0001-libvips-style-demand-driven-engine.md) | libvips-style demand-driven engine | Accepted |
 | [0002](0002-hybrid-pixel-typing.md) | Hybrid pixel typing | Accepted |
 | [0003](0003-negotiated-tile-shapes.md) | Negotiated tile shapes | Accepted |
-| [0004](0004-codec-ownership-split.md) | Codec ownership split | Accepted |
+| [0004](0004-codec-ownership-split.md) | Codec ownership split | Accepted · superseded in part by [ADR-0013](0013-own-avif.md) |
 | [0005](0005-streaming-io-sync-core.md) | Streaming-only I/O, sync core | Accepted |
 | [0006](0006-naming-and-crate-layout.md) | Naming and crate layout | Accepted |
 | [0007](0007-gpu-deferred-to-v2.md) | GPU compute deferred to v2, opt-in | Accepted |
@@ -24,6 +24,7 @@ than silent divergence — this replaces the previous DECISIONS.md practice.
 | [0010](0010-own-inflate-and-deflate.md) | Own inflate and deflate | Accepted |
 | [0011](0011-autovectorization-and-fixed-point.md) | SIMD by autovectorization; fixed-point arithmetic at 8 bits | Accepted |
 | [0012](0012-extract-compression-crate.md) | Extract `otf-pixels-compress` | Accepted |
+| [0013](0013-own-avif.md) | Own AVIF, container and AV1 bitstream both | Accepted |
 
 Deferred (no ADR yet, decide when reached): tile cache eviction policy
 details, fusion pass design, ICC pipeline, error taxonomy granularity.
