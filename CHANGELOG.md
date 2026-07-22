@@ -53,6 +53,17 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Added
+- `otf-pixels-codec-avif` gains its reference-fixture harness ahead of pixel
+  reconstruction, because our own decoder cannot validate itself: a shared
+  misreading of the spec round-trips perfectly and is still wrong.
+  `scripts/regenerate-avif-reference.py` encodes fixtures with libavif's
+  `avifenc` and takes the expected rasters from libavif's `avifdec` — an
+  independent AV1 implementation. The first fixtures are lossless, the strictest
+  target there is: lossless AVIF is `CodedLossless`, so every post-filter is off
+  and only the 4x4 Walsh-Hadamard transform is used, and the raster must equal
+  the source exactly. CI installs libavif, re-runs the generator and diffs the
+  manifest, and the lossy fixtures with their tolerances join as the DCT/ADST
+  paths and post-filters land.
 - `otf-pixels-codec-avif` gains the AV1 default CDF tables, generated rather than
   hand-transcribed. `scripts/generate-av1-cdf-tables.py` emits `av1/cdf.rs` from
   a vendored extract of the specification's section-10 default-CDF blocks
