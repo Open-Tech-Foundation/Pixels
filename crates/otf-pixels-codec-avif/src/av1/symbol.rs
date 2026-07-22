@@ -141,6 +141,23 @@ impl<'a> SymbolDecoder<'a> {
         Ok(x)
     }
 
+    /// Decode a non-symmetric `NS(n)` value in `0..n` (`read_ns`, §8.2.4). Used
+    /// for the palette colour-index map's first sample, which is uniform over
+    /// the palette size.
+    pub fn read_ns(&mut self, n: u32) -> Result<u32> {
+        if n <= 1 {
+            return Ok(0);
+        }
+        let w = floor_log2(n) + 1;
+        let m = (1 << w) - n;
+        let v = self.read_literal(w - 1)?;
+        if v < m {
+            return Ok(v);
+        }
+        let extra = self.read_literal(1)?;
+        Ok((v << 1) - m + extra)
+    }
+
     /// The number of real bits still available (may be negative once the
     /// decoder is in the padding region). Exposed for the tile-exit checks.
     #[must_use]

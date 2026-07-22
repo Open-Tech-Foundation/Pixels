@@ -20,6 +20,7 @@ mod coeff;
 mod direction;
 mod frame;
 mod obu;
+mod palette;
 mod plane;
 mod predict;
 mod seq;

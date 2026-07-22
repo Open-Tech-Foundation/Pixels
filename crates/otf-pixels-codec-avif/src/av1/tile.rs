@@ -7,13 +7,12 @@
 //! threads between blocks are what make the entropy contexts match the encoder.
 //!
 //! Scope is the lossless still-image subset: a single tile, `CodedLossless`
-//! (every transform is 4x4 WHT, no post-filters), and YUV 4:4:4. All the intra
-//! modes a natural image uses are handled — DC, Paeth, the smooth family, the
-//! slanted directional modes (with their edge-filter and upsample machinery),
-//! and recursive filter-intra. The screen-content tools (palette, intra block
-//! copy) and chroma-from-luma are detected and reported as
-//! [`PixelsError::unsupported`] rather than decoded wrong, so a stream that uses
-//! them fails cleanly instead of desynchronising.
+//! (every transform is 4x4 WHT, no post-filters), and YUV 4:4:4. Every intra
+//! prediction mode is handled — DC, Paeth, the smooth family, the slanted
+//! directional modes (with their edge-filter and upsample machinery), recursive
+//! filter-intra, palette, and chroma-from-luma. Intra block copy is detected and
+//! reported as [`PixelsError::unsupported`] rather than decoded wrong, so a
+//! stream that uses it fails cleanly instead of desynchronising.
 
 use super::cdf;
 use super::coeff::{CoeffCdfs, decode_coeffs_4x4};
@@ -21,6 +20,7 @@ use super::direction::{
     ANGLE_STEP, Edge, mode_base_angle, predict_directional_4x4, predict_filter_intra_4x4,
 };
 use super::frame::FrameHeader;
+use super::palette::{PALETTE_COLORS, color_context, palette_cache};
 use super::plane::Plane;
 use super::predict::{IntraMode, Neighbours, predict_intra_4x4};
 use super::seq::SequenceHeader;
@@ -86,11 +86,11 @@ pub fn decode_still(
             "avif: multi-tile decode is not implemented yet",
         ));
     }
-    if frame.allow_screen_content_tools {
-        // Palette and intra block copy would be coded, and neither is
-        // implemented; decoding anyway would desynchronise the symbol stream.
+    if frame.allow_intrabc {
+        // Intra block copy is not implemented; decoding its blocks would
+        // desynchronise the symbol stream.
         return Err(PixelsError::unsupported(
-            "avif: screen-content tools (palette, intra block copy) are not implemented yet",
+            "avif: intra block copy is not implemented yet",
         ));
     }
 
@@ -116,7 +116,41 @@ struct FrameCdfs {
     angle_delta: [[u16; 8]; 8],
     filter_intra: [[u16; 3]; 22],
     filter_intra_mode: [u16; 6],
+    palette_y_mode: [[[u16; 3]; 3]; 7],
+    palette_uv_mode: [[u16; 3]; 2],
+    palette_y_size: [[u16; 8]; 7],
+    palette_uv_size: [[u16; 8]; 7],
+    palette_y_color: PaletteColorCdfs,
+    palette_uv_color: PaletteColorCdfs,
+    cfl_sign: [u16; 9],
+    cfl_alpha: [[u16; 17]; 6],
     coeff: CoeffCdfs,
+}
+
+/// The seven palette colour-index CDFs, one per palette size 2..=8.
+struct PaletteColorCdfs {
+    size2: [[u16; 3]; 5],
+    size3: [[u16; 4]; 5],
+    size4: [[u16; 5]; 5],
+    size5: [[u16; 6]; 5],
+    size6: [[u16; 7]; 5],
+    size7: [[u16; 8]; 5],
+    size8: [[u16; 9]; 5],
+}
+
+impl PaletteColorCdfs {
+    /// The colour-index CDF row for `palette_size` (2..=8) and context `ctx`.
+    fn row(&mut self, palette_size: usize, ctx: usize) -> Result<&mut [u16]> {
+        Ok(match palette_size {
+            2 => get_mut(&mut self.size2, ctx)?,
+            3 => get_mut(&mut self.size3, ctx)?,
+            4 => get_mut(&mut self.size4, ctx)?,
+            5 => get_mut(&mut self.size5, ctx)?,
+            6 => get_mut(&mut self.size6, ctx)?,
+            7 => get_mut(&mut self.size7, ctx)?,
+            _ => get_mut(&mut self.size8, ctx)?,
+        })
+    }
 }
 
 impl FrameCdfs {
@@ -134,6 +168,30 @@ impl FrameCdfs {
             angle_delta: cdf::DEFAULT_ANGLE_DELTA_CDF,
             filter_intra: cdf::DEFAULT_FILTER_INTRA_CDF,
             filter_intra_mode: cdf::DEFAULT_FILTER_INTRA_MODE_CDF,
+            palette_y_mode: cdf::DEFAULT_PALETTE_Y_MODE_CDF,
+            palette_uv_mode: cdf::DEFAULT_PALETTE_UV_MODE_CDF,
+            palette_y_size: cdf::DEFAULT_PALETTE_Y_SIZE_CDF,
+            palette_uv_size: cdf::DEFAULT_PALETTE_UV_SIZE_CDF,
+            palette_y_color: PaletteColorCdfs {
+                size2: cdf::DEFAULT_PALETTE_SIZE_2_Y_COLOR_CDF,
+                size3: cdf::DEFAULT_PALETTE_SIZE_3_Y_COLOR_CDF,
+                size4: cdf::DEFAULT_PALETTE_SIZE_4_Y_COLOR_CDF,
+                size5: cdf::DEFAULT_PALETTE_SIZE_5_Y_COLOR_CDF,
+                size6: cdf::DEFAULT_PALETTE_SIZE_6_Y_COLOR_CDF,
+                size7: cdf::DEFAULT_PALETTE_SIZE_7_Y_COLOR_CDF,
+                size8: cdf::DEFAULT_PALETTE_SIZE_8_Y_COLOR_CDF,
+            },
+            palette_uv_color: PaletteColorCdfs {
+                size2: cdf::DEFAULT_PALETTE_SIZE_2_UV_COLOR_CDF,
+                size3: cdf::DEFAULT_PALETTE_SIZE_3_UV_COLOR_CDF,
+                size4: cdf::DEFAULT_PALETTE_SIZE_4_UV_COLOR_CDF,
+                size5: cdf::DEFAULT_PALETTE_SIZE_5_UV_COLOR_CDF,
+                size6: cdf::DEFAULT_PALETTE_SIZE_6_UV_COLOR_CDF,
+                size7: cdf::DEFAULT_PALETTE_SIZE_7_UV_COLOR_CDF,
+                size8: cdf::DEFAULT_PALETTE_SIZE_8_UV_COLOR_CDF,
+            },
+            cfl_sign: cdf::DEFAULT_CFL_SIGN_CDF,
+            cfl_alpha: cdf::DEFAULT_CFL_ALPHA_CDF,
             coeff: CoeffCdfs::new(qctx),
         }
     }
@@ -158,6 +216,7 @@ struct TileState {
     mi_rows: usize,
     enable_filter_intra: bool,
     enable_edge_filter: bool,
+    allow_screen_content: bool,
     sb_size4: usize,
     /// `BlockDecoded[plane]`, one flat `(sb+2) x (sb+2)` grid per plane, reset
     /// per superblock; addressed with a one-unit border so index -1 is valid.
@@ -166,6 +225,11 @@ struct TileState {
     y_modes: Vec<u8>,
     /// `UVModes[r][c]` flattened, for the intra filter-type decision.
     uv_modes: Vec<u8>,
+    /// `PaletteSizes[plane][r][c]` flattened, for the neighbour palette cache
+    /// and `has_palette` contexts.
+    palette_sizes: [Vec<u8>; 2],
+    /// `PaletteColors[plane][r][c][0..8]` flattened (8 colours per unit).
+    palette_colors: [Vec<[u16; PALETTE_COLORS]>; 2],
     /// `Skips[r][c]` flattened.
     skips: Vec<u8>,
     /// `Mi_Width_Log2` of the block owning each 4x4 unit (for partition ctx).
@@ -207,10 +271,16 @@ impl TileState {
             mi_rows,
             enable_filter_intra: seq.enable_filter_intra,
             enable_edge_filter: seq.enable_intra_edge_filter,
+            allow_screen_content: frame.allow_screen_content_tools,
             sb_size4,
             block_decoded,
             y_modes: vec![0; mi_cols * mi_rows],
             uv_modes: vec![0; mi_cols * mi_rows],
+            palette_sizes: [vec![0; mi_cols * mi_rows], vec![0; mi_cols * mi_rows]],
+            palette_colors: [
+                vec![[0; PALETTE_COLORS]; mi_cols * mi_rows],
+                vec![[0; PALETTE_COLORS]; mi_cols * mi_rows],
+            ],
             skips: vec![0; mi_cols * mi_rows],
             mi_wide_log2: vec![0; mi_cols * mi_rows],
             mi_high_log2: vec![0; mi_cols * mi_rows],
@@ -519,18 +589,51 @@ impl TileState {
         let y_mode = self.read_intra_frame_y_mode(dec, r, c, avail_u, avail_l)?;
         let y_delta = self.read_angle_delta(dec, y_mode, bw4, bh4)?;
 
-        let (uv_mode, uv_delta) = if has_chroma {
-            let uv = self.read_uv_mode(dec, y_mode, bw4, bh4)?;
+        let (uv_mode, uv_delta, cfl) = if has_chroma {
+            let (uv, cfl) = self.read_uv_mode(dec, y_mode, bw4, bh4)?;
             let d = self.read_angle_delta(dec, uv, bw4, bh4)?;
-            (uv, d)
+            (uv, d, cfl)
         } else {
-            (DC_PRED, 0)
+            (DC_PRED, 0, None)
         };
 
-        let filter_intra = self.read_filter_intra(dec, y_mode, bw4, bh4)?;
+        // palette_mode_info (§5.11.46): only for DC blocks of 8x8..64x64 when
+        // screen-content tools are enabled.
+        let mut palette = Palette {
+            block_w: bw4 * MI_SIZE,
+            block_h: bh4 * MI_SIZE,
+            ..Palette::default()
+        };
+        let palette_ok =
+            self.allow_screen_content && bw4 >= 2 && bh4 >= 2 && bw4 <= 16 && bh4 <= 16;
+        if palette_ok {
+            self.read_palette_mode_info(
+                dec,
+                r,
+                c,
+                bw4,
+                bh4,
+                y_mode,
+                uv_mode,
+                has_chroma,
+                &mut palette,
+            )?;
+        }
 
-        // Record the block's mode and geometry across its 4x4 units.
-        self.record_block(r, c, bw4, bh4, y_mode, uv_mode, skip);
+        // filter-intra is not coded for a palette-Y block.
+        let filter_intra = if palette.size_y > 0 {
+            None
+        } else {
+            self.read_filter_intra(dec, y_mode, bw4, bh4)?
+        };
+
+        // Record the block's mode, geometry, and palette across its 4x4 units.
+        self.record_block(r, c, bw4, bh4, y_mode, uv_mode, skip, &palette);
+
+        // palette_tokens (§5.11.49): the colour-index maps.
+        if palette.size_y > 0 || palette.size_uv > 0 {
+            self.read_palette_tokens(dec, &mut palette)?;
+        }
 
         if skip {
             self.reset_block_context(r, c, bw4, bh4);
@@ -547,6 +650,8 @@ impl TileState {
             y_delta,
             uv_delta,
             filter_intra,
+            cfl,
+            palette,
         };
         self.residual(dec, &modes, bw4, bh4, skip, has_chroma)?;
         Ok(())
@@ -595,13 +700,15 @@ impl TileState {
         dec.read_symbol(cdf_row)
     }
 
+    /// Read `uv_mode` and, for a chroma-from-luma block, its alphas. Returns the
+    /// UV mode and `Some((alphaU, alphaV))` when the block is CfL.
     fn read_uv_mode(
         &mut self,
         dec: &mut SymbolDecoder<'_>,
         y_mode: usize,
         bw4: usize,
         bh4: usize,
-    ) -> Result<usize> {
+    ) -> Result<(usize, Option<(i32, i32)>)> {
         // Lossless with a 4x4 chroma residual allows chroma-from-luma; here the
         // residual size equals the block size, so CFL is allowed only for 4x4.
         let cfl_allowed = bw4 == 1 && bh4 == 1;
@@ -612,12 +719,257 @@ impl TileState {
             let cdf_row = get_mut(&mut self.cdfs.uv_cfl_not_allowed, y_mode)?;
             dec.read_symbol(cdf_row)?
         };
-        if uv == UV_CFL_PRED {
-            return Err(PixelsError::unsupported(
-                "avif: chroma-from-luma prediction is not implemented yet",
-            ));
+        let cfl = if uv == UV_CFL_PRED {
+            Some(self.read_cfl_alphas(dec)?)
+        } else {
+            None
+        };
+        Ok((uv, cfl))
+    }
+
+    /// `read_cfl_alphas` (§5.11.45): the signed U and V scaling factors.
+    fn read_cfl_alphas(&mut self, dec: &mut SymbolDecoder<'_>) -> Result<(i32, i32)> {
+        let signs = dec.read_symbol(&mut self.cdfs.cfl_sign)? as i32;
+        let sign_u = (signs + 1) / 3;
+        let sign_v = (signs + 1) % 3;
+        // CFL_SIGN_ZERO = 0, CFL_SIGN_NEG = 1, CFL_SIGN_POS = 2.
+        let alpha_u = if sign_u != 0 {
+            let ctx = ((sign_u - 1) * 3 + sign_v) as usize;
+            let mag = dec.read_symbol(get_mut(&mut self.cdfs.cfl_alpha, ctx)?)? as i32 + 1;
+            if sign_u == 1 { -mag } else { mag }
+        } else {
+            0
+        };
+        let alpha_v = if sign_v != 0 {
+            let ctx = ((sign_v - 1) * 3 + sign_u) as usize;
+            let mag = dec.read_symbol(get_mut(&mut self.cdfs.cfl_alpha, ctx)?)? as i32 + 1;
+            if sign_v == 1 { -mag } else { mag }
+        } else {
+            0
+        };
+        Ok((alpha_u, alpha_v))
+    }
+
+    /// `palette_mode_info` (§5.11.46): read the luma and chroma palettes into
+    /// `palette` (their colours and sizes).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "mirrors palette_mode_info inputs"
+    )]
+    fn read_palette_mode_info(
+        &mut self,
+        dec: &mut SymbolDecoder<'_>,
+        r: usize,
+        c: usize,
+        bw4: usize,
+        bh4: usize,
+        y_mode: usize,
+        uv_mode: usize,
+        has_chroma: bool,
+        palette: &mut Palette,
+    ) -> Result<()> {
+        // bsizeCtx = Mi_Width_Log2 + Mi_Height_Log2 - 2 (spec §5.11.46); palette
+        // is only reached for 8x8 and larger, so the subtraction never underflows.
+        let bsize_ctx = (floor_log2_usize(bw4) + floor_log2_usize(bh4)).saturating_sub(2) as usize;
+        let avail_u = r > 0;
+        let avail_l = c > 0;
+        if y_mode == DC_PRED {
+            let ctx = usize::from(avail_u && self.palette_size_at(0, r.wrapping_sub(1), c) > 0)
+                + usize::from(avail_l && self.palette_size_at(0, r, c.wrapping_sub(1)) > 0);
+            let cdf_row = get_mut(get_mut(&mut self.cdfs.palette_y_mode, bsize_ctx)?, ctx)?;
+            if dec.read_symbol(cdf_row)? != 0 {
+                let size_cdf = get_mut(&mut self.cdfs.palette_y_size, bsize_ctx)?;
+                let size = dec.read_symbol(size_cdf)? + 2;
+                let cache = self.palette_cache_for(0, r, c);
+                palette.size_y = size;
+                palette.colors_y = self.read_palette_colors(dec, size, &cache, true)?;
+            }
         }
-        Ok(uv)
+        if has_chroma && uv_mode == DC_PRED {
+            let ctx = usize::from(palette.size_y > 0);
+            let cdf_row = get_mut(&mut self.cdfs.palette_uv_mode, ctx)?;
+            if dec.read_symbol(cdf_row)? != 0 {
+                let size_cdf = get_mut(&mut self.cdfs.palette_uv_size, bsize_ctx)?;
+                let size = dec.read_symbol(size_cdf)? + 2;
+                let cache = self.palette_cache_for(1, r, c);
+                palette.size_uv = size;
+                palette.colors_u = self.read_palette_colors(dec, size, &cache, false)?;
+                palette.colors_v = self.read_palette_colors_v(dec, size)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The neighbour palette cache for `plane` at `(r, c)` (`get_palette_cache`).
+    fn palette_cache_for(&self, plane: usize, r: usize, c: usize) -> Vec<u16> {
+        let above = if r > 0 && (r * MI_SIZE) % 64 != 0 {
+            let n = self.palette_size_at(plane, r - 1, c) as usize;
+            self.palette_colors_at(plane, r - 1, c, n)
+        } else {
+            Vec::new()
+        };
+        let left = if c > 0 {
+            let n = self.palette_size_at(plane, r, c - 1) as usize;
+            self.palette_colors_at(plane, r, c - 1, n)
+        } else {
+            Vec::new()
+        };
+        palette_cache(&above, &left)
+    }
+
+    /// Read a palette's colours (`palette_colors_y`/`_u`): cache hits first, then
+    /// a base colour, then Clip1-accumulated deltas, sorted ascending.
+    fn read_palette_colors(
+        &self,
+        dec: &mut SymbolDecoder<'_>,
+        size: usize,
+        cache: &[u16],
+        is_luma: bool,
+    ) -> Result<[u16; PALETTE_COLORS]> {
+        let bd = u32::from(self.bit_depth);
+        let max = (1_i32 << bd) - 1;
+        let clip1 = |v: i32| v.clamp(0, max) as u16;
+        let mut colors = [0_u16; PALETTE_COLORS];
+        let mut idx = 0;
+        for &cached in cache.iter() {
+            if idx >= size {
+                break;
+            }
+            if dec.read_literal(1)? != 0 {
+                set_at(&mut colors, idx, cached);
+                idx += 1;
+            }
+        }
+        if idx < size {
+            set_at(&mut colors, idx, dec.read_literal(bd)? as u16);
+            idx += 1;
+        }
+        if idx < size {
+            let min_bits = bd.saturating_sub(3);
+            let mut palette_bits = min_bits + dec.read_literal(2)?;
+            while idx < size {
+                // The luma delta is coded one less than its value; the chroma
+                // delta is coded directly (spec §5.11.47). The range that bounds
+                // the next `paletteBits` likewise drops one only for luma.
+                let delta = dec.read_literal(palette_bits)? + u32::from(is_luma);
+                let prev = i32::from(at(&colors, idx - 1));
+                let color = clip1(prev + delta as i32);
+                set_at(&mut colors, idx, color);
+                let range = (1_i32 << bd) - i32::from(color) - i32::from(is_luma);
+                palette_bits = palette_bits.min(ceil_log2(range.max(0) as u32));
+                idx += 1;
+            }
+        }
+        let slice = colors.get_mut(..size).unwrap_or(&mut []);
+        slice.sort_unstable();
+        Ok(colors)
+    }
+
+    /// Read the V-plane palette colours (`palette_colors_v`), which are coded
+    /// either as wrapping deltas or as raw literals.
+    fn read_palette_colors_v(
+        &self,
+        dec: &mut SymbolDecoder<'_>,
+        size: usize,
+    ) -> Result<[u16; PALETTE_COLORS]> {
+        let bd = u32::from(self.bit_depth);
+        let max = (1_i32 << bd) - 1;
+        let max_val = 1_i32 << bd;
+        let mut colors = [0_u16; PALETTE_COLORS];
+        if dec.read_literal(1)? != 0 {
+            let mut palette_bits = bd.saturating_sub(4) + dec.read_literal(2)?;
+            set_at(&mut colors, 0, dec.read_literal(bd)? as u16);
+            for idx in 1..size {
+                let mut delta = dec.read_literal(palette_bits)? as i32;
+                if delta != 0 && dec.read_literal(1)? != 0 {
+                    delta = -delta;
+                }
+                let mut val = i32::from(at(&colors, idx - 1)) + delta;
+                if val < 0 {
+                    val += max_val;
+                }
+                if val >= max_val {
+                    val -= max_val;
+                }
+                set_at(&mut colors, idx, val.clamp(0, max) as u16);
+                let _ = &mut palette_bits;
+            }
+        } else {
+            for idx in 0..size {
+                set_at(&mut colors, idx, dec.read_literal(bd)? as u16);
+            }
+        }
+        Ok(colors)
+    }
+
+    /// `palette_tokens` (§5.11.49): decode the colour-index maps by the
+    /// wavefront traversal.
+    fn read_palette_tokens(
+        &mut self,
+        dec: &mut SymbolDecoder<'_>,
+        palette: &mut Palette,
+    ) -> Result<()> {
+        let (bw, bh) = (palette.block_w, palette.block_h);
+        if palette.size_y > 0 {
+            palette.map_y = self.read_color_map(dec, palette.size_y, bw, bh, false)?;
+        }
+        if palette.size_uv > 0 {
+            // 4:4:4: the chroma map is the same shape as luma.
+            palette.map_uv = self.read_color_map(dec, palette.size_uv, bw, bh, true)?;
+        }
+        Ok(())
+    }
+
+    /// Decode one colour-index map (`ColorMapY`/`ColorMapUV`).
+    fn read_color_map(
+        &mut self,
+        dec: &mut SymbolDecoder<'_>,
+        size: usize,
+        bw: usize,
+        bh: usize,
+        chroma: bool,
+    ) -> Result<Vec<u8>> {
+        // Whole block is on screen here (partial edges clamped by the caller's
+        // block dimensions), so onscreen == block dimensions.
+        let mut map = vec![0_u8; bw * bh];
+        let first = dec.read_ns(size as u32)? as u8;
+        if let Some(m) = map.first_mut() {
+            *m = first;
+        }
+        let get = |map: &[u8], i: usize, j: usize| -> Option<u8> { map.get(i * bw + j).copied() };
+        for i in 1..(bh + bw - 1) {
+            let j_hi = i.min(bw - 1);
+            let j_lo = i.saturating_sub(bh - 1);
+            let mut j = j_hi as isize;
+            while j >= j_lo as isize {
+                let jj = j as usize;
+                let row = i - jj;
+                let left = if jj > 0 { get(&map, row, jj - 1) } else { None };
+                let above_left = if row > 0 && jj > 0 {
+                    get(&map, row - 1, jj - 1)
+                } else {
+                    None
+                };
+                let above = if row > 0 {
+                    get(&map, row - 1, jj)
+                } else {
+                    None
+                };
+                let (order, ctx) = color_context(left, above_left, above, size);
+                let cdf = if chroma {
+                    self.cdfs.palette_uv_color.row(size, ctx)?
+                } else {
+                    self.cdfs.palette_y_color.row(size, ctx)?
+                };
+                let sym = dec.read_symbol(cdf)?;
+                let color = order.get(sym).copied().unwrap_or(0);
+                if let Some(slot) = map.get_mut(row * bw + jj) {
+                    *slot = color;
+                }
+                j -= 1;
+            }
+        }
+        Ok(map)
     }
 
     /// Read `angle_delta` for a directional mode on a block of at least 8x8,
@@ -675,8 +1027,18 @@ impl TileState {
         let base_x = modes.c * MI_SIZE;
         let base_y = modes.r * MI_SIZE;
         for plane in 0..planes {
+            // A CfL chroma block predicts from DC and then adds the scaled luma.
+            let cfl_alpha = if plane == 1 {
+                modes.cfl.map(|(u, _)| u)
+            } else if plane == 2 {
+                modes.cfl.map(|(_, v)| v)
+            } else {
+                None
+            };
             let mode = if plane == 0 {
                 modes.y_mode
+            } else if modes.cfl.is_some() {
+                DC_PRED
             } else {
                 modes.uv_mode
             };
@@ -688,6 +1050,9 @@ impl TileState {
             let intra = IntraMode::from_index(mode as u8)
                 .ok_or_else(|| PixelsError::malformed("avif", "intra mode index out of range"))?;
             let filter_type = self.filter_type(modes, plane);
+            // Palette-coded plane: luma uses ColorMapY + colors_y; chroma uses
+            // ColorMapUV + colors_u (U) or colors_v (V).
+            let palette = self.palette_view_for(&modes.palette, plane, base_x, base_y);
             for ty in 0..bh4 {
                 for tx in 0..bw4 {
                     let x = base_x + tx * MI_SIZE;
@@ -707,6 +1072,8 @@ impl TileState {
                         have_above,
                         filter_type,
                         filter_intra,
+                        cfl_alpha,
+                        palette,
                         skip,
                         bw4,
                         bh4,
@@ -716,6 +1083,43 @@ impl TileState {
             }
         }
         Ok(())
+    }
+
+    /// Build the palette view for `plane` if that plane is palette-coded.
+    fn palette_view_for<'a>(
+        &self,
+        palette: &'a Palette,
+        plane: usize,
+        base_x: usize,
+        base_y: usize,
+    ) -> Option<PaletteView<'a>> {
+        if plane == 0 && palette.size_y > 0 {
+            Some(PaletteView {
+                map: &palette.map_y,
+                colors: &palette.colors_y,
+                block_w: palette.block_w,
+                base_x,
+                base_y,
+            })
+        } else if plane == 1 && palette.size_uv > 0 {
+            Some(PaletteView {
+                map: &palette.map_uv,
+                colors: &palette.colors_u,
+                block_w: palette.block_w,
+                base_x,
+                base_y,
+            })
+        } else if plane == 2 && palette.size_uv > 0 {
+            Some(PaletteView {
+                map: &palette.map_uv,
+                colors: &palette.colors_v,
+                block_w: palette.block_w,
+                base_x,
+                base_y,
+            })
+        } else {
+            None
+        }
     }
 
     /// `get_filter_type` (§7.11.2.8): whether the above or left neighbour block
@@ -799,6 +1203,20 @@ impl TileState {
     /// Predict a 4x4 transform block: directional modes go through the edge
     /// machinery, the rest through the pure non-directional predictors.
     fn predict(&self, tb: &TxBlock) -> Result<[[u16; 4]; 4]> {
+        if let Some(pv) = tb.palette {
+            // predict_palette (§7.11.4): each sample is the palette colour its
+            // index map selects. The map is block-relative.
+            let mut pred = [[0_u16; 4]; 4];
+            for (i, row) in pred.iter_mut().enumerate() {
+                for (j, cell) in row.iter_mut().enumerate() {
+                    let my = (tb.y + i).saturating_sub(pv.base_y);
+                    let mx = (tb.x + j).saturating_sub(pv.base_x);
+                    let idx = pv.map.get(my * pv.block_w + mx).copied().unwrap_or(0);
+                    *cell = pv.colors.get(usize::from(idx)).copied().unwrap_or(0);
+                }
+            }
+            return Ok(pred);
+        }
         if let Some(filter_mode) = tb.filter_intra {
             let (above, left) = self.gather_edges(tb);
             return Ok(predict_filter_intra_4x4(
@@ -815,7 +1233,37 @@ impl TileState {
             }
         }
         let neighbours = self.gather_neighbours(tb.plane, tb.x, tb.y, tb.have_left, tb.have_above);
-        predict_intra_4x4(tb.mode, &neighbours, self.bit_depth)
+        let mut pred = predict_intra_4x4(tb.mode, &neighbours, self.bit_depth)?;
+        if let Some(alpha) = tb.cfl_alpha {
+            self.apply_cfl(&mut pred, tb.x, tb.y, alpha);
+        }
+        Ok(pred)
+    }
+
+    /// `predict_chroma_from_luma` (§7.11.5) for a 4x4 4:4:4 block: add the
+    /// alpha-scaled, DC-removed reconstructed luma to the DC chroma prediction.
+    fn apply_cfl(&self, pred: &mut [[u16; 4]; 4], x: usize, y: usize, alpha: i32) {
+        let max = (1_i32 << self.bit_depth) - 1;
+        let luma = self.planes.first();
+        // L holds the co-located luma with 3 fractional bits (no subsampling).
+        let mut l = [[0_i32; 4]; 4];
+        let mut sum = 0_i32;
+        for (i, row) in l.iter_mut().enumerate() {
+            for (j, cell) in row.iter_mut().enumerate() {
+                let v = i32::from(luma.and_then(|p| p.get(x + j, y + i)).unwrap_or(0)) << 3;
+                *cell = v;
+                sum += v;
+            }
+        }
+        // lumaAvg = Round2(sum, log2W + log2H) = Round2(sum, 4) for 4x4.
+        let luma_avg = (sum + 8) >> 4;
+        for (i, row) in pred.iter_mut().enumerate() {
+            for (j, cell) in row.iter_mut().enumerate() {
+                let ac = l.get(i).and_then(|r| r.get(j)).copied().unwrap_or(0) - luma_avg;
+                let scaled = round2_signed(alpha * ac, 6);
+                *cell = (i32::from(*cell) + scaled).clamp(0, max) as u16;
+            }
+        }
     }
 
     /// Build the extended `AboveRow`/`LeftCol` edge arrays for a 4x4 block
@@ -1071,6 +1519,7 @@ impl TileState {
     }
 
     #[allow(clippy::too_many_arguments, reason = "records every per-block field")]
+    #[allow(clippy::too_many_arguments, reason = "records every per-block field")]
     fn record_block(
         &mut self,
         r: usize,
@@ -1080,6 +1529,7 @@ impl TileState {
         y_mode: usize,
         uv_mode: usize,
         skip: bool,
+        palette: &Palette,
     ) {
         let wide = floor_log2_usize(bw4) as u8;
         let high = floor_log2_usize(bh4) as u8;
@@ -1101,6 +1551,20 @@ impl TileState {
                 if let Some(v) = self.mi_high_log2.get_mut(idx) {
                     *v = high;
                 }
+                let [ps_y, ps_uv] = &mut self.palette_sizes;
+                if let Some(v) = ps_y.get_mut(idx) {
+                    *v = palette.size_y as u8;
+                }
+                if let Some(v) = ps_uv.get_mut(idx) {
+                    *v = palette.size_uv as u8;
+                }
+                let [pc_y, pc_uv] = &mut self.palette_colors;
+                if let Some(v) = pc_y.get_mut(idx) {
+                    *v = palette.colors_y;
+                }
+                if let Some(v) = pc_uv.get_mut(idx) {
+                    *v = palette.colors_u;
+                }
             }
         }
     }
@@ -1115,6 +1579,22 @@ impl TileState {
         self.uv_modes
             .get(r * self.mi_cols + c)
             .map_or(DC_PRED, |&v| usize::from(v))
+    }
+
+    fn palette_size_at(&self, plane: usize, r: usize, c: usize) -> u8 {
+        self.palette_sizes
+            .get(plane)
+            .and_then(|p| p.get(r * self.mi_cols + c))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn palette_colors_at(&self, plane: usize, r: usize, c: usize, n: usize) -> Vec<u16> {
+        self.palette_colors
+            .get(plane)
+            .and_then(|p| p.get(r * self.mi_cols + c))
+            .map(|colors| colors.iter().take(n).copied().collect())
+            .unwrap_or_default()
     }
 
     fn skip_at(&self, r: usize, c: usize) -> u8 {
@@ -1135,10 +1615,36 @@ struct BlockModes {
     uv_delta: i32,
     /// The luma filter-intra kernel, if this block uses recursive filter-intra.
     filter_intra: Option<usize>,
+    /// The chroma-from-luma alphas `(alphaU, alphaV)`, if this block is CfL.
+    cfl: Option<(i32, i32)>,
+    /// The block's palette state (sizes zero when unused).
+    palette: Palette,
+}
+
+/// One block's palette: the colours and the per-sample colour-index maps.
+#[derive(Default, Clone)]
+struct Palette {
+    /// `PaletteSizeY` (0 when the luma plane is not palette-coded).
+    size_y: usize,
+    /// `PaletteSizeUV`.
+    size_uv: usize,
+    /// `palette_colors_y`, ascending.
+    colors_y: [u16; PALETTE_COLORS],
+    /// `palette_colors_u`.
+    colors_u: [u16; PALETTE_COLORS],
+    /// `palette_colors_v`.
+    colors_v: [u16; PALETTE_COLORS],
+    /// `ColorMapY`, `block_h * block_w` row-major.
+    map_y: Vec<u8>,
+    /// `ColorMapUV`, same shape (4:4:4).
+    map_uv: Vec<u8>,
+    /// The luma block width and height in samples.
+    block_w: usize,
+    block_h: usize,
 }
 
 /// One 4x4 transform block's prediction inputs.
-struct TxBlock {
+struct TxBlock<'a> {
     plane: usize,
     x: usize,
     y: usize,
@@ -1149,9 +1655,24 @@ struct TxBlock {
     have_above: bool,
     filter_type: bool,
     filter_intra: Option<usize>,
+    /// The chroma-from-luma alpha for this plane, if the block is CfL.
+    cfl_alpha: Option<i32>,
+    /// The plane's palette view when the block is palette-coded on this plane.
+    palette: Option<PaletteView<'a>>,
     skip: bool,
     bw4: usize,
     bh4: usize,
+}
+
+/// A palette-coded plane's data for one transform block: the block-relative
+/// colour-index map plus the colours it selects.
+#[derive(Clone, Copy)]
+struct PaletteView<'a> {
+    map: &'a [u8],
+    colors: &'a [u16; PALETTE_COLORS],
+    block_w: usize,
+    base_x: usize,
+    base_y: usize,
 }
 
 /// Flat index into a `BlockDecoded` grid with a one-unit border (origin at
@@ -1193,6 +1714,36 @@ fn block_size_index(bw4: usize, bh4: usize) -> usize {
         (4, 16) => 20,
         (16, 4) => 21,
         _ => 15,
+    }
+}
+
+/// `array[i]` for a palette colour array, 0 outside range.
+fn at(colors: &[u16; PALETTE_COLORS], i: usize) -> u16 {
+    colors.get(i).copied().unwrap_or(0)
+}
+
+/// Set `array[i]` for a palette colour array; out-of-range writes are dropped.
+fn set_at(colors: &mut [u16; PALETTE_COLORS], i: usize, value: u16) {
+    if let Some(slot) = colors.get_mut(i) {
+        *slot = value;
+    }
+}
+
+/// `Round2Signed(x, n)` (§4.7).
+fn round2_signed(x: i32, n: u32) -> i32 {
+    if x >= 0 {
+        (x + (1 << (n - 1))) >> n
+    } else {
+        -((-x + (1 << (n - 1))) >> n)
+    }
+}
+
+/// `CeilLog2(x)` (§4.7).
+fn ceil_log2(x: u32) -> u32 {
+    if x < 2 {
+        0
+    } else {
+        u32::BITS - (x - 1).leading_zeros()
     }
 }
 

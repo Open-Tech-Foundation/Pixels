@@ -8,7 +8,7 @@
 //! partial raster, so the decode is inherently whole-image (SPEC §Memory).
 //!
 //! The reconstruction covers the lossless 4:4:4 intra subset; anything outside
-//! it (lossy transforms, subsampled chroma, screen-content tools, grids) is
+//! it (lossy transforms, subsampled chroma, intra block copy, grids) is
 //! reported as [`PixelsError::Unsupported`] rather than decoded wrong.
 
 use crate::boxes::{FourCc, Reader};

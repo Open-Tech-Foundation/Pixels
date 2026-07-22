@@ -2,10 +2,9 @@
 //!
 //! The codec is owned end to end (ADR-0013), so the AV1 bitstream *is* on
 //! trial. The reference rasters are produced by libavif's `avifdec`, and a
-//! lossless fixture must match one to the byte. Fixtures that exercise a tool
-//! this decoder does not yet implement (the screen-content path) report
-//! `Unsupported` and are skipped rather than asserted, so the suite tracks what
-//! is implemented without pretending the rest works.
+//! lossless fixture must match one to the byte. A fixture that exercised a tool
+//! this decoder does not implement would report `Unsupported` and be skipped
+//! rather than asserted; the whole lossless corpus currently decodes.
 //!
 //! Regenerate the fixtures and manifest with `scripts/regenerate-avif-reference.py`.
 

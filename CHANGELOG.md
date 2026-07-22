@@ -69,6 +69,16 @@ versioning: [SemVer](https://semver.org/).
   read the tables.
 
 ### Added
+- `otf-pixels-codec-avif` decodes the screen-content lossless path: palette and
+  chroma-from-luma prediction. Palette blocks decode their colour set (merging
+  the neighbour palettes into the prediction cache, then cache hits, a base
+  colour, and clipped deltas) and the per-sample colour-index map (the wavefront
+  scan with its colour-order context model), and predict each sample as the
+  colour its index selects. Chroma-from-luma reads its signed alphas and adds the
+  scaled, DC-removed reconstructed luma to the DC chroma prediction. With these,
+  every lossless AVIF fixture — including the block/screen-content one — decodes
+  bit-exact against libavif; only intra block copy remains unimplemented in the
+  lossless path.
 - `otf-pixels-codec-avif` decodes real pixels end to end: `AvifDecoder::read_row`
   reconstructs a lossless 4:4:4 AVIF still, converts the identity-matrix planes
   to RGB, and serves the rows — bit-exact against libavif on every lossless
@@ -80,9 +90,8 @@ versioning: [SemVer](https://semver.org/).
   entropy contexts aligned with the encoder. All the intra modes a natural image
   reaches are implemented: DC, Paeth, the smooth family, the slanted directional
   modes with their edge-filter and upsample machinery, and recursive
-  filter-intra. Screen-content tools (palette, intra block copy), subsampled
-  chroma, lossy transforms, and grids report `Unsupported` rather than decode
-  wrong.
+  filter-intra. Intra block copy, subsampled chroma, lossy transforms, and grids
+  report `Unsupported` rather than decode wrong.
 - `otf-pixels-codec-avif` gains the 4x4 coefficient decoder — the syntax that
   turns a transform block's entropy-coded symbols into a signed level array.
   It reads `all_zero`, the end-of-block position, each coefficient's base level
