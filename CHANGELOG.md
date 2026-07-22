@@ -53,6 +53,14 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Added
+- `otf-pixels-codec-avif` gains the first reconstruction primitives: a bounds-safe
+  sample `Plane` (edge-replicating clamped reads for intra prediction, the
+  workspace's slice-indexing ban concentrated in one file) and the lossless 4x4
+  inverse transform. The transform is the Walsh–Hadamard pair the lossless path
+  uses: dequantize each level by the qindex-0 step of 4, run the row WHT whose
+  `shift = 2` divides that step straight back out, then the column WHT — which
+  is why a lossless decode is bit-exact. The 4x4 blocks are handled by array
+  destructuring rather than indexing, keeping the hot path within the lint.
 - `otf-pixels-codec-avif` gains its reference-fixture harness ahead of pixel
   reconstruction, because our own decoder cannot validate itself: a shared
   misreading of the spec round-trips perfectly and is still wrong.

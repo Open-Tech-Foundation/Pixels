@@ -18,9 +18,11 @@ pub mod cdf;
 mod bits;
 mod frame;
 mod obu;
+mod plane;
 mod seq;
 mod still;
 mod symbol;
+mod transform;
 
 pub use bits::{BitReader, floor_log2};
 pub use frame::{
@@ -28,9 +30,11 @@ pub use frame::{
     TileInfo, TxMode,
 };
 pub use obu::{Obu, ObuHeader, ObuType};
+pub use plane::Plane;
 pub use seq::{ColorConfig, OperatingPoint, SequenceHeader};
 pub use still::{StillPicture, sequence_header_from_config};
 pub use symbol::SymbolDecoder;
+pub use transform::{add_residual_4x4, inverse_wht_4x4};
 
 #[cfg(test)]
 #[allow(
