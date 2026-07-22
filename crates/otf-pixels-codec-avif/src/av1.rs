@@ -19,6 +19,7 @@ mod bits;
 mod frame;
 mod obu;
 mod plane;
+mod predict;
 mod seq;
 mod still;
 mod symbol;
@@ -31,6 +32,7 @@ pub use frame::{
 };
 pub use obu::{Obu, ObuHeader, ObuType};
 pub use plane::Plane;
+pub use predict::{IntraMode, Neighbours, predict_intra_4x4};
 pub use seq::{ColorConfig, OperatingPoint, SequenceHeader};
 pub use still::{StillPicture, sequence_header_from_config};
 pub use symbol::SymbolDecoder;

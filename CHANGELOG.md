@@ -53,6 +53,14 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Added
+- `otf-pixels-codec-avif` gains 4x4 intra prediction for the non-directional
+  modes. DC, Paeth, and the three Smooth variants are complete, as are the two
+  axis-aligned directional modes (V and H, which at exactly 90 and 180 degrees
+  are plain copies with no edge filtering). The predictors are pure functions
+  over the assembled `AboveRow`/`LeftCol` neighbour arrays, so they are tested
+  directly against the spec's formulas; building those arrays from the plane is
+  the tile driver's job. The slanted directional modes, which need the
+  edge-filter and upsample machinery, report `Unsupported` until that lands.
 - `otf-pixels-codec-avif` gains the first reconstruction primitives: a bounds-safe
   sample `Plane` (edge-replicating clamped reads for intra prediction, the
   workspace's slice-indexing ban concentrated in one file) and the lossless 4x4
