@@ -13,6 +13,8 @@
 //! tile data. Reconstruction (the symbol decoder, coefficient parse,
 //! prediction, transforms and filters) lands in the phases after this one.
 
+pub mod cdf;
+
 mod bits;
 mod frame;
 mod obu;
@@ -20,12 +22,59 @@ mod seq;
 mod still;
 mod symbol;
 
-pub use bits::{floor_log2, BitReader};
+pub use bits::{BitReader, floor_log2};
 pub use frame::{
-    Cdef, FilmGrain, FrameHeader, LoopFilter, LoopRestoration, Quantization, Segmentation, TileInfo,
-    TxMode,
+    Cdef, FilmGrain, FrameHeader, LoopFilter, LoopRestoration, Quantization, Segmentation,
+    TileInfo, TxMode,
 };
 pub use obu::{Obu, ObuHeader, ObuType};
 pub use seq::{ColorConfig, OperatingPoint, SequenceHeader};
-pub use still::{sequence_header_from_config, StillPicture};
+pub use still::{StillPicture, sequence_header_from_config};
 pub use symbol::SymbolDecoder;
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "tests operate on known-good values and assert shapes directly"
+)]
+mod cdf_tests {
+    use super::cdf;
+
+    #[test]
+    fn generated_tables_match_the_spec_values() {
+        // A one-dimensional table, verbatim from the spec.
+        assert_eq!(
+            cdf::DEFAULT_CFL_SIGN_CDF,
+            [1418, 2123, 13340, 18405, 26972, 28343, 32294, 32768, 0]
+        );
+        assert_eq!(cdf::DEFAULT_DELTA_Q_CDF, [28160, 32120, 32677, 32768, 0]);
+        // A three-dimensional table, first context pair.
+        assert_eq!(
+            cdf::DEFAULT_INTRA_FRAME_Y_MODE_CDF[0][0],
+            [
+                15588, 17027, 19338, 20218, 20682, 21110, 21825, 23244, 24189, 28165, 29093, 30466,
+                32768, 0
+            ]
+        );
+    }
+
+    #[test]
+    fn every_cdf_ends_with_the_terminator_and_counter() {
+        // The last real cumulative frequency is 1<<15 and the trailing counter
+        // is 0, which is exactly what SymbolDecoder::read_symbol relies on.
+        fn check(row: &[u16]) {
+            let n = row.len();
+            assert!(n >= 2, "a CDF row is too short: {row:?}");
+            assert_eq!(row[n - 1], 0, "counter not zero in {row:?}");
+            assert_eq!(row[n - 2], 1 << 15, "terminator not 32768 in {row:?}");
+        }
+        for row in &cdf::DEFAULT_ANGLE_DELTA_CDF {
+            check(row);
+        }
+        for ctx in &cdf::DEFAULT_INTRA_FRAME_Y_MODE_CDF {
+            for row in ctx {
+                check(row);
+            }
+        }
+    }
+}

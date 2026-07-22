@@ -45,12 +45,25 @@ const RESTORE_NONE: u8 = 0;
 const RESTORATION_TILESIZE_MAX: u32 = 256;
 
 const SEG_FEATURE_BITS: [u32; SEG_LVL_MAX] = [8, 6, 6, 6, 6, 3, 0, 0];
-const SEG_FEATURE_SIGNED: [bool; SEG_LVL_MAX] =
-    [true, true, true, true, true, false, false, false];
-const SEG_FEATURE_MAX: [i32; SEG_LVL_MAX] = [255, MAX_LOOP_FILTER, MAX_LOOP_FILTER, MAX_LOOP_FILTER, MAX_LOOP_FILTER, 7, 0, 0];
+const SEG_FEATURE_SIGNED: [bool; SEG_LVL_MAX] = [true, true, true, true, true, false, false, false];
+const SEG_FEATURE_MAX: [i32; SEG_LVL_MAX] = [
+    255,
+    MAX_LOOP_FILTER,
+    MAX_LOOP_FILTER,
+    MAX_LOOP_FILTER,
+    MAX_LOOP_FILTER,
+    7,
+    0,
+    0,
+];
 
 /// `Remap_Lr_Type` (§5.9.20): coded value to restoration type.
-const REMAP_LR_TYPE: [u8; 4] = [RESTORE_NONE, 3 /*SWITCHABLE*/, 1 /*WIENER*/, 2 /*SGRPROJ*/];
+const REMAP_LR_TYPE: [u8; 4] = [
+    RESTORE_NONE,
+    3, /*SWITCHABLE*/
+    1, /*WIENER*/
+    2, /*SGRPROJ*/
+];
 
 /// The tile layout (`tile_info`, §5.9.15).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -312,13 +325,12 @@ impl FrameHeader {
             } else {
                 r.flag()?
             };
-            error_resilient_mode = if frame_type == SWITCH_FRAME
-                || (frame_type == KEY_FRAME && show_frame)
-            {
-                true
-            } else {
-                r.flag()?
-            };
+            error_resilient_mode =
+                if frame_type == SWITCH_FRAME || (frame_type == KEY_FRAME && show_frame) {
+                    true
+                } else {
+                    r.flag()?
+                };
         }
 
         let frame_is_intra = frame_type == KEY_FRAME || frame_type == INTRA_ONLY_FRAME;
@@ -375,17 +387,17 @@ impl FrameHeader {
         }
 
         // refresh_frame_flags: a shown key frame refreshes all slots.
-        let _refresh_frame_flags = if frame_type == SWITCH_FRAME
-            || (frame_type == KEY_FRAME && show_frame)
-        {
-            all_frames
-        } else {
-            r.f(8)?
-        };
+        let _refresh_frame_flags =
+            if frame_type == SWITCH_FRAME || (frame_type == KEY_FRAME && show_frame) {
+                all_frames
+            } else {
+                r.f(8)?
+            };
 
         // Intra path: frame_size(), render_size(), then maybe allow_intrabc.
         let size = parse_frame_size(r, seq, frame_size_override_flag)?;
-        let (render_width, render_height) = parse_render_size(r, size.upscaled_width, size.frame_height)?;
+        let (render_width, render_height) =
+            parse_render_size(r, size.upscaled_width, size.frame_height)?;
 
         let allow_intrabc = if allow_screen_content_tools && size.upscaled_width == size.frame_width
         {
@@ -394,7 +406,8 @@ impl FrameHeader {
             false
         };
 
-        let disable_frame_end_update_cdf = if seq.reduced_still_picture_header || disable_cdf_update {
+        let disable_frame_end_update_cdf = if seq.reduced_still_picture_header || disable_cdf_update
+        {
             true
         } else {
             r.flag()?
@@ -429,7 +442,11 @@ impl FrameHeader {
         // CodedLossless / AllLossless from the quantizer and segmentation.
         let mut lossless = [false; MAX_SEGMENTS];
         let mut coded_lossless = true;
-        let seg_count = if segmentation.enabled { MAX_SEGMENTS } else { 1 };
+        let seg_count = if segmentation.enabled {
+            MAX_SEGMENTS
+        } else {
+            1
+        };
         for (segment, slot) in lossless.iter_mut().enumerate().take(seg_count) {
             let qindex = get_qindex(&segmentation, &quantization, segment);
             let is_lossless = qindex == 0
@@ -527,7 +544,11 @@ fn parse_frame_size(
     };
 
     // superres_params.
-    let use_superres = if seq.enable_superres { r.flag()? } else { false };
+    let use_superres = if seq.enable_superres {
+        r.flag()?
+    } else {
+        false
+    };
     let superres_denom = if use_superres {
         r.f(SUPERRES_DENOM_BITS)? + SUPERRES_DENOM_MIN
     } else {
@@ -689,11 +710,7 @@ fn parse_tile_info(
 }
 
 fn read_delta_q(r: &mut BitReader<'_>) -> Result<i32> {
-    if r.flag()? {
-        r.su(6)
-    } else {
-        Ok(0)
-    }
+    if r.flag()? { r.su(6) } else { Ok(0) }
 }
 
 fn parse_quantization(r: &mut BitReader<'_>, seq: &SequenceHeader) -> Result<Quantization> {
@@ -944,14 +961,12 @@ fn parse_lr(
             }
         }
         let size0 = RESTORATION_TILESIZE_MAX >> (2 - lr_unit_shift);
-        let lr_uv_shift = if seq.color.subsampling_x == 1
-            && seq.color.subsampling_y == 1
-            && uses_chroma_lr
-        {
-            r.f(1)?
-        } else {
-            0
-        };
+        let lr_uv_shift =
+            if seq.color.subsampling_x == 1 && seq.color.subsampling_y == 1 && uses_chroma_lr {
+                r.f(1)?
+            } else {
+                0
+            };
         lr.unit_size[0] = size0;
         if let Some(s) = lr.unit_size.get_mut(1) {
             *s = size0 >> lr_uv_shift;
@@ -997,7 +1012,11 @@ fn parse_film_grain(
         r.f(8)?; // point_y_value
         r.f(8)?; // point_y_scaling
     }
-    let chroma_scaling_from_luma = if seq.color.mono_chrome { false } else { r.flag()? };
+    let chroma_scaling_from_luma = if seq.color.mono_chrome {
+        false
+    } else {
+        r.flag()?
+    };
     let (num_cb_points, num_cr_points);
     if seq.color.mono_chrome
         || chroma_scaling_from_luma
@@ -1104,7 +1123,10 @@ mod tests {
     fn seq_reduced(width: u32, height: u32) -> SequenceHeader {
         let mut b = Bldr::new();
         b.put(0, 3).flag(true).flag(true).put(1, 5);
-        b.put(15, 4).put(15, 4).put(width - 1, 16).put(height - 1, 16);
+        b.put(15, 4)
+            .put(15, 4)
+            .put(width - 1, 16)
+            .put(height - 1, 16);
         b.flag(false).flag(false).flag(false); // sb / filter-intra / edge
         b.flag(false).flag(false).flag(false); // superres / cdef / restoration
         b.flag(false).flag(false).flag(false); // hbd / mono / colordesc

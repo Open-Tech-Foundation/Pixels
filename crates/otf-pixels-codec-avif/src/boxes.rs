@@ -150,7 +150,10 @@ impl<'a> Reader<'a> {
     /// bytes from the cursor.
     pub fn take(&mut self, len: usize) -> Result<&'a [u8]> {
         let stop = self.pos.checked_add(len).ok_or_else(|| {
-            PixelsError::malformed("avif", format!("a {len}-byte read overflows the file offset"))
+            PixelsError::malformed(
+                "avif",
+                format!("a {len}-byte read overflows the file offset"),
+            )
         })?;
         if stop > self.end {
             return Err(PixelsError::malformed(
@@ -354,13 +357,18 @@ impl<'a> Reader<'a> {
         if total < header_len {
             return Err(PixelsError::malformed(
                 "avif",
-                format!("box '{kind}' declares {total} bytes, less than its own {header_len}-byte header"),
+                format!(
+                    "box '{kind}' declares {total} bytes, less than its own {header_len}-byte header"
+                ),
             ));
         }
         let payload_len = total.saturating_sub(header_len);
         let payload_start = self.pos;
         let end = payload_start.checked_add(payload_len).ok_or_else(|| {
-            PixelsError::malformed("avif", format!("box '{kind}' extends past the address space"))
+            PixelsError::malformed(
+                "avif",
+                format!("box '{kind}' extends past the address space"),
+            )
         })?;
         if end > self.end {
             return Err(PixelsError::malformed(
@@ -606,6 +614,9 @@ mod tests {
     #[test]
     fn fourcc_display_escapes_unprintable_bytes() {
         assert_eq!(FourCc::new(b"ftyp").to_string(), "ftyp");
-        assert_eq!(FourCc::new(&[0x00, 0x41, 0x1b, 0x42]).to_string(), "\\x00A\\x1bB");
+        assert_eq!(
+            FourCc::new(&[0x00, 0x41, 0x1b, 0x42]).to_string(),
+            "\\x00A\\x1bB"
+        );
     }
 }

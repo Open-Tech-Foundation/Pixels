@@ -35,6 +35,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets
+      # The AV1 default CDF tables are generated from a vendored spec extract,
+      # so the checked-in file must match what the generator produces today —
+      # a hand edit or a stale table would otherwise slip past review.
+      - name: generated CDF tables are current
+        run: |
+          python3 scripts/generate-av1-cdf-tables.py
+          git diff --exit-code -- crates/otf-pixels-codec-avif/src/av1/cdf.rs
 
   docs:
     name: docs

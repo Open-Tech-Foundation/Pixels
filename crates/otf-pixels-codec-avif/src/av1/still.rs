@@ -189,7 +189,10 @@ mod tests {
     fn seq_bytes(width: u32, height: u32) -> Vec<u8> {
         let mut b = Bldr::new();
         b.put(0, 3).flag(true).flag(true).put(1, 5);
-        b.put(15, 4).put(15, 4).put(width - 1, 16).put(height - 1, 16);
+        b.put(15, 4)
+            .put(15, 4)
+            .put(width - 1, 16)
+            .put(height - 1, 16);
         b.flag(false).flag(false).flag(false);
         b.flag(false).flag(false).flag(false);
         b.flag(false).flag(false).flag(false);

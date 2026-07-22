@@ -165,13 +165,11 @@ impl Meta {
     /// there is exactly one image, and rejecting it buys nothing.
     #[must_use]
     pub fn primary_item(&self) -> Option<&Item> {
-        self.primary
-            .and_then(|id| self.item(id))
-            .or_else(|| {
-                self.items
-                    .iter()
-                    .find(|item| item.is_coded_image() || item.is_grid())
-            })
+        self.primary.and_then(|id| self.item(id)).or_else(|| {
+            self.items
+                .iter()
+                .find(|item| item.is_coded_image() || item.is_grid())
+        })
     }
 
     /// The items `from` points to with a reference of this type.
@@ -225,7 +223,10 @@ impl Meta {
                 let (start, len) = self.idat.ok_or_else(|| {
                     PixelsError::malformed(
                         "avif",
-                        format!("item {} is stored in idat, but the file has no idat box", item.id),
+                        format!(
+                            "item {} is stored in idat, but the file has no idat box",
+                            item.id
+                        ),
                     )
                 })?;
                 let region = file.get(start..start.saturating_add(len)).ok_or_else(|| {
@@ -262,13 +263,19 @@ impl Meta {
             let start = usize::try_from(extent.offset).map_err(|_| {
                 PixelsError::malformed(
                     "avif",
-                    format!("item {} starts at offset {}, beyond this platform's addressing", item.id, extent.offset),
+                    format!(
+                        "item {} starts at offset {}, beyond this platform's addressing",
+                        item.id, extent.offset
+                    ),
                 )
             })?;
             let len = usize::try_from(extent.length).map_err(|_| {
                 PixelsError::malformed(
                     "avif",
-                    format!("item {} declares a {}-byte extent, beyond this platform's addressing", item.id, extent.length),
+                    format!(
+                        "item {} declares a {}-byte extent, beyond this platform's addressing",
+                        item.id, extent.length
+                    ),
                 )
             })?;
             let end = start.checked_add(len).ok_or_else(|| {
@@ -811,7 +818,11 @@ mod tests {
         payload.extend_from_slice(&boxed(b"dimg", &dimg));
         let iref = boxed(b"iref", &payload);
 
-        let file = meta_box(&[iinf(&[infe(1, b"grid", "", false)]), iloc(&[(1, 0, 1)]), iref]);
+        let file = meta_box(&[
+            iinf(&[infe(1, b"grid", "", false)]),
+            iloc(&[(1, 0, 1)]),
+            iref,
+        ]);
         let meta = parse(&file).unwrap();
         assert_eq!(meta.referenced(1, b"dimg"), &[2, 3]);
         assert_eq!(meta.referenced(1, b"auxl"), &[] as &[u32]);
@@ -869,10 +880,7 @@ mod tests {
 
     #[test]
     fn a_missing_pitm_falls_back_to_the_first_image_item() {
-        let file = meta_box(&[
-            iinf(&[infe(4, b"av01", "", false)]),
-            iloc(&[(4, 0, 1)]),
-        ]);
+        let file = meta_box(&[iinf(&[infe(4, b"av01", "", false)]), iloc(&[(4, 0, 1)])]);
         let meta = parse(&file).unwrap();
         assert_eq!(meta.primary, None);
         assert_eq!(meta.primary_item().map(|item| item.id), Some(4));

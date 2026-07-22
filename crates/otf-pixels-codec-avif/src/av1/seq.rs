@@ -356,11 +356,7 @@ fn parse_decoder_model_info(r: &mut BitReader<'_>) -> Result<(u32, u32, u32)> {
 fn parse_color_config(r: &mut BitReader<'_>, seq_profile: u8) -> Result<ColorConfig> {
     let high_bitdepth = r.flag()?;
     let bit_depth = if seq_profile == 2 && high_bitdepth {
-        if r.flag()? {
-            12
-        } else {
-            10
-        }
+        if r.flag()? { 12 } else { 10 }
     } else if high_bitdepth {
         10
     } else {

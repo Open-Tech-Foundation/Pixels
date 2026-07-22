@@ -249,45 +249,45 @@ impl Properties {
     /// The item's dimensions, from its `ispe`.
     #[must_use]
     pub fn extents(&self, item_id: u32) -> Option<Extents> {
-        self.for_item(item_id).into_iter().find_map(|property| {
-            match property {
+        self.for_item(item_id)
+            .into_iter()
+            .find_map(|property| match property {
                 Property::Extents(extents) => Some(*extents),
                 _ => None,
-            }
-        })
+            })
     }
 
     /// The item's AV1 configuration, from its `av1C`.
     #[must_use]
     pub fn av1_config(&self, item_id: u32) -> Option<&Av1Config> {
-        self.for_item(item_id).into_iter().find_map(|property| {
-            match property {
+        self.for_item(item_id)
+            .into_iter()
+            .find_map(|property| match property {
                 Property::Av1Config(config) => Some(config),
                 _ => None,
-            }
-        })
+            })
     }
 
     /// The item's colour information, from its `colr`.
     #[must_use]
     pub fn colour(&self, item_id: u32) -> Option<&Colour> {
-        self.for_item(item_id).into_iter().find_map(|property| {
-            match property {
+        self.for_item(item_id)
+            .into_iter()
+            .find_map(|property| match property {
                 Property::Colour(colour) => Some(colour),
                 _ => None,
-            }
-        })
+            })
     }
 
     /// The item's auxiliary type URN, from its `auxC`.
     #[must_use]
     pub fn auxiliary_type(&self, item_id: u32) -> Option<&str> {
-        self.for_item(item_id).into_iter().find_map(|property| {
-            match property {
+        self.for_item(item_id)
+            .into_iter()
+            .find_map(|property| match property {
                 Property::AuxiliaryType(urn) => Some(urn.as_str()),
                 _ => None,
-            }
-        })
+            })
     }
 
     /// The item's rotation and mirroring, as `(rotation, mirror)`.
@@ -421,7 +421,9 @@ fn parse_av1c(mut payload: Reader<'_>) -> Result<Av1Config> {
         (_, x, y) => {
             return Err(PixelsError::malformed(
                 "avif",
-                format!("av1C declares chroma subsampling ({x}, {y}), which AV1 has no such format for"),
+                format!(
+                    "av1C declares chroma subsampling ({x}, {y}), which AV1 has no such format for"
+                ),
             ));
         }
     };
@@ -457,7 +459,10 @@ fn parse_colr(mut payload: Reader<'_>) -> Result<Colour> {
         b"rICC" | b"prof" => Ok(Colour::Icc(payload.rest().to_vec())),
         other => Err(PixelsError::malformed(
             "avif",
-            format!("colr declares colour type '{}', which is not one this format defines", FourCc(*other)),
+            format!(
+                "colr declares colour type '{}', which is not one this format defines",
+                FourCc(*other)
+            ),
         )),
     }
 }
@@ -660,7 +665,10 @@ mod tests {
     fn orientation_properties_are_masked_to_their_defined_bits() {
         // Reserved high bits set; only the low two are the angle.
         assert_eq!(parse_one(b"irot", &[0xFE]).unwrap(), Property::Rotation(2));
-        assert_eq!(parse_one(b"imir", &[0xFE]).unwrap(), Property::Mirror(false));
+        assert_eq!(
+            parse_one(b"imir", &[0xFE]).unwrap(),
+            Property::Mirror(false)
+        );
         assert_eq!(parse_one(b"imir", &[0xFF]).unwrap(), Property::Mirror(true));
     }
 

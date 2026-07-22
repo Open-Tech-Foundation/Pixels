@@ -126,7 +126,9 @@ impl<'a> Obu<'a> {
             };
 
             let payload_start = pos + reader.byte_position();
-            let payload_end = payload_start.checked_add(payload_len).filter(|&e| e <= data.len());
+            let payload_end = payload_start
+                .checked_add(payload_len)
+                .filter(|&e| e <= data.len());
             let Some(payload_end) = payload_end else {
                 return Err(PixelsError::malformed(
                     "avif",

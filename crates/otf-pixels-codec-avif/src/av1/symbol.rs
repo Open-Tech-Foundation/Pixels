@@ -18,7 +18,7 @@
 //! returned error, and `SymbolMaxBits` accounting means the padding-zero region
 //! past the real bytes is entered deliberately, never by reading off the end.
 
-use super::bits::{floor_log2, BitReader};
+use super::bits::{BitReader, floor_log2};
 use otf_pixels_core::{PixelsError, Result};
 
 /// Bits of CDF precision dropped during the range update (§3, `EC_PROB_SHIFT`).
@@ -153,10 +153,7 @@ impl<'a> SymbolDecoder<'a> {
 /// slows adaptation as a symbol is seen more often.
 fn update_cdf(cdf: &mut [u16], symbol: usize, n: usize) {
     let count = cdf.get(n).copied().unwrap_or(0);
-    let rate = 3
-        + u32::from(count > 15)
-        + u32::from(count > 31)
-        + floor_log2(n as u32).min(2);
+    let rate = 3 + u32::from(count > 15) + u32::from(count > 31) + floor_log2(n as u32).min(2);
     let mut tmp: u32 = 0;
     for (i, slot) in cdf.iter_mut().take(n.saturating_sub(1)).enumerate() {
         if i == symbol {

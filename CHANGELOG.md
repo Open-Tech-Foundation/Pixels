@@ -53,6 +53,14 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Added
+- `otf-pixels-codec-avif` gains the AV1 default CDF tables, generated rather than
+  hand-transcribed. `scripts/generate-av1-cdf-tables.py` emits `av1/cdf.rs` from
+  a vendored extract of the specification's section-10 default-CDF blocks
+  (`scripts/data/av1-default-cdf-tables.txt`), and CI re-runs the generator and
+  `git diff --exit-code`s the result, exactly as it does the REFERENCE
+  manifests — so a stale table or a hand edit is caught. All 96 tables land in
+  the exact shape `SymbolDecoder::read_symbol` consumes: cumulative frequencies
+  ending in `1 << 15`, then a `0` adaptation counter.
 - `otf-pixels-codec-avif` gains the AV1 multi-symbol arithmetic decoder — the
   entropy engine every tile symbol passes through. It is a range decoder over
   15-bit inverse CDFs with a per-symbol floor probability, plus the CDF

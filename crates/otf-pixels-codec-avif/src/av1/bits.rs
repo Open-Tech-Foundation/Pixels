@@ -377,7 +377,10 @@ mod tests {
 
         let mut bad = BitReader::new(&[0b101_00001]);
         assert_eq!(bad.f(3).unwrap(), 0b101);
-        assert_eq!(bad.byte_alignment().unwrap_err().code(), ErrorCode::Malformed);
+        assert_eq!(
+            bad.byte_alignment().unwrap_err().code(),
+            ErrorCode::Malformed
+        );
     }
 
     #[test]

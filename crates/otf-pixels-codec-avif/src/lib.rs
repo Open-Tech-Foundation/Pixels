@@ -37,13 +37,14 @@ mod decoder;
 mod meta;
 mod props;
 
+pub use av1::cdf;
 pub use av1::{
-    floor_log2, BitReader, Cdef, ColorConfig, FilmGrain, FrameHeader, LoopFilter, LoopRestoration,
-    sequence_header_from_config, Obu, ObuHeader, ObuType, OperatingPoint, Quantization,
-    Segmentation, SequenceHeader, StillPicture, SymbolDecoder, TileInfo, TxMode,
+    BitReader, Cdef, ColorConfig, FilmGrain, FrameHeader, LoopFilter, LoopRestoration, Obu,
+    ObuHeader, ObuType, OperatingPoint, Quantization, Segmentation, SequenceHeader, StillPicture,
+    SymbolDecoder, TileInfo, TxMode, floor_log2, sequence_header_from_config,
 };
 pub use boxes::{BoxHeader, FourCc, Reader};
-pub use decoder::{probe, AvifCodec, AvifDecoder, AvifInfo};
+pub use decoder::{AvifCodec, AvifDecoder, AvifInfo, probe};
 pub use meta::{Construction, Extent, Item, Meta, Reference, URN_ALPHA, URN_ALPHA_LEGACY};
 pub use props::{
     Association, Av1Config, Colour, Extents, PixelInfo, Properties, Property, Subsampling,

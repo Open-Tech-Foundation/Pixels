@@ -137,9 +137,9 @@ fn parse_container(bytes: &[u8]) -> Result<AvifInfo> {
         .ok_or_else(|| PixelsError::malformed("avif", "the file has no meta box"))?;
     let meta = Meta::parse(meta_reader)?;
 
-    let primary = meta.primary_item().ok_or_else(|| {
-        PixelsError::malformed("avif", "the file names no primary image item")
-    })?;
+    let primary = meta
+        .primary_item()
+        .ok_or_else(|| PixelsError::malformed("avif", "the file names no primary image item"))?;
 
     // An essential property we cannot interpret was declared to change how the
     // pixels are to be read, so decoding anyway would produce a confidently
@@ -160,7 +160,10 @@ fn parse_container(bytes: &[u8]) -> Result<AvifInfo> {
     let extents = meta.properties.extents(primary.id).ok_or_else(|| {
         PixelsError::malformed(
             "avif",
-            format!("item {} has no ispe property, so its size is unknown", primary.id),
+            format!(
+                "item {} has no ispe property, so its size is unknown",
+                primary.id
+            ),
         )
     })?;
 
@@ -622,7 +625,10 @@ mod tests {
         file.extend_from_slice(&meta_box(&[pitm(1)]));
         let error = AvifDecoder::new(&file[..], Limits::default()).unwrap_err();
         assert_eq!(error.code(), ErrorCode::Malformed);
-        assert!(error.to_string().contains("no primary image item"), "{error}");
+        assert!(
+            error.to_string().contains("no primary image item"),
+            "{error}"
+        );
 
         // An item with no ispe, so no dimensions.
         let mut file = ftyp(b"avif", &[]);
