@@ -17,6 +17,7 @@ pub mod cdf;
 
 mod bits;
 mod coeff;
+mod deblock;
 mod direction;
 mod frame;
 mod obu;

@@ -1,9 +1,12 @@
 # Regenerate with scripts/regenerate-avif-reference.py
 # name width height channels tolerance
+blocks_deblock 48 40 3 0
 blocks_lossless 64 48 3 0
 blocks_nofilter 48 40 3 0
+gradient_deblock 64 64 3 0
 gradient_lossless 64 48 3 0
 gradient_nofilter 64 48 3 0
+gradient_odd_deblock 50 34 3 0
 gradient_odd_lossless 37 29 3 0
 gradient_odd_nofilter 37 29 3 0
 tiny_lossless 4 4 3 0

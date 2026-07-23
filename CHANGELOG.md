@@ -94,6 +94,17 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- `otf-pixels-codec-avif` applies the deblocking loop filter (§7.14) after
+  reconstruction: both passes (all vertical then all horizontal boundaries), the
+  transform-edge and adaptive-strength derivation, and the narrow, 8-/14-tap
+  luma and 6-/8-tap chroma wide filters. The still-image intra subset collapses
+  `applyFilter` to the transform-edge test and the strength to the frame
+  `loop_filter` level plus the intra reference delta, with libaom's frame-level
+  guard that skips filtering when both luma levels are zero. The gate on lossy
+  frames now only requires the *unimplemented* post-filters off (CDEF, loop
+  restoration, super-resolution, film grain); deblocking may be on. Three
+  deblock fixtures (`gradient_deblock`, `blocks_deblock`, `gradient_odd_deblock`)
+  join the reference corpus and decode byte-exact against libavif.
 - `otf-pixels-codec-avif` reconstructs a transform block of any size with the
   `flipUD`/`flipLR` the transform type calls for. `add_residual` (§7.12.3 step 3)
   adds the pre-flip `Residual` to the prediction at the flipped output position

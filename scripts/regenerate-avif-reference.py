@@ -74,6 +74,9 @@ FIXTURES = {
     "gradient_nofilter": (gradient(64, 48), False, 30, "444", 0),
     "blocks_nofilter": (blocks(48, 40), False, 40, "444", 0),
     "gradient_odd_nofilter": (gradient(37, 29), False, 35, "444", 0),
+    "gradient_deblock": (gradient(64, 64), False, 24, "444", 0),
+    "blocks_deblock": (blocks(48, 40), False, 20, "444", 0),
+    "gradient_odd_deblock": (gradient(50, 34), False, 28, "444", 0),
 }
 
 # aom options that disable every in-loop post-filter, so a filter-free decoder
@@ -83,6 +86,17 @@ NOFILTER_AOM_OPTS = [
     "enable-cdef=0",
     "enable-restoration=0",
     "loopfilter-control=0",
+    "deltaq-mode=0",
+    "enable-tpl-model=0",
+]
+
+# "deblock" fixtures keep the deblocking loop filter (§7.14) ON but disable the
+# later post-filters we do not implement yet (CDEF, loop restoration) and the
+# per-block quantiser variation. Our reconstruct applies deblocking, so these
+# must also decode byte-exact.
+DEBLOCK_AOM_OPTS = [
+    "enable-cdef=0",
+    "enable-restoration=0",
     "deltaq-mode=0",
     "enable-tpl-model=0",
 ]
@@ -99,7 +113,8 @@ def encode(image: Image.Image, path: str, lossless: bool, quality: int, yuv: str
         # range) so the decode compares in the same RGB == (V, Y, U) space the
         # lossless fixtures use, and with every post-filter disabled.
         cmd += ["-q", str(quality), "-r", "full", "--cicp", "1/13/0"]
-        for opt in NOFILTER_AOM_OPTS:
+        opts = DEBLOCK_AOM_OPTS if "deblock" in os.path.basename(path) else NOFILTER_AOM_OPTS
+        for opt in opts:
             cmd += ["-a", opt]
     cmd += [png, path]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

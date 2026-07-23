@@ -9,10 +9,12 @@
 //!
 //! Scope is the single-tile intra still image in YUV 4:4:4. Both `CodedLossless`
 //! (every transform is 4x4 WHT) and lossy frames decode here — the lossy path
-//! runs the full DCT/ADST/identity inverse transforms at every transform size.
-//! Because the reconstruct applies no in-loop post-filters, a lossy frame is
-//! only reproduced exactly when it codes them all off (`filters_disabled`);
-//! any other lossy frame is refused. Every intra prediction mode is handled —
+//! runs the full DCT/ADST/identity inverse transforms at every transform size,
+//! followed by the deblocking loop filter (§7.14). The later post-filters (CDEF,
+//! loop restoration, super-resolution, film grain) are not implemented, so a
+//! lossy frame is reproduced exactly only when it codes those off
+//! (`unimplemented_filters_off`); any other lossy frame is refused. Every intra
+//! prediction mode is handled —
 //! DC, Paeth, the smooth family, the slanted directional modes (with their
 //! edge-filter and upsample machinery), recursive filter-intra, palette, and
 //! chroma-from-luma. Intra block copy is detected and reported as
@@ -21,10 +23,11 @@
 
 use super::cdf;
 use super::coeff::{CoeffCdfs, TxTypeCtx, decode_coeffs};
+use super::deblock::Deblock;
 use super::direction::{
     ANGLE_STEP, Edge, mode_base_angle, predict_directional, predict_filter_intra,
 };
-use super::frame::{FrameHeader, TxMode};
+use super::frame::{FrameHeader, LoopFilter, TxMode};
 use super::palette::{PALETTE_COLORS, color_context, palette_cache};
 use super::plane::Plane;
 use super::predict::{IntraMode, PredBlock, predict_intra_block};
@@ -68,7 +71,7 @@ pub struct DecodedFrame {
 
 /// Decode a single-tile intra still frame into its sample planes. Handles both
 /// lossless and lossy frames, the latter only when every in-loop post-filter is
-/// disabled (see `filters_disabled`).
+/// disabled (see `unimplemented_filters_off`).
 ///
 /// # Errors
 ///
@@ -81,17 +84,17 @@ pub fn decode_still(
     frame: &FrameHeader,
     tile_data: &[u8],
 ) -> Result<DecodedFrame> {
-    // Our reconstruct is filter-free: it decodes and inverse-transforms the
-    // residual but applies no in-loop post-filters. A frame is therefore
-    // reproduced exactly only when every such filter is disabled — always true
-    // for a coded-lossless frame, and true for a lossy frame that codes deblock,
-    // CDEF, loop restoration, super-resolution and film grain all off. Any other
-    // lossy frame would decode to a visibly wrong image, so it is refused.
-    if !frame.coded_lossless && !filters_disabled(frame) {
+    // We reconstruct the residual and apply the deblocking loop filter (§7.14),
+    // but not the later post-filters. A lossy frame is reproduced exactly only
+    // when every unimplemented post-filter — CDEF, loop restoration,
+    // super-resolution and film grain — is disabled; deblocking may be on. Any
+    // other lossy frame would decode to a visibly wrong image, so it is refused.
+    // A coded-lossless frame turns all of these off by definition.
+    if !frame.coded_lossless && !unimplemented_filters_off(frame) {
         return Err(PixelsError::unsupported(
-            "avif: lossy frames are only decoded when every in-loop filter \
-             (deblock, CDEF, loop restoration, super-resolution, film grain) is \
-             disabled; post-filtering is not implemented yet",
+            "avif: lossy frames are decoded only with CDEF, loop restoration, \
+             super-resolution and film grain disabled (deblocking is applied); \
+             those post-filters are not implemented yet",
         ));
     }
     if seq.color.subsampling_x != 0 || seq.color.subsampling_y != 0 {
@@ -119,12 +122,12 @@ pub fn decode_still(
     })
 }
 
-/// Whether every in-loop post-filter is disabled, so a filter-free reconstruct
-/// reproduces the frame exactly. Checks deblock (all levels zero), CDEF (every
-/// strength zero), loop restoration (no plane uses it), super-resolution (the
-/// coded width equals the upscaled width) and film grain.
-fn filters_disabled(frame: &FrameHeader) -> bool {
-    let deblock_off = frame.loop_filter.level == [0, 0, 0, 0];
+/// Whether every post-filter this decoder does *not* implement is disabled, so
+/// the reconstruct plus deblocking reproduces the frame exactly. Checks CDEF
+/// (every strength zero), loop restoration (no plane uses it), super-resolution
+/// (the coded width equals the upscaled width) and film grain. Deblocking is
+/// implemented (§7.14) and so is not required to be off.
+fn unimplemented_filters_off(frame: &FrameHeader) -> bool {
     let cdef_off = frame
         .cdef
         .y_pri_strength
@@ -136,7 +139,7 @@ fn filters_disabled(frame: &FrameHeader) -> bool {
     let restoration_off = !frame.loop_restoration.uses_lr;
     let superres_off = frame.frame_width == frame.upscaled_width;
     let grain_off = !frame.film_grain.apply_grain;
-    deblock_off && cdef_off && restoration_off && superres_off && grain_off
+    cdef_off && restoration_off && superres_off && grain_off
 }
 
 /// Mutable CDFs for the frame, cloned from the defaults and adapted as symbols
@@ -276,6 +279,16 @@ struct TileState {
     /// `InterTxSizes[r][c]`: the luma transform size (a `TxSize` index) chosen
     /// for each 4x4 unit, for the `tx_depth` neighbour context under `SELECT`.
     tx_sizes: Vec<u8>,
+    /// `LoopfilterTxSizes[plane][r][c]`: the transform size actually applied at
+    /// each 4x4 unit, per plane, filled as transform blocks reconstruct. The
+    /// deblocking loop filter reads it to find transform edges (§7.14.2).
+    lf_tx_sizes: [Vec<u8>; 3],
+    /// Visible frame dimensions in luma samples (`FrameWidth`/`FrameHeight`),
+    /// for the loop filter's on-screen test.
+    frame_width: usize,
+    frame_height: usize,
+    /// The frame loop-filter parameters, for deblocking after reconstruct.
+    loop_filter: LoopFilter,
     sb_size4: usize,
     /// `BlockDecoded[plane]`, one flat `(sb+2) x (sb+2)` grid per plane, reset
     /// per superblock; addressed with a one-unit border so index -1 is valid.
@@ -351,6 +364,14 @@ impl TileState {
             ],
             q_ac: [base_q, base_q + q.delta_q_u_ac, base_q + q.delta_q_v_ac],
             tx_sizes: vec![0; mi_cols * mi_rows],
+            lf_tx_sizes: [
+                vec![0; mi_cols * mi_rows],
+                vec![0; mi_cols * mi_rows],
+                vec![0; mi_cols * mi_rows],
+            ],
+            frame_width: frame.upscaled_width as usize,
+            frame_height: frame.frame_height as usize,
+            loop_filter: frame.loop_filter.clone(),
             sb_size4,
             block_decoded,
             y_modes: vec![0; mi_cols * mi_rows],
@@ -383,7 +404,26 @@ impl TileState {
             }
             sb_row += sb_size4;
         }
+        self.deblock();
         Ok(())
+    }
+
+    /// Apply the deblocking loop filter to the reconstructed planes (§7.14). A
+    /// no-op when every filter level is zero, which is always so for a
+    /// coded-lossless frame.
+    fn deblock(&mut self) {
+        Deblock {
+            planes: &mut self.planes,
+            loop_filter: &self.loop_filter,
+            bit_depth: self.bit_depth,
+            num_planes: self.num_planes,
+            mi_rows: self.mi_rows,
+            mi_cols: self.mi_cols,
+            frame_width: self.frame_width,
+            frame_height: self.frame_height,
+            lf_tx_sizes: &self.lf_tx_sizes,
+        }
+        .run();
     }
 
     /// `clear_block_decoded_flags` (§5.11.3) for one superblock, 4:4:4.
@@ -1394,13 +1434,20 @@ impl TileState {
             }
         }
 
-        // Mark the tx block's 4x4 units decoded for the neighbour tests.
+        // Mark the tx block's 4x4 units decoded for the neighbour tests, and
+        // record its transform size per unit for the deblocking loop filter.
         let mask = (self.sb_size4 - 1) as isize;
+        let tx_index = tx_size as u8;
         for dy in 0..h4 {
             for dx in 0..w4 {
                 let sub_row = ((y4 + dy) as isize) & mask;
                 let sub_col = ((x4 + dx) as isize) & mask;
                 self.set_block_decoded(plane, sub_row, sub_col);
+                if let Some(grid) = self.lf_tx_sizes.get_mut(plane) {
+                    if let Some(cell) = grid.get_mut((y4 + dy) * self.mi_cols + (x4 + dx)) {
+                        *cell = tx_index;
+                    }
+                }
             }
         }
         Ok(())
