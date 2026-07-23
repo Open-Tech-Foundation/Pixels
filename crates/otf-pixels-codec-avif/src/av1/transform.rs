@@ -2,7 +2,7 @@
 //!
 //! A transform block is reconstructed by dequantizing the coefficient levels
 //! (`dequantize`), running a 2D inverse transform (`inverse_transform_2d`), and
-//! adding the result to the prediction (`add_residual_4x4`). The `dsp` submodule
+//! adding the result to the prediction (`add_residual`). The `dsp` submodule
 //! below holds the full lossy machinery — the DCT/ADST/identity butterfly
 //! network and the 2D driver — transcribed from the spec's ordered steps.
 //!
@@ -12,25 +12,66 @@
 //! is bit-exact. It flows through the same `dequantize` + `inverse_transform_2d`
 //! pair as the lossy path, with `Lossless == 1`.
 
-/// Add a `Residual` to a 4x4 prediction and clip to the sample range (`Clip1`,
-/// the final step of the reconstruct process, §7.12.3 step 3). The current
-/// reconstruction target is 4x4 with no flip; wider blocks and the
-/// `flipUD`/`flipLR` cases arrive with the rest of the lossy tile path.
+/// Reconstruct a transform block by adding the `Residual` to the prediction and
+/// clipping to the sample range (`Clip1`, the reconstruct process §7.12.3 step
+/// 3), honouring the transform type's `flipUD`/`flipLR`. `prediction` is
+/// row-major `residual.width * residual.height`; the result is the same shape.
+///
+/// The residual is stored pre-flip, so `Residual[i][j]` is added to the output
+/// at `(flipUD ? h-1-i : i, flipLR ? w-1-j : j)` — the prediction already sits
+/// there. The lossless path is the `DCT_DCT` (no-flip) 4x4 corner of this.
+#[must_use]
+pub fn add_residual(
+    prediction: &[u16],
+    residual: &Residual,
+    tx_type: TxType,
+    bit_depth: u8,
+) -> Vec<u16> {
+    let w = residual.width;
+    let h = residual.height;
+    let max = i64::from((1_u32 << bit_depth) - 1);
+    let flip_ud = tx_type.flip_ud();
+    let flip_lr = tx_type.flip_lr();
+    let mut out = prediction.to_vec();
+    for i in 0..h {
+        for j in 0..w {
+            let xx = if flip_lr { w - j - 1 } else { j };
+            let yy = if flip_ud { h - i - 1 } else { i };
+            let idx = yy * w + xx;
+            let pred = prediction.get(idx).copied().unwrap_or(0);
+            let value = i64::from(pred) + i64::from(residual.at(i, j));
+            if let Some(cell) = out.get_mut(idx) {
+                *cell = value.clamp(0, max) as u16;
+            }
+        }
+    }
+    out
+}
+
+/// Reconstruct a 4x4 block (§7.12.3 step 3): a thin wrapper over [`add_residual`]
+/// for the `DCT_DCT` (no-flip) case the lossless 4x4 tile drives.
 #[must_use]
 pub fn add_residual_4x4(
     prediction: &[[u16; 4]; 4],
     residual: &Residual,
     bit_depth: u8,
 ) -> [[u16; 4]; 4] {
-    let max = i64::from((1_u32 << bit_depth) - 1);
-    let mut out = [[0_u16; 4]; 4];
-    for (i, (orow, prow)) in out.iter_mut().zip(prediction).enumerate() {
-        for (j, (cell, &pred)) in orow.iter_mut().zip(prow).enumerate() {
-            let value = i64::from(pred) + i64::from(residual.at(i, j));
-            *cell = value.clamp(0, max) as u16;
+    let mut flat = [0_u16; 16];
+    for (i, row) in prediction.iter().enumerate() {
+        for (j, &v) in row.iter().enumerate() {
+            if let Some(cell) = flat.get_mut(i * 4 + j) {
+                *cell = v;
+            }
         }
     }
-    out
+    let out = add_residual(&flat, residual, TxType::DctDct, bit_depth);
+    let mut result = [[0_u16; 4]; 4];
+    for (i, row) in result.iter_mut().enumerate() {
+        for (j, cell) in row.iter_mut().enumerate() {
+            *cell = out.get(i * 4 + j).copied().unwrap_or(0);
+        }
+    }
+    result
 }
 
 pub use dsp::{Dequant, Residual, TxSize, TxType, ac_q, dc_q, dequantize, inverse_transform_2d};
@@ -1044,5 +1085,42 @@ mod tests {
         quant[0] = 16;
         let residual = lossless_residual(&quant);
         assert_eq!(residual.at(0, 0), 4);
+    }
+
+    #[test]
+    fn flip_ud_places_the_residual_vertically_mirrored() {
+        // With a uniform prediction, adding a residual under FLIPADST_DCT
+        // (flipUD, no flipLR) must land Residual[i][j] at output row h-1-i,
+        // i.e. the vertical mirror of the no-flip result — regardless of the
+        // residual's values. Small residual + mid prediction avoids clipping.
+        let pred = [128_u16; 16];
+        let mut quant = [0_i32; 16];
+        quant[1] = 8;
+        quant[4] = -8;
+        let res = lossless_residual(&quant);
+        let no_flip = add_residual(&pred, &res, TxType::DctDct, 8);
+        let flipped = add_residual(&pred, &res, TxType::FlipadstDct, 8);
+        for i in 0..4 {
+            for j in 0..4 {
+                assert_eq!(flipped[(3 - i) * 4 + j], no_flip[i * 4 + j]);
+            }
+        }
+    }
+
+    #[test]
+    fn flip_lr_places_the_residual_horizontally_mirrored() {
+        let pred = [128_u16; 16];
+        let mut quant = [0_i32; 16];
+        quant[1] = 8;
+        quant[4] = -8;
+        let res = lossless_residual(&quant);
+        let no_flip = add_residual(&pred, &res, TxType::DctDct, 8);
+        // DCT_FLIPADST is flipLR, no flipUD.
+        let flipped = add_residual(&pred, &res, TxType::DctFlipadst, 8);
+        for i in 0..4 {
+            for j in 0..4 {
+                assert_eq!(flipped[i * 4 + (3 - j)], no_flip[i * 4 + j]);
+            }
+        }
     }
 }

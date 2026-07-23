@@ -43,11 +43,11 @@ pub use av1::{
     FilmGrain, FrameHeader, IntraMode, IntraTxSet, IntraTxTypeCdfs, LoopFilter, LoopRestoration,
     Neighbours, Obu, ObuHeader, ObuType, OperatingPoint, Plane, PredBlock, Quantization, Residual,
     Segmentation, SequenceHeader, StillPicture, SymbolDecoder, TileInfo, TxDepthCdfs, TxMode,
-    TxSize, TxSizeParams, TxType, TxTypeCtx, ac_q, add_residual_4x4, block_size_from_4x4,
-    chroma_tx_type, dc_q, decode_coeffs, decode_still, dequantize, floor_log2, intra_dir,
-    intra_tx_set, inverse_transform_2d, is_tx_type_in_set_intra, max_tx_depth, max_tx_size_rect,
-    mode_to_txfm, predict_intra_4x4, predict_intra_block, read_transform_type, read_tx_size,
-    sequence_header_from_config, split_tx_size, tx_depth_ctx,
+    TxSize, TxSizeParams, TxType, TxTypeCtx, ac_q, add_residual, add_residual_4x4,
+    block_size_from_4x4, chroma_tx_type, dc_q, decode_coeffs, decode_still, dequantize, floor_log2,
+    intra_dir, intra_tx_set, inverse_transform_2d, is_tx_type_in_set_intra, max_tx_depth,
+    max_tx_size_rect, mode_to_txfm, predict_intra_4x4, predict_intra_block, read_transform_type,
+    read_tx_size, sequence_header_from_config, split_tx_size, tx_depth_ctx,
 };
 pub use boxes::{BoxHeader, FourCc, Reader};
 pub use decoder::{AvifCodec, AvifDecoder, AvifInfo, probe};

@@ -69,6 +69,12 @@ versioning: [SemVer](https://semver.org/).
   read the tables.
 
 ### Added
+- `otf-pixels-codec-avif` reconstructs a transform block of any size with the
+  `flipUD`/`flipLR` the transform type calls for. `add_residual` (§7.12.3 step 3)
+  adds the pre-flip `Residual` to the prediction at the flipped output position
+  and clips; `add_residual_4x4` is now a thin `DCT_DCT` wrapper the lossless tile
+  drives. This completes the reconstruct primitive for the `FLIPADST`/`V_FLIPADST`
+  /`H_FLIPADST` transform types ahead of wiring real sizes into the tile.
 - `otf-pixels-codec-avif` generalizes the recursive filter-intra predictor
   (§7.11.2.3) to any transform size: `predict_filter_intra` walks the 4x2
   sub-blocks over a `w x h` block, and `predict_filter_intra_4x4` is now a thin
