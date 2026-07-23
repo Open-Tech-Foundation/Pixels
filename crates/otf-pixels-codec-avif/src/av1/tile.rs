@@ -1,18 +1,23 @@
-//! The tile decode driver for the lossless intra path (spec §5.11).
+//! The tile decode driver for the intra still-picture path (spec §5.11).
 //!
 //! This is where the pieces meet: the arithmetic decoder walks the partition
-//! tree, reads each block's intra mode, predicts every 4x4 transform block from
-//! the already-reconstructed neighbours, decodes its coefficients, inverts the
-//! transform, and writes the samples back. The neighbour-context arrays it
-//! threads between blocks are what make the entropy contexts match the encoder.
+//! tree, reads each block's intra mode and transform size, predicts every
+//! transform block from the already-reconstructed neighbours, decodes its
+//! coefficients, inverts the transform, and writes the samples back. The
+//! neighbour-context arrays it threads between blocks are what make the entropy
+//! contexts match the encoder.
 //!
-//! Scope is the lossless still-image subset: a single tile, `CodedLossless`
-//! (every transform is 4x4 WHT, no post-filters), and YUV 4:4:4. Every intra
-//! prediction mode is handled — DC, Paeth, the smooth family, the slanted
-//! directional modes (with their edge-filter and upsample machinery), recursive
-//! filter-intra, palette, and chroma-from-luma. Intra block copy is detected and
-//! reported as [`PixelsError::unsupported`] rather than decoded wrong, so a
-//! stream that uses it fails cleanly instead of desynchronising.
+//! Scope is the single-tile intra still image in YUV 4:4:4. Both `CodedLossless`
+//! (every transform is 4x4 WHT) and lossy frames decode here — the lossy path
+//! runs the full DCT/ADST/identity inverse transforms at every transform size.
+//! Because the reconstruct applies no in-loop post-filters, a lossy frame is
+//! only reproduced exactly when it codes them all off (`filters_disabled`);
+//! any other lossy frame is refused. Every intra prediction mode is handled —
+//! DC, Paeth, the smooth family, the slanted directional modes (with their
+//! edge-filter and upsample machinery), recursive filter-intra, palette, and
+//! chroma-from-luma. Intra block copy is detected and reported as
+//! [`PixelsError::unsupported`] rather than decoded wrong, so a stream that uses
+//! it fails cleanly instead of desynchronising.
 
 use super::cdf;
 use super::coeff::{CoeffCdfs, TxTypeCtx, decode_coeffs};
@@ -61,31 +66,32 @@ pub struct DecodedFrame {
     pub planes: Vec<Plane>,
 }
 
-/// Decode a single-tile lossless still frame into its sample planes.
+/// Decode a single-tile intra still frame into its sample planes. Handles both
+/// lossless and lossy frames, the latter only when every in-loop post-filter is
+/// disabled (see `filters_disabled`).
 ///
 /// # Errors
 ///
-/// Returns [`PixelsError::unsupported`] for anything outside the lossless 4:4:4
-/// intra subset, and [`PixelsError::malformed`] for a stream that ends early or
-/// violates the syntax.
+/// Returns [`PixelsError::unsupported`] for anything outside the 4:4:4 intra
+/// subset this decodes — subsampled chroma, multiple tiles, intra block copy, or
+/// a lossy frame with post-filters active — and [`PixelsError::malformed`] for a
+/// stream that ends early or violates the syntax.
 pub fn decode_still(
     seq: &SequenceHeader,
     frame: &FrameHeader,
     tile_data: &[u8],
 ) -> Result<DecodedFrame> {
-    // Lossless, or lossy with every in-loop filter disabled: our reconstruct is
-    // filter-free, so a frame with deblock, CDEF, loop restoration, superres or
-    // film grain active would be reproduced wrongly. The reconstruct path is
-    // generalized to every transform size, but the lossy coefficient decode for
-    // transforms larger than 4x4 still has a symbol desync under investigation,
-    // so lossy frames are rejected rather than decoded to a wrong image. The
-    // 4x4-transform lossy path is bit-exact; the gate lifts once larger
-    // transforms are too.
-    if !frame.coded_lossless {
+    // Our reconstruct is filter-free: it decodes and inverse-transforms the
+    // residual but applies no in-loop post-filters. A frame is therefore
+    // reproduced exactly only when every such filter is disabled — always true
+    // for a coded-lossless frame, and true for a lossy frame that codes deblock,
+    // CDEF, loop restoration, super-resolution and film grain all off. Any other
+    // lossy frame would decode to a visibly wrong image, so it is refused.
+    if !frame.coded_lossless && !filters_disabled(frame) {
         return Err(PixelsError::unsupported(
-            "avif: only the lossless intra path is implemented (lossy reconstruct \
-             is generalized but its larger-transform coefficient decode is not yet \
-             bit-exact)",
+            "avif: lossy frames are only decoded when every in-loop filter \
+             (deblock, CDEF, loop restoration, super-resolution, film grain) is \
+             disabled; post-filtering is not implemented yet",
         ));
     }
     if seq.color.subsampling_x != 0 || seq.color.subsampling_y != 0 {
@@ -111,6 +117,26 @@ pub fn decode_still(
     Ok(DecodedFrame {
         planes: state.planes,
     })
+}
+
+/// Whether every in-loop post-filter is disabled, so a filter-free reconstruct
+/// reproduces the frame exactly. Checks deblock (all levels zero), CDEF (every
+/// strength zero), loop restoration (no plane uses it), super-resolution (the
+/// coded width equals the upscaled width) and film grain.
+fn filters_disabled(frame: &FrameHeader) -> bool {
+    let deblock_off = frame.loop_filter.level == [0, 0, 0, 0];
+    let cdef_off = frame
+        .cdef
+        .y_pri_strength
+        .iter()
+        .chain(&frame.cdef.y_sec_strength)
+        .chain(&frame.cdef.uv_pri_strength)
+        .chain(&frame.cdef.uv_sec_strength)
+        .all(|&s| s == 0);
+    let restoration_off = !frame.loop_restoration.uses_lr;
+    let superres_off = frame.frame_width == frame.upscaled_width;
+    let grain_off = !frame.film_grain.apply_grain;
+    deblock_off && cdef_off && restoration_off && superres_off && grain_off
 }
 
 /// Mutable CDFs for the frame, cloned from the defaults and adapted as symbols
@@ -768,9 +794,17 @@ impl TileState {
         bw4: usize,
         bh4: usize,
     ) -> Result<(usize, Option<(i32, i32)>)> {
-        // Lossless with a 4x4 chroma residual allows chroma-from-luma; here the
-        // residual size equals the block size, so CFL is allowed only for 4x4.
-        let cfl_allowed = bw4 == 1 && bh4 == 1;
+        // `is_cfl_allowed` (§5.11.5). Lossless allows chroma-from-luma only when
+        // the chroma residual is 4x4, which for 4:4:4 (no subsampling) means the
+        // block itself is 4x4. Otherwise CfL is allowed for any block up to
+        // 32x32 (Block_Width/Height <= 32, i.e. <= 8 mode-info units). Getting
+        // this wrong picks the other uv_mode CDF — one has the extra CfL symbol,
+        // the other does not — which desynchronises the whole tile.
+        let cfl_allowed = if self.lossless {
+            bw4 == 1 && bh4 == 1
+        } else {
+            bw4 <= 8 && bh4 <= 8
+        };
         let uv = if cfl_allowed {
             let cdf_row = get_mut(&mut self.cdfs.uv_cfl_allowed, y_mode)?;
             dec.read_symbol(cdf_row)?

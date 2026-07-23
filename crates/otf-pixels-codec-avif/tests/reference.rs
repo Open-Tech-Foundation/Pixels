@@ -66,11 +66,15 @@ fn decode(bytes: &[u8]) -> otf_pixels_core::Result<(Vec<u8>, otf_pixels_core::Im
     Ok((pixels, descriptor))
 }
 
-/// Lossless means lossless: for every fixture this decoder can handle, the
-/// raster must equal libavif's to the byte.
+/// Exact means exact: for every fixture this decoder can handle — the lossless
+/// ones and the filters-off lossy ("nofilter") ones — the raster must equal
+/// libavif's to the byte. The nofilter fixtures are genuinely lossy (DCT/ADST,
+/// larger transforms, chroma-from-luma) but code every in-loop post-filter off,
+/// so a filter-free reconstruct still reproduces them exactly.
 #[test]
-fn lossless_fixtures_decode_exactly() {
+fn reference_fixtures_decode_exactly() {
     let mut compared = 0;
+    let mut lossy_compared = 0;
     for reference in references() {
         let result = decode(&read_fixture(&reference.name, "avif"));
         let (ours, descriptor) = match result {
@@ -102,10 +106,18 @@ fn lossless_fixtures_decode_exactly() {
         );
         assert_eq!(
             ours, theirs,
-            "{}: a lossless decode differs from libavif's",
+            "{}: a decode differs from libavif's",
             reference.name
         );
         compared += 1;
+        if reference.name.contains("nofilter") {
+            lossy_compared += 1;
+        }
     }
-    assert!(compared >= 2, "only {compared} lossless fixtures decoded");
+    assert!(compared >= 2, "only {compared} fixtures decoded");
+    assert!(
+        lossy_compared >= 1,
+        "no filters-off lossy fixture was compared — the lossy path regressed \
+         to Unsupported or the manifest lost its nofilter entries"
+    );
 }

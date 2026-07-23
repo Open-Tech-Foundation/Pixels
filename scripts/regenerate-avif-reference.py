@@ -58,14 +58,34 @@ def blocks(width: int, height: int) -> Image.Image:
 
 
 # name -> (image, lossless, quality, yuv, tolerance)
-# Only lossless fixtures for now; lossy entries join as the DCT/ADST paths and
-# the post-filters land, each with the tolerance a lossy decode warrants.
+#
+# Lossless fixtures are `CodedLossless` and must round-trip exactly. The
+# "nofilter" lossy fixtures are lossy AVIF encoded with every in-loop post-filter
+# turned off (see `encode`): our reconstruct is filter-free, so with the filters
+# off it must still match libavif's decode to the byte. They exercise the
+# DCT/ADST inverse transforms, the larger transform sizes and chroma-from-luma
+# that lossless never reaches. A true lossy fixture (filters on) will only join
+# once the post-filters are implemented, and then with a tolerance.
 FIXTURES = {
     "gradient_lossless": (gradient(64, 48), True, 100, "444", 0),
     "blocks_lossless": (blocks(64, 48), True, 100, "444", 0),
     "gradient_odd_lossless": (gradient(37, 29), True, 100, "444", 0),
     "tiny_lossless": (blocks(4, 4), True, 100, "444", 0),
+    "gradient_nofilter": (gradient(64, 48), False, 30, "444", 0),
+    "blocks_nofilter": (blocks(48, 40), False, 40, "444", 0),
+    "gradient_odd_nofilter": (gradient(37, 29), False, 35, "444", 0),
 }
+
+# aom options that disable every in-loop post-filter, so a filter-free decoder
+# reproduces the frame exactly: deblock, CDEF, loop restoration, the delta-q /
+# TPL machinery that would vary the quantiser per block.
+NOFILTER_AOM_OPTS = [
+    "enable-cdef=0",
+    "enable-restoration=0",
+    "loopfilter-control=0",
+    "deltaq-mode=0",
+    "enable-tpl-model=0",
+]
 
 
 def encode(image: Image.Image, path: str, lossless: bool, quality: int, yuv: str) -> None:
@@ -75,7 +95,12 @@ def encode(image: Image.Image, path: str, lossless: bool, quality: int, yuv: str
     if lossless:
         cmd.append("--lossless")
     else:
-        cmd += ["-q", str(quality)]
+        # Lossy with an identity colour matrix (matrix_coefficients == 0, full
+        # range) so the decode compares in the same RGB == (V, Y, U) space the
+        # lossless fixtures use, and with every post-filter disabled.
+        cmd += ["-q", str(quality), "-r", "full", "--cicp", "1/13/0"]
+        for opt in NOFILTER_AOM_OPTS:
+            cmd += ["-a", opt]
     cmd += [png, path]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     os.remove(png)

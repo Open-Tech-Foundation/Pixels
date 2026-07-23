@@ -53,6 +53,17 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Fixed
+- The AVIF decoder judged chroma-from-luma allowed only for a 4x4 block, which
+  is the *lossless* 4:4:4 rule; for a lossy frame CfL is allowed for any block
+  up to 32x32. An 8x8-or-larger lossy block therefore read `uv_mode` against the
+  wrong CDF — the CfL-allowed alphabet carries an extra symbol the not-allowed
+  one lacks — and desynchronised the whole tile, so every lossy frame with a
+  block above 4x4 decoded to garbage while the lossless path (always 4x4-block
+  CfL) stayed correct. `is_cfl_allowed` now follows the lossless flag, and lossy
+  frames decode bit-exact against libavif at every transform size. Found by
+  diffing our symbol stream against a libaom accounting trace. Three filters-off
+  lossy fixtures (`gradient_nofilter`, `blocks_nofilter`, `gradient_odd_nofilter`)
+  join the reference corpus.
 - The AVIF reconstruction decoded transform blocks whose top-left corner lies
   past the frame's right or bottom edge, which a partial superblock produces.
   The spec codes no such block, so the extra symbol reads desynchronised
@@ -77,10 +88,10 @@ versioning: [SemVer](https://semver.org/).
   assembly, chroma-from-luma, and the flip-aware residual add all run at the
   block's real size — with real `Dc_Qlookup`/`Ac_Qlookup` steps per plane. The
   lossless intra path flows through the same general code and stays bit-exact
-  against libavif, and the 4x4-transform lossy path decodes bit-exact too.
-  Lossy frames are still rejected: the coefficient decode for transforms larger
-  than 4x4 has a symbol desync under investigation, so a filter-free lossy frame
-  is not yet reproduced exactly and is refused rather than decoded wrongly.
+  against libavif, and lossy frames now decode bit-exact at every transform size
+  when they code every in-loop post-filter off (`filters_disabled`): deblock,
+  CDEF, loop restoration, super-resolution and film grain. A lossy frame with
+  any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
 - `otf-pixels-codec-avif` reconstructs a transform block of any size with the
