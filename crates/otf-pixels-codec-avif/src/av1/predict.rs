@@ -7,17 +7,46 @@
 //! neighbour arrays from the plane (with the frame-edge and availability rules)
 //! is the tile driver's job, which keeps these predictors pure and testable.
 //!
-//! Lossless coding predicts every 4x4 transform block, so 4x4 is what is
-//! implemented here. The non-directional modes (DC, Paeth, the three Smooth
-//! variants) and the two axis-aligned directional modes (V, H, which at exactly
-//! 90 and 180 degrees are plain copies with no edge filtering) are complete.
-//! The slanted directional modes need the edge-filter/upsample machinery and
-//! report [`PixelsError::unsupported`] until that lands.
+//! The modes that need no edge filtering are implemented at any transform size
+//! ([`predict_intra_block`]): DC (§7.11.2.5), Paeth (§7.11.2.2), the three
+//! Smooth variants (§7.11.2.6), and the two axis-aligned directional modes (V,
+//! H, which at exactly 90 and 180 degrees are plain copies). The slanted
+//! directional modes need the edge-filter/upsample machinery and report
+//! [`PixelsError::unsupported`] until that lands. [`predict_intra_4x4`] is a thin
+//! wrapper over the general path, which the lossless 4x4 tile drives.
 
 use otf_pixels_core::{PixelsError, Result};
 
 /// `Sm_Weights_Tx_4x4` (§9.3): the smooth-prediction interpolation weights.
 const SM_WEIGHTS_4: [i32; 4] = [255, 149, 85, 64];
+/// `Sm_Weights_Tx_8x8` (§9.3).
+const SM_WEIGHTS_8: [i32; 8] = [255, 197, 146, 105, 73, 50, 37, 32];
+/// `Sm_Weights_Tx_16x16` (§9.3).
+const SM_WEIGHTS_16: [i32; 16] = [
+    255, 225, 196, 170, 145, 123, 102, 84, 68, 54, 43, 33, 26, 20, 17, 16,
+];
+/// `Sm_Weights_Tx_32x32` (§9.3).
+const SM_WEIGHTS_32: [i32; 32] = [
+    255, 240, 225, 210, 196, 182, 169, 157, 145, 133, 122, 111, 101, 92, 83, 74, 66, 59, 52, 45,
+    39, 34, 29, 25, 21, 17, 14, 12, 10, 9, 8, 8,
+];
+/// `Sm_Weights_Tx_64x64` (§9.3).
+const SM_WEIGHTS_64: [i32; 64] = [
+    255, 248, 240, 233, 225, 218, 210, 203, 196, 189, 182, 176, 169, 163, 156, 150, 144, 138, 133,
+    127, 121, 116, 111, 106, 101, 96, 91, 86, 82, 77, 73, 69, 65, 61, 57, 54, 50, 47, 44, 41, 38,
+    35, 32, 29, 27, 25, 22, 20, 18, 16, 15, 13, 12, 10, 9, 8, 7, 6, 6, 5, 5, 4, 4, 4,
+];
+
+/// `Sm_Weights_Tx[dim]` (§9.3): the interpolation weights for one side length.
+fn sm_weights(dim: usize) -> &'static [i32] {
+    match dim {
+        8 => &SM_WEIGHTS_8,
+        16 => &SM_WEIGHTS_16,
+        32 => &SM_WEIGHTS_32,
+        64 => &SM_WEIGHTS_64,
+        _ => &SM_WEIGHTS_4,
+    }
+}
 
 /// The 13 intra prediction modes (§6.10.2), in their coded order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,93 +141,125 @@ pub struct Neighbours {
     pub have_left: bool,
 }
 
-/// Predict a 4x4 intra block (§7.11.2 for the 4x4 case).
+/// One intra block's assembled neighbours and geometry: the row above, the
+/// column to the left, the shared top-left `corner` (`AboveRow[-1]`), the
+/// availability flags, and the block size `w` x `h` in samples. `above` must
+/// hold at least `w` entries and `left` at least `h`.
+#[derive(Debug, Clone, Copy)]
+pub struct PredBlock<'a> {
+    /// `AboveRow[0..w]`.
+    pub above: &'a [i32],
+    /// `LeftCol[0..h]`.
+    pub left: &'a [i32],
+    /// `AboveRow[-1]` (equal to `LeftCol[-1]`).
+    pub corner: i32,
+    /// Whether the above row holds real reconstructed samples.
+    pub have_above: bool,
+    /// Whether the left column holds real reconstructed samples.
+    pub have_left: bool,
+    /// The block width in samples.
+    pub w: usize,
+    /// The block height in samples.
+    pub h: usize,
+}
+
+/// Predict an intra block of any size for the modes that need no edge filtering
+/// (§7.11.2): DC, Paeth, the three Smooth variants, and the axis-aligned V/H
+/// copies. The result is `w * h` samples in row-major order.
 ///
 /// # Errors
 ///
-/// Returns [`PixelsError::unsupported`] for the slanted directional modes,
-/// which need the edge-filter and upsample machinery not yet implemented.
-pub fn predict_intra_4x4(mode: IntraMode, n: &Neighbours, bit_depth: u8) -> Result<[[u16; 4]; 4]> {
+/// Returns [`PixelsError::unsupported`] for the slanted directional modes, which
+/// need the edge-filter and upsample machinery not yet implemented.
+pub fn predict_intra_block(mode: IntraMode, b: &PredBlock<'_>, bit_depth: u8) -> Result<Vec<u16>> {
+    let (w, h) = (b.w, b.h);
     let max = (1_i32 << bit_depth) - 1;
     let clip1 = |v: i32| v.clamp(0, max) as u16;
+    let a = |j: usize| b.above.get(j).copied().unwrap_or(0);
+    let l = |i: usize| b.left.get(i).copied().unwrap_or(0);
 
-    // above[j] / left[i] for i, j in 0..4 are the first four of each array.
-    let a = |j: usize| n.above.get(j).copied().unwrap_or(0);
-    let l = |i: usize| n.left.get(i).copied().unwrap_or(0);
+    let mut pred = vec![0_u16; w * h];
+    let put = |pred: &mut Vec<u16>, i: usize, j: usize, v: u16| {
+        if let Some(cell) = pred.get_mut(i * w + j) {
+            *cell = v;
+        }
+    };
 
-    let mut pred = [[0_u16; 4]; 4];
     match mode {
         IntraMode::Dc => {
-            let value = dc_value(n, bit_depth);
-            pred = [[value; 4]; 4];
+            let value = dc_value(b, bit_depth);
+            pred.fill(value);
         }
         IntraMode::V => {
             // pAngle 90: a plain copy of the (unfiltered) above row.
-            for row in &mut pred {
-                for (j, cell) in row.iter_mut().enumerate() {
-                    *cell = clip1(a(j));
+            for i in 0..h {
+                for j in 0..w {
+                    put(&mut pred, i, j, clip1(a(j)));
                 }
             }
         }
         IntraMode::H => {
             // pAngle 180: a plain copy of the left column.
-            for (i, row) in pred.iter_mut().enumerate() {
-                for cell in row.iter_mut() {
-                    *cell = clip1(l(i));
+            for i in 0..h {
+                for j in 0..w {
+                    put(&mut pred, i, j, clip1(l(i)));
                 }
             }
         }
         IntraMode::Paeth => {
-            for (i, row) in pred.iter_mut().enumerate() {
-                for (j, cell) in row.iter_mut().enumerate() {
-                    let base = a(j) + l(i) - n.corner;
+            for i in 0..h {
+                for j in 0..w {
+                    let base = a(j) + l(i) - b.corner;
                     let p_left = (base - l(i)).abs();
                     let p_top = (base - a(j)).abs();
-                    let p_corner = (base - n.corner).abs();
-                    *cell = clip1(if p_left <= p_top && p_left <= p_corner {
+                    let p_corner = (base - b.corner).abs();
+                    let v = if p_left <= p_top && p_left <= p_corner {
                         l(i)
                     } else if p_top <= p_corner {
                         a(j)
                     } else {
-                        n.corner
-                    });
+                        b.corner
+                    };
+                    put(&mut pred, i, j, clip1(v));
                 }
             }
         }
         IntraMode::Smooth => {
-            let wx = SM_WEIGHTS_4;
-            let wy = SM_WEIGHTS_4;
-            let below_left = l(3);
-            let above_right = a(3);
-            for (i, row) in pred.iter_mut().enumerate() {
-                for (j, cell) in row.iter_mut().enumerate() {
-                    let smooth = wy.get(i).copied().unwrap_or(0) * a(j)
-                        + (256 - wy.get(i).copied().unwrap_or(0)) * below_left
-                        + wx.get(j).copied().unwrap_or(0) * l(i)
-                        + (256 - wx.get(j).copied().unwrap_or(0)) * above_right;
-                    *cell = clip1(round2(smooth, 9));
+            let wx = sm_weights(w);
+            let wy = sm_weights(h);
+            let below_left = l(h - 1);
+            let above_right = a(w - 1);
+            for i in 0..h {
+                let wyi = wy.get(i).copied().unwrap_or(0);
+                for j in 0..w {
+                    let wxj = wx.get(j).copied().unwrap_or(0);
+                    let smooth = wyi * a(j)
+                        + (256 - wyi) * below_left
+                        + wxj * l(i)
+                        + (256 - wxj) * above_right;
+                    put(&mut pred, i, j, clip1(round2(smooth, 9)));
                 }
             }
         }
         IntraMode::SmoothV => {
-            let w = SM_WEIGHTS_4;
-            let below_left = l(3);
-            for (i, row) in pred.iter_mut().enumerate() {
-                let wi = w.get(i).copied().unwrap_or(0);
-                for (j, cell) in row.iter_mut().enumerate() {
-                    let smooth = wi * a(j) + (256 - wi) * below_left;
-                    *cell = clip1(round2(smooth, 8));
+            let wy = sm_weights(h);
+            let below_left = l(h - 1);
+            for i in 0..h {
+                let wyi = wy.get(i).copied().unwrap_or(0);
+                for j in 0..w {
+                    let smooth = wyi * a(j) + (256 - wyi) * below_left;
+                    put(&mut pred, i, j, clip1(round2(smooth, 8)));
                 }
             }
         }
         IntraMode::SmoothH => {
-            let w = SM_WEIGHTS_4;
-            let above_right = a(3);
-            for (i, row) in pred.iter_mut().enumerate() {
-                for (j, cell) in row.iter_mut().enumerate() {
-                    let wj = w.get(j).copied().unwrap_or(0);
-                    let smooth = wj * l(i) + (256 - wj) * above_right;
-                    *cell = clip1(round2(smooth, 8));
+            let wx = sm_weights(w);
+            let above_right = a(w - 1);
+            for i in 0..h {
+                for j in 0..w {
+                    let wxj = wx.get(j).copied().unwrap_or(0);
+                    let smooth = wxj * l(i) + (256 - wxj) * above_right;
+                    put(&mut pred, i, j, clip1(round2(smooth, 8)));
                 }
             }
         }
@@ -216,20 +277,48 @@ pub fn predict_intra_4x4(mode: IntraMode, n: &Neighbours, bit_depth: u8) -> Resu
     Ok(pred)
 }
 
-/// The DC prediction value for a 4x4 block (§7.11.2.5).
-fn dc_value(n: &Neighbours, bit_depth: u8) -> u16 {
+/// Predict a 4x4 intra block (§7.11.2 for the 4x4 case): a thin wrapper over the
+/// size-general [`predict_intra_block`], reshaping the flat result to `[[_; 4];
+/// 4]`.
+///
+/// # Errors
+///
+/// Returns [`PixelsError::unsupported`] for the slanted directional modes.
+pub fn predict_intra_4x4(mode: IntraMode, n: &Neighbours, bit_depth: u8) -> Result<[[u16; 4]; 4]> {
+    let block = PredBlock {
+        above: &n.above,
+        left: &n.left,
+        corner: n.corner,
+        have_above: n.have_above,
+        have_left: n.have_left,
+        w: 4,
+        h: 4,
+    };
+    let flat = predict_intra_block(mode, &block, bit_depth)?;
+    let mut pred = [[0_u16; 4]; 4];
+    for (i, row) in pred.iter_mut().enumerate() {
+        for (j, cell) in row.iter_mut().enumerate() {
+            *cell = flat.get(i * 4 + j).copied().unwrap_or(0);
+        }
+    }
+    Ok(pred)
+}
+
+/// The DC prediction value (§7.11.2.5) for a block of any size.
+fn dc_value(b: &PredBlock<'_>, bit_depth: u8) -> u16 {
     let max = (1_i32 << bit_depth) - 1;
     let clip1 = |v: i32| v.clamp(0, max) as u16;
-    let left_sum: i32 = n.left.iter().take(4).sum();
-    let above_sum: i32 = n.above.iter().take(4).sum();
-    match (n.have_left, n.have_above) {
+    let (w, h) = (b.w, b.h);
+    let left_sum: i32 = b.left.iter().take(h).sum();
+    let above_sum: i32 = b.above.iter().take(w).sum();
+    match (b.have_left, b.have_above) {
         (true, true) => {
-            // (sum + (w + h) / 2) / (w + h) with w = h = 4.
-            let sum = left_sum + above_sum + 4;
-            (sum / 8) as u16
+            // (sum + (w + h) / 2) / (w + h); already in range, so no Clip1.
+            let sum = left_sum + above_sum + ((w + h) >> 1) as i32;
+            (sum / (w + h) as i32) as u16
         }
-        (true, false) => clip1((left_sum + 2) >> 2),
-        (false, true) => clip1((above_sum + 2) >> 2),
+        (true, false) => clip1((left_sum + (h >> 1) as i32) >> h.trailing_zeros()),
+        (false, true) => clip1((above_sum + (w >> 1) as i32) >> w.trailing_zeros()),
         (false, false) => 1_u16 << (bit_depth - 1),
     }
 }
@@ -326,5 +415,66 @@ mod tests {
     fn slanted_directional_modes_are_unsupported_for_now() {
         let n = neighbours([100; 8], [100; 8], 100);
         assert!(predict_intra_4x4(IntraMode::D45, &n, 8).is_err());
+    }
+
+    #[test]
+    fn dc_averages_both_edges_at_a_rectangular_size() {
+        // 8 wide, 4 tall. Above all 100 (8 samples), left all 60 (4 samples):
+        // sum = 800 + 240 + ((8+4)>>1) = 1046; avg = 1046 / 12 = 87.
+        let above = [100; 8];
+        let left = [60; 8];
+        let b = PredBlock {
+            above: &above,
+            left: &left,
+            corner: 100,
+            have_above: true,
+            have_left: true,
+            w: 8,
+            h: 4,
+        };
+        let pred = predict_intra_block(IntraMode::Dc, &b, 8).unwrap();
+        assert_eq!(pred.len(), 32);
+        assert!(pred.iter().all(|&v| v == 87));
+    }
+
+    #[test]
+    fn smooth_of_a_flat_edge_is_that_value_at_8x8() {
+        let above = [128; 8];
+        let left = [128; 8];
+        for mode in [IntraMode::Smooth, IntraMode::SmoothV, IntraMode::SmoothH] {
+            let b = PredBlock {
+                above: &above,
+                left: &left,
+                corner: 128,
+                have_above: true,
+                have_left: true,
+                w: 8,
+                h: 8,
+            };
+            let pred = predict_intra_block(mode, &b, 8).unwrap();
+            assert_eq!(pred.len(), 64);
+            assert!(pred.iter().all(|&v| v == 128), "mode {mode:?}");
+        }
+    }
+
+    #[test]
+    fn v_copies_the_above_row_at_8x8() {
+        let above = [10, 20, 30, 40, 50, 60, 70, 80];
+        let left = [0; 8];
+        let b = PredBlock {
+            above: &above,
+            left: &left,
+            corner: 0,
+            have_above: true,
+            have_left: true,
+            w: 8,
+            h: 8,
+        };
+        let pred = predict_intra_block(IntraMode::V, &b, 8).unwrap();
+        // Every one of the 8 rows repeats the above row.
+        let expected: [u16; 8] = [10, 20, 30, 40, 50, 60, 70, 80];
+        for row in pred.chunks(8) {
+            assert_eq!(row, &expected[..]);
+        }
     }
 }

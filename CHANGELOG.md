@@ -69,6 +69,14 @@ versioning: [SemVer](https://semver.org/).
   read the tables.
 
 ### Added
+- `otf-pixels-codec-avif` generalizes the non-edge-filtered intra predictors to
+  any transform size. `predict_intra_block` runs DC (§7.11.2.5), Paeth
+  (§7.11.2.2), the three Smooth variants (§7.11.2.6, with the full
+  `Sm_Weights_Tx_4x4..64x64` tables selected per side length), and the
+  axis-aligned V/H copies over a `w x h` block, and `predict_intra_4x4` is now a
+  thin wrapper over it. The lossless 4x4 tile drives the general path and stays
+  bit-exact against libavif on every fixture. The slanted directional modes
+  still need the edge-filter machinery and report `unsupported`.
 - `otf-pixels-codec-avif` gains the intra transform-size decode: `read_tx_size`
   (§5.11.15) resolves a coding block's luma transform size — lossless forces
   `TX_4X4`, otherwise the size starts at `Max_Tx_Size_Rect` and, under
