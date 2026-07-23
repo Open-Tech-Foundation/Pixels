@@ -69,6 +69,14 @@ versioning: [SemVer](https://semver.org/).
   read the tables.
 
 ### Added
+- `otf-pixels-codec-avif` gains the intra transform-type decode: `get_tx_set`
+  (which of `DCT_DCT`-only, the seven-type set 1, or the five-type set 2 a
+  transform of a given size uses), the `intra_tx_type` symbol read with its
+  size-and-direction CDFs mapped back through the inversion tables, and the
+  chroma derivation (`Mode_To_Txfm` gated by set membership, `compute_tx_type`).
+  A large or lossless transform stays `DCT_DCT` without consuming a symbol, so
+  the lossless path is unaffected. Exposed as a tested unit on the crate's AV1
+  surface ahead of wiring it into the tile coefficient path.
 - `otf-pixels-codec-avif` generalizes the coefficient decoder to every transform
   size and type, not just the 4x4 lossless corner. `decode_coeffs` now selects
   the `eob_pt` alphabet by size, walks the size-and-type-specific scan order

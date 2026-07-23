@@ -28,6 +28,7 @@ mod still;
 mod symbol;
 mod tile;
 mod transform;
+mod transform_type;
 
 pub use bits::{BitReader, floor_log2};
 pub use coeff::{CoeffBlock, CoeffCdfs, decode_coeffs};
@@ -45,6 +46,10 @@ pub use tile::{DecodedFrame, decode_still};
 pub use transform::{
     Dequant, Residual, TxSize, TxType, ac_q, add_residual_4x4, dc_q, dequantize,
     inverse_transform_2d,
+};
+pub use transform_type::{
+    IntraTxSet, IntraTxTypeCdfs, chroma_tx_type, intra_dir, intra_tx_set, is_tx_type_in_set_intra,
+    mode_to_txfm, read_transform_type,
 };
 
 #[cfg(test)]
