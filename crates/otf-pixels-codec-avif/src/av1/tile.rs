@@ -17,16 +17,17 @@
 use super::cdf;
 use super::coeff::{CoeffCdfs, TxTypeCtx, decode_coeffs};
 use super::direction::{
-    ANGLE_STEP, Edge, mode_base_angle, predict_directional_4x4, predict_filter_intra_4x4,
+    ANGLE_STEP, Edge, mode_base_angle, predict_directional, predict_filter_intra,
 };
-use super::frame::FrameHeader;
+use super::frame::{FrameHeader, TxMode};
 use super::palette::{PALETTE_COLORS, color_context, palette_cache};
 use super::plane::Plane;
-use super::predict::{IntraMode, Neighbours, predict_intra_4x4};
+use super::predict::{IntraMode, PredBlock, predict_intra_block};
 use super::seq::SequenceHeader;
 use super::symbol::SymbolDecoder;
-use super::transform::{TxSize, ac_q, add_residual_4x4, dc_q, dequantize, inverse_transform_2d};
+use super::transform::{TxSize, ac_q, add_residual, dc_q, dequantize, inverse_transform_2d};
 use super::transform_type::{IntraTxTypeCdfs, intra_dir, intra_tx_set};
+use super::tx_size::{TxDepthCdfs, TxSizeParams, max_tx_size_rect, read_tx_size};
 use otf_pixels_core::{PixelsError, Result};
 
 /// `MI_SIZE` (§3): the side of the smallest coded block, in samples.
@@ -72,9 +73,19 @@ pub fn decode_still(
     frame: &FrameHeader,
     tile_data: &[u8],
 ) -> Result<DecodedFrame> {
+    // Lossless, or lossy with every in-loop filter disabled: our reconstruct is
+    // filter-free, so a frame with deblock, CDEF, loop restoration, superres or
+    // film grain active would be reproduced wrongly. The reconstruct path is
+    // generalized to every transform size, but the lossy coefficient decode for
+    // transforms larger than 4x4 still has a symbol desync under investigation,
+    // so lossy frames are rejected rather than decoded to a wrong image. The
+    // 4x4-transform lossy path is bit-exact; the gate lifts once larger
+    // transforms are too.
     if !frame.coded_lossless {
         return Err(PixelsError::unsupported(
-            "avif: only the lossless intra path is implemented",
+            "avif: only the lossless intra path is implemented (lossy reconstruct \
+             is generalized but its larger-transform coefficient decode is not yet \
+             bit-exact)",
         ));
     }
     if seq.color.subsampling_x != 0 || seq.color.subsampling_y != 0 {
@@ -127,6 +138,7 @@ struct FrameCdfs {
     cfl_alpha: [[u16; 17]; 6],
     coeff: CoeffCdfs,
     intra_tx_type: IntraTxTypeCdfs,
+    tx_depth: TxDepthCdfs,
 }
 
 /// The seven palette colour-index CDFs, one per palette size 2..=8.
@@ -196,6 +208,7 @@ impl FrameCdfs {
             cfl_alpha: cdf::DEFAULT_CFL_ALPHA_CDF,
             coeff: CoeffCdfs::new(qctx),
             intra_tx_type: IntraTxTypeCdfs::new(),
+            tx_depth: TxDepthCdfs::new(),
         }
     }
 }
@@ -225,6 +238,18 @@ struct TileState {
     /// Whether `base_q_idx > 0`. `false` is the lossless path, where every block
     /// is `DCT_DCT` and no `intra_tx_type` symbol is read.
     qindex_positive: bool,
+    /// Whether the frame is coded losslessly (drives the inverse transform's
+    /// `Lossless` flag).
+    lossless: bool,
+    /// The frame transform mode (`ONLY_4X4` / `LARGEST` / `SELECT`).
+    tx_mode: TxMode,
+    /// Per-plane DC quantiser index (`base_q_idx + delta`, unclamped).
+    q_dc: [i32; 3],
+    /// Per-plane AC quantiser index.
+    q_ac: [i32; 3],
+    /// `InterTxSizes[r][c]`: the luma transform size (a `TxSize` index) chosen
+    /// for each 4x4 unit, for the `tx_depth` neighbour context under `SELECT`.
+    tx_sizes: Vec<u8>,
     sb_size4: usize,
     /// `BlockDecoded[plane]`, one flat `(sb+2) x (sb+2)` grid per plane, reset
     /// per superblock; addressed with a one-unit border so index -1 is valid.
@@ -269,10 +294,19 @@ impl TileState {
         let block_decoded = (0..num_planes)
             .map(|_| vec![0; bd_stride * bd_stride])
             .collect();
-        // Lossless frames have base_q_idx == 0, so the quantiser context is 0.
+        // The coefficient-CDF quantiser context (`get_qctx`, §8.3.2): base_q_idx
+        // <=20 -> 0, <=60 -> 1, <=120 -> 2, else 3. Lossless (0) is 0.
+        let base_q = i32::from(frame.quantization.base_q_idx);
+        let qctx = match base_q {
+            0..=20 => 0,
+            21..=60 => 1,
+            61..=120 => 2,
+            _ => 3,
+        };
+        let q = &frame.quantization;
         Ok(Self {
             planes,
-            cdfs: FrameCdfs::new(0),
+            cdfs: FrameCdfs::new(qctx),
             bit_depth: seq.color.bit_depth,
             num_planes,
             mi_cols,
@@ -282,6 +316,15 @@ impl TileState {
             allow_screen_content: frame.allow_screen_content_tools,
             reduced_tx_set: frame.reduced_tx_set,
             qindex_positive: frame.quantization.base_q_idx > 0,
+            lossless: frame.coded_lossless,
+            tx_mode: frame.tx_mode,
+            q_dc: [
+                base_q + q.delta_q_y_dc,
+                base_q + q.delta_q_u_dc,
+                base_q + q.delta_q_v_dc,
+            ],
+            q_ac: [base_q, base_q + q.delta_q_u_ac, base_q + q.delta_q_v_ac],
+            tx_sizes: vec![0; mi_cols * mi_rows],
             sb_size4,
             block_decoded,
             y_modes: vec![0; mi_cols * mi_rows],
@@ -645,11 +688,16 @@ impl TileState {
             self.read_palette_tokens(dec, &mut palette)?;
         }
 
+        // read_block_tx_size (§5.11.16): the luma transform size for the block.
+        // Under TX_MODE_SELECT this reads a `tx_depth` symbol, so it must run
+        // before residual and after mode info.
+        let luma_tx_size = self.read_block_tx_size(dec, r, c, bw4, bh4, skip)?;
+
         if skip {
             self.reset_block_context(r, c, bw4, bh4);
         }
 
-        // --- residual: every plane, every 4x4 transform block ---
+        // --- residual: every plane, every transform block ---
         let modes = BlockModes {
             r,
             c,
@@ -662,6 +710,7 @@ impl TileState {
             filter_intra,
             cfl,
             palette,
+            luma_tx_size,
         };
         self.residual(dec, &modes, bw4, bh4, skip, has_chroma)?;
         Ok(())
@@ -1024,6 +1073,58 @@ impl TileState {
         Ok(None)
     }
 
+    /// `read_block_tx_size` (§5.11.16) for an intra block: resolve the luma
+    /// transform size and record it across the block's 4x4 units for the
+    /// `tx_depth` neighbour context. Intra frames have `is_inter == 0`, so the
+    /// selection gate is always open.
+    fn read_block_tx_size(
+        &mut self,
+        dec: &mut SymbolDecoder<'_>,
+        r: usize,
+        c: usize,
+        bw4: usize,
+        bh4: usize,
+        _skip: bool,
+    ) -> Result<TxSize> {
+        let above_w = if r > 0 { self.tx_width_at(r - 1, c) } else { 0 };
+        let left_h = if c > 0 {
+            self.tx_height_at(r, c - 1)
+        } else {
+            0
+        };
+        let params = TxSizeParams {
+            block: block_size_index(bw4, bh4),
+            tx_mode_select: self.tx_mode == TxMode::Select,
+            lossless: self.lossless,
+            allow_select: true,
+            above_w,
+            left_h,
+        };
+        let tx = read_tx_size(dec, &mut self.cdfs.tx_depth, &params)?;
+        for y in r..(r + bh4).min(self.mi_rows) {
+            for x in c..(c + bw4).min(self.mi_cols) {
+                if let Some(v) = self.tx_sizes.get_mut(y * self.mi_cols + x) {
+                    *v = tx as u8;
+                }
+            }
+        }
+        Ok(tx)
+    }
+
+    /// `Tx_Width[InterTxSizes[r][c]]`: the stored luma transform width at a unit.
+    fn tx_width_at(&self, r: usize, c: usize) -> usize {
+        self.tx_sizes
+            .get(r * self.mi_cols + c)
+            .map_or(0, |&i| TxSize::from_index(usize::from(i)).width())
+    }
+
+    /// `Tx_Height[InterTxSizes[r][c]]`: the stored luma transform height.
+    fn tx_height_at(&self, r: usize, c: usize) -> usize {
+        self.tx_sizes
+            .get(r * self.mi_cols + c)
+            .map_or(0, |&i| TxSize::from_index(usize::from(i)).height())
+    }
+
     fn residual(
         &mut self,
         dec: &mut SymbolDecoder<'_>,
@@ -1036,6 +1137,7 @@ impl TileState {
         let planes = if has_chroma { self.num_planes } else { 1 };
         let base_x = modes.c * MI_SIZE;
         let base_y = modes.r * MI_SIZE;
+        let block = block_size_index(bw4, bh4);
         for plane in 0..planes {
             // A CfL chroma block predicts from DC and then adds the scaled luma.
             let cfl_alpha = if plane == 1 {
@@ -1063,8 +1165,22 @@ impl TileState {
             // Palette-coded plane: luma uses ColorMapY + colors_y; chroma uses
             // ColorMapUV + colors_u (U) or colors_v (V).
             let palette = self.palette_view_for(&modes.palette, plane, base_x, base_y);
-            for ty in 0..bh4 {
-                for tx in 0..bw4 {
+            // The plane's transform size: lossless forces TX_4X4 for every plane
+            // (the WHT is 4x4 only); otherwise luma is the read block size and
+            // chroma (4:4:4) is the block's largest rectangular transform.
+            let tx_size = if self.lossless {
+                TxSize::Tx4x4
+            } else if plane == 0 {
+                modes.luma_tx_size
+            } else {
+                chroma_tx_size(block)
+            };
+            let step_x = (tx_size.width() / MI_SIZE).max(1);
+            let step_y = (tx_size.height() / MI_SIZE).max(1);
+            let mut ty = 0;
+            while ty < bh4 {
+                let mut tx = 0;
+                while tx < bw4 {
                     let x = base_x + tx * MI_SIZE;
                     let y = base_y + ty * MI_SIZE;
                     let have_left = modes.avail_l || tx > 0;
@@ -1075,6 +1191,7 @@ impl TileState {
                         plane,
                         x,
                         y,
+                        tx_size,
                         mode: intra,
                         mode_index: mode,
                         angle_delta: delta,
@@ -1089,7 +1206,9 @@ impl TileState {
                         bh4,
                     };
                     self.transform_block(dec, &tb)?;
+                    tx += step_x;
                 }
+                ty += step_y;
             }
         }
         Ok(())
@@ -1158,7 +1277,11 @@ impl TileState {
     }
 
     fn transform_block(&mut self, dec: &mut SymbolDecoder<'_>, tb: &TxBlock) -> Result<()> {
-        let (plane, x, y, bw4, bh4, skip) = (tb.plane, tb.x, tb.y, tb.bw4, tb.bh4, tb.skip);
+        let (plane, x, y, tx_size, skip) = (tb.plane, tb.x, tb.y, tb.tx_size, tb.skip);
+        let w = tx_size.width();
+        let h = tx_size.height();
+        let w4 = (w / MI_SIZE).max(1);
+        let h4 = (h / MI_SIZE).max(1);
 
         // A transform block whose top-left lies outside the frame is not coded:
         // the block may extend past the right or bottom edge, but only the tx
@@ -1173,22 +1296,21 @@ impl TileState {
         }
 
         // Predict from the reconstructed neighbours.
-        let prediction = self.predict(tb)?;
+        let prediction = self.predict(tb, w, h)?;
 
         let x4 = x / MI_SIZE;
         let y4 = y / MI_SIZE;
         let final_block = if skip {
             prediction
         } else {
-            let all_zero_ctx = self.all_zero_ctx(plane, x4, y4, bw4, bh4);
-            let dc_sign_ctx = self.dc_sign_ctx(plane, x4, y4);
+            let all_zero_ctx = self.all_zero_ctx(plane, x4, y4, w4, h4, tx_size, tb.bw4, tb.bh4);
+            let dc_sign_ctx = self.dc_sign_ctx(plane, x4, y4, w4, h4);
             let ptype = usize::from(plane > 0);
             // Resolve the block's PlaneTxType inside decode_coeffs, at the spec
             // position between all_zero and eob_pt. Luma reads the intra_tx_type
-            // symbol against these contexts; chroma derives from its mode. In
-            // the lossless path qindex_positive is false, so no symbol is read
-            // and the type stays DCT_DCT.
-            let tx_set = intra_tx_set(TxSize::Tx4x4, self.reduced_tx_set);
+            // symbol against these contexts; chroma derives from its mode. When
+            // qindex is 0 (lossless) no symbol is read and the type is DCT_DCT.
+            let tx_set = intra_tx_set(tx_size, self.reduced_tx_set);
             let dir = if plane == 0 {
                 intra_dir(tb.mode_index, tb.filter_intra)
             } else {
@@ -1205,120 +1327,142 @@ impl TileState {
             let block = decode_coeffs(
                 dec,
                 &mut self.cdfs.coeff,
-                TxSize::Tx4x4,
+                tx_size,
                 tx_ctx,
                 ptype,
                 all_zero_ctx,
                 dc_sign_ctx,
             )?;
-            self.update_level_context(plane, x4, y4, block.cul_level, block.dc_category);
+            self.update_level_context(plane, x4, y4, w4, h4, block.cul_level, block.dc_category);
             if block.eob > 0 {
-                // Lossless is qindex 0: dc_q == ac_q == 4 and dqDenom == 1, so
-                // dequantise is a plain "times 4" and the WHT divides it back
-                // out. Routing it through the general transform driver keeps the
-                // path bit-exact while sharing the lossy machinery.
-                let dc = dc_q(self.bit_depth, 0);
-                let ac = ac_q(self.bit_depth, 0);
-                let dequant = dequantize(&block.quant, TxSize::Tx4x4, dc, ac, self.bit_depth);
+                let dc = dc_q(self.bit_depth, self.q_dc.get(plane).copied().unwrap_or(0));
+                let ac = ac_q(self.bit_depth, self.q_ac.get(plane).copied().unwrap_or(0));
+                let dequant = dequantize(&block.quant, tx_size, dc, ac, self.bit_depth);
                 let residual = inverse_transform_2d(
                     &dequant,
-                    TxSize::Tx4x4,
+                    tx_size,
                     block.tx_type,
-                    true,
+                    self.lossless,
                     self.bit_depth,
                 );
-                add_residual_4x4(&prediction, &residual, self.bit_depth)
+                add_residual(&prediction, &residual, block.tx_type, self.bit_depth)
             } else {
                 prediction
             }
         };
 
         if let Some(p) = self.planes.get_mut(plane) {
-            for (i, row) in final_block.iter().enumerate() {
-                for (j, &value) in row.iter().enumerate() {
+            for i in 0..h {
+                for j in 0..w {
+                    let value = final_block.get(i * w + j).copied().unwrap_or(0);
                     p.set(x + j, y + i, value);
                 }
             }
         }
 
-        // Mark this 4x4 unit decoded for the neighbour-availability tests.
+        // Mark the tx block's 4x4 units decoded for the neighbour tests.
         let mask = (self.sb_size4 - 1) as isize;
-        let sub_row = (y4 as isize) & mask;
-        let sub_col = (x4 as isize) & mask;
-        self.set_block_decoded(plane, sub_row, sub_col);
+        for dy in 0..h4 {
+            for dx in 0..w4 {
+                let sub_row = ((y4 + dy) as isize) & mask;
+                let sub_col = ((x4 + dx) as isize) & mask;
+                self.set_block_decoded(plane, sub_row, sub_col);
+            }
+        }
         Ok(())
     }
 
-    /// Predict a 4x4 transform block: directional modes go through the edge
-    /// machinery, the rest through the pure non-directional predictors.
-    fn predict(&self, tb: &TxBlock) -> Result<[[u16; 4]; 4]> {
+    /// Predict a `w` by `h` transform block: directional modes go through the
+    /// edge machinery, the rest through the pure non-directional predictors. The
+    /// result is `w * h` samples in row-major order.
+    fn predict(&self, tb: &TxBlock, w: usize, h: usize) -> Result<Vec<u16>> {
         if let Some(pv) = tb.palette {
             // predict_palette (§7.11.4): each sample is the palette colour its
             // index map selects. The map is block-relative.
-            let mut pred = [[0_u16; 4]; 4];
-            for (i, row) in pred.iter_mut().enumerate() {
-                for (j, cell) in row.iter_mut().enumerate() {
+            let mut pred = vec![0_u16; w * h];
+            for i in 0..h {
+                for j in 0..w {
                     let my = (tb.y + i).saturating_sub(pv.base_y);
                     let mx = (tb.x + j).saturating_sub(pv.base_x);
                     let idx = pv.map.get(my * pv.block_w + mx).copied().unwrap_or(0);
-                    *cell = pv.colors.get(usize::from(idx)).copied().unwrap_or(0);
+                    if let Some(cell) = pred.get_mut(i * w + j) {
+                        *cell = pv.colors.get(usize::from(idx)).copied().unwrap_or(0);
+                    }
                 }
             }
             return Ok(pred);
         }
         if let Some(filter_mode) = tb.filter_intra {
-            let (above, left) = self.gather_edges(tb);
-            return Ok(predict_filter_intra_4x4(
+            let (above, left) = self.gather_edges(tb, w, h);
+            return Ok(predict_filter_intra(
                 filter_mode,
                 &above,
                 &left,
+                w,
+                h,
                 self.bit_depth,
             ));
         }
         if let Some(base_angle) = mode_base_angle(tb.mode_index) {
             let p_angle = base_angle + tb.angle_delta * ANGLE_STEP;
             if p_angle != 90 && p_angle != 180 {
-                return Ok(self.predict_directional(tb, p_angle));
+                return Ok(self.predict_directional(tb, p_angle, w, h));
             }
         }
-        let neighbours = self.gather_neighbours(tb.plane, tb.x, tb.y, tb.have_left, tb.have_above);
-        let mut pred = predict_intra_4x4(tb.mode, &neighbours, self.bit_depth)?;
+        let (above, left, corner, have_above, have_left) =
+            self.gather_neighbours(tb.plane, tb.x, tb.y, tb.have_left, tb.have_above, w, h);
+        let block = PredBlock {
+            above: &above,
+            left: &left,
+            corner,
+            have_above,
+            have_left,
+            w,
+            h,
+        };
+        let mut pred = predict_intra_block(tb.mode, &block, self.bit_depth)?;
         if let Some(alpha) = tb.cfl_alpha {
-            self.apply_cfl(&mut pred, tb.x, tb.y, alpha);
+            self.apply_cfl(&mut pred, tb.x, tb.y, w, h, alpha);
         }
         Ok(pred)
     }
 
-    /// `predict_chroma_from_luma` (§7.11.5) for a 4x4 4:4:4 block: add the
+    /// `predict_chroma_from_luma` (§7.11.5) for a `w` by `h` 4:4:4 block: add the
     /// alpha-scaled, DC-removed reconstructed luma to the DC chroma prediction.
-    fn apply_cfl(&self, pred: &mut [[u16; 4]; 4], x: usize, y: usize, alpha: i32) {
+    fn apply_cfl(&self, pred: &mut [u16], x: usize, y: usize, w: usize, h: usize, alpha: i32) {
         let max = (1_i32 << self.bit_depth) - 1;
         let luma = self.planes.first();
         // L holds the co-located luma with 3 fractional bits (no subsampling).
-        let mut l = [[0_i32; 4]; 4];
+        let mut l = vec![0_i32; w * h];
         let mut sum = 0_i32;
-        for (i, row) in l.iter_mut().enumerate() {
-            for (j, cell) in row.iter_mut().enumerate() {
+        for i in 0..h {
+            for j in 0..w {
                 let v = i32::from(luma.and_then(|p| p.get(x + j, y + i)).unwrap_or(0)) << 3;
-                *cell = v;
+                if let Some(cell) = l.get_mut(i * w + j) {
+                    *cell = v;
+                }
                 sum += v;
             }
         }
-        // lumaAvg = Round2(sum, log2W + log2H) = Round2(sum, 4) for 4x4.
-        let luma_avg = (sum + 8) >> 4;
-        for (i, row) in pred.iter_mut().enumerate() {
-            for (j, cell) in row.iter_mut().enumerate() {
-                let ac = l.get(i).and_then(|r| r.get(j)).copied().unwrap_or(0) - luma_avg;
+        // lumaAvg = Round2(sum, log2W + log2H).
+        let shift = w.trailing_zeros() + h.trailing_zeros();
+        let luma_avg = (sum + (1 << (shift - 1))) >> shift;
+        for i in 0..h {
+            for j in 0..w {
+                let ac = l.get(i * w + j).copied().unwrap_or(0) - luma_avg;
                 let scaled = round2_signed(alpha * ac, 6);
-                *cell = (i32::from(*cell) + scaled).clamp(0, max) as u16;
+                if let Some(cell) = pred.get_mut(i * w + j) {
+                    *cell = (i32::from(*cell) + scaled).clamp(0, max) as u16;
+                }
             }
         }
     }
 
-    /// Build the extended `AboveRow`/`LeftCol` edge arrays for a 4x4 block
-    /// (§7.11.2 general), with the `haveAboveRight`/`haveBelowLeft` extension
-    /// from `BlockDecoded`. Shared by the directional and filter-intra paths.
-    fn gather_edges(&self, tb: &TxBlock) -> (Edge, Edge) {
+    /// Build the extended `AboveRow`/`LeftCol` edge arrays for a `w` by `h`
+    /// block (§7.11.2 general), with the `haveAboveRight`/`haveBelowLeft`
+    /// extension from `BlockDecoded`. The same edge serves every prediction mode;
+    /// the non-directional modes simply never read past index `w`/`h`.
+    fn gather_edges(&self, tb: &TxBlock, w: usize, h: usize) -> (Edge, Edge) {
         let (plane, x, y) = (tb.plane, tb.x, tb.y);
         let mid = 1_i32 << (self.bit_depth - 1);
         let p = self.planes.get(plane);
@@ -1330,42 +1474,48 @@ impl TileState {
 
         let x4 = x / MI_SIZE;
         let y4 = y / MI_SIZE;
+        let w4 = (w / MI_SIZE).max(1);
+        let h4 = (h / MI_SIZE).max(1);
         let mask = (self.sb_size4 - 1) as isize;
         let sub_row = (y4 as isize) & mask;
         let sub_col = (x4 as isize) & mask;
-        let have_above_right = self.block_decoded_at(plane, sub_row - 1, sub_col + 1);
-        let have_below_left = self.block_decoded_at(plane, sub_row + 1, sub_col - 1);
+        let have_above_right = self.block_decoded_at(plane, sub_row - 1, sub_col + w4 as isize);
+        let have_below_left = self.block_decoded_at(plane, sub_row + h4 as isize, sub_col - 1);
 
         let mut above = Edge::new();
         let mut left = Edge::new();
-        // AboveRow[0..w+h-1]; w = h = 4 so eight entries.
+        let num = (w + h) as isize;
+        // AboveRow[0..w+h-1].
         if tb.have_above {
-            let above_limit = (x + (if have_above_right { 8 } else { 4 }) - 1).min(max_x);
-            for i in 0..8 {
+            let extent = if have_above_right { 2 * w } else { w };
+            let above_limit = (x + extent - 1).min(max_x);
+            for i in 0..num {
                 above.set(i, at((x + i as usize).min(above_limit), y.wrapping_sub(1)));
             }
         } else if tb.have_left {
             let v = at(x.wrapping_sub(1), y);
-            for i in 0..8 {
+            for i in 0..num {
                 above.set(i, v);
             }
         } else {
-            for i in 0..8 {
+            for i in 0..num {
                 above.set(i, mid - 1);
             }
         }
+        // LeftCol[0..w+h-1].
         if tb.have_left {
-            let left_limit = (y + (if have_below_left { 8 } else { 4 }) - 1).min(max_y);
-            for i in 0..8 {
+            let extent = if have_below_left { 2 * h } else { h };
+            let left_limit = (y + extent - 1).min(max_y);
+            for i in 0..num {
                 left.set(i, at(x.wrapping_sub(1), (y + i as usize).min(left_limit)));
             }
         } else if tb.have_above {
             let v = at(x, y.wrapping_sub(1));
-            for i in 0..8 {
+            for i in 0..num {
                 left.set(i, v);
             }
         } else {
-            for i in 0..8 {
+            for i in 0..num {
                 left.set(i, mid + 1);
             }
         }
@@ -1380,19 +1530,22 @@ impl TileState {
         (above, left)
     }
 
-    /// Slanted directional prediction (§7.11.2.4).
-    fn predict_directional(&self, tb: &TxBlock, p_angle: i32) -> [[u16; 4]; 4] {
+    /// Slanted directional prediction (§7.11.2.4) at any size, returned as `w * h`
+    /// row-major samples.
+    fn predict_directional(&self, tb: &TxBlock, p_angle: i32, w: usize, h: usize) -> Vec<u16> {
         let (x, y) = (tb.x, tb.y);
-        let (mut above, mut left) = self.gather_edges(tb);
+        let (mut above, mut left) = self.gather_edges(tb, w, h);
         let (max_x, max_y) = self.planes.get(tb.plane).map_or((0, 0), |pl| {
             (pl.width().saturating_sub(1), pl.height().saturating_sub(1))
         });
         let avail_above_px = (max_x as i32) - (x as i32) + 1;
         let avail_left_px = (max_y as i32) - (y as i32) + 1;
-        predict_directional_4x4(
+        predict_directional(
             p_angle,
             &mut above,
             &mut left,
+            w,
+            h,
             tb.have_left,
             tb.have_above,
             tb.filter_type,
@@ -1403,9 +1556,9 @@ impl TileState {
         )
     }
 
-    /// Build the `AboveRow`/`LeftCol` neighbour arrays for a 4x4 block
-    /// (§7.11.2 general). `haveAboveRight`/`haveBelowLeft` are taken as false,
-    /// which the non-directional modes do not observe.
+    /// Extract the `AboveRow[0..w]`, `LeftCol[0..h]` and corner from the edge
+    /// arrays as the non-directional predictors consume them.
+    #[allow(clippy::too_many_arguments, reason = "mirrors the §7.11.2 edge inputs")]
     fn gather_neighbours(
         &self,
         plane: usize,
@@ -1413,73 +1566,74 @@ impl TileState {
         y: usize,
         have_left: bool,
         have_above: bool,
-    ) -> Neighbours {
-        let mid = 1_i32 << (self.bit_depth - 1);
-        let p = self.planes.get(plane);
-        let at =
-            |px: usize, py: usize| -> i32 { p.and_then(|pl| pl.get(px, py)).map_or(0, i32::from) };
-        let (max_x, max_y) = p.map_or((0, 0), |pl| {
-            (pl.width().saturating_sub(1), pl.height().saturating_sub(1))
-        });
-
-        let mut above = [0_i32; 8];
-        let mut left = [0_i32; 8];
-
-        if have_above {
-            let above_limit = (x + 4 - 1).min(max_x);
-            for (i, slot) in above.iter_mut().enumerate() {
-                *slot = at((x + i).min(above_limit), y - 1);
-            }
-        } else if have_left {
-            above = [at(x - 1, y); 8];
-        } else {
-            above = [mid - 1; 8];
-        }
-
-        if have_left {
-            let left_limit = (y + 4 - 1).min(max_y);
-            for (i, slot) in left.iter_mut().enumerate() {
-                *slot = at(x - 1, (y + i).min(left_limit));
-            }
-        } else if have_above {
-            left = [at(x, y - 1); 8];
-        } else {
-            left = [mid + 1; 8];
-        }
-
-        let corner = match (have_above, have_left) {
-            (true, true) => at(x - 1, y - 1),
-            (true, false) => at(x, y - 1),
-            (false, true) => at(x - 1, y),
-            (false, false) => mid,
-        };
-
-        Neighbours {
-            above,
-            left,
-            corner,
-            have_above,
+        w: usize,
+        h: usize,
+    ) -> (Vec<i32>, Vec<i32>, i32, bool, bool) {
+        let tb = TxBlock {
+            plane,
+            x,
+            y,
+            tx_size: TxSize::Tx4x4,
+            mode: IntraMode::Dc,
+            mode_index: 0,
+            angle_delta: 0,
             have_left,
-        }
+            have_above,
+            filter_type: false,
+            filter_intra: None,
+            cfl_alpha: None,
+            palette: None,
+            skip: false,
+            bw4: 0,
+            bh4: 0,
+        };
+        let (above_edge, left_edge) = self.gather_edges(&tb, w, h);
+        let above: Vec<i32> = (0..w as isize).map(|j| above_edge.get(j)).collect();
+        let left: Vec<i32> = (0..h as isize).map(|i| left_edge.get(i)).collect();
+        (above, left, above_edge.get(-1), have_above, have_left)
     }
 
-    /// `all_zero` context (§8.3.2). A block whose coding size equals the 4x4
-    /// transform is context 0 for luma; otherwise the neighbour level contexts
-    /// select it. `bw4`/`bh4` are the coding block's size in 4x4 units (equal to
-    /// the chroma residual size in 4:4:4).
-    fn all_zero_ctx(&self, plane: usize, x4: usize, y4: usize, bw4: usize, bh4: usize) -> usize {
+    /// `all_zero` context (§8.3.2) for a `w4` by `h4` (4x4 units) transform block.
+    /// A block whose coding size equals the transform is context 0 for luma;
+    /// otherwise the neighbour level contexts over the block's span select it.
+    /// `bw4`/`bh4` are the coding block's size in 4x4 units.
+    #[allow(clippy::too_many_arguments, reason = "mirrors the §8.3.2 ctx inputs")]
+    fn all_zero_ctx(
+        &self,
+        plane: usize,
+        x4: usize,
+        y4: usize,
+        w4: usize,
+        h4: usize,
+        tx_size: TxSize,
+        bw4: usize,
+        bh4: usize,
+    ) -> usize {
         let Some(ctx) = self.ctx.get(plane) else {
             return 0;
         };
+        // 4:4:4: maxX4/maxY4 are the frame's mode-info dimensions.
+        let (max_x4, max_y4) = (self.mi_cols, self.mi_rows);
+        let w = tx_size.width();
+        let h = tx_size.height();
         if plane == 0 {
-            // bw == w and bh == h exactly when the coding block is 4x4.
-            if bw4 == 1 && bh4 == 1 {
-                return 0;
+            let mut top = 0_u32;
+            let mut left = 0_u32;
+            for k in 0..w4 {
+                if x4 + k < max_x4 {
+                    top = top.max(u32::from(ctx.above_level.get(x4 + k).copied().unwrap_or(0)));
+                }
             }
-            // Both are u8, so already within the spec's Min(_, 255).
-            let top = ctx.above_level.get(x4).copied().unwrap_or(0);
-            let left = ctx.left_level.get(y4).copied().unwrap_or(0);
-            if top == 0 && left == 0 {
+            for k in 0..h4 {
+                if y4 + k < max_y4 {
+                    left = left.max(u32::from(ctx.left_level.get(y4 + k).copied().unwrap_or(0)));
+                }
+            }
+            let top = top.min(255);
+            let left = left.min(255);
+            if bw4 * MI_SIZE == w && bh4 * MI_SIZE == h {
+                0
+            } else if top == 0 && left == 0 {
                 1
             } else if top == 0 || left == 0 {
                 2 + usize::from(top.max(left) > 3)
@@ -1491,34 +1645,52 @@ impl TileState {
                 6
             }
         } else {
-            let above = ctx.above_level.get(x4).copied().unwrap_or(0)
-                | ctx.above_dc.get(x4).copied().unwrap_or(0);
-            let left = ctx.left_level.get(y4).copied().unwrap_or(0)
-                | ctx.left_dc.get(y4).copied().unwrap_or(0);
+            let mut above = 0_u8;
+            let mut left = 0_u8;
+            for i in 0..w4 {
+                if x4 + i < max_x4 {
+                    above |= ctx.above_level.get(x4 + i).copied().unwrap_or(0);
+                    above |= ctx.above_dc.get(x4 + i).copied().unwrap_or(0);
+                }
+            }
+            for i in 0..h4 {
+                if y4 + i < max_y4 {
+                    left |= ctx.left_level.get(y4 + i).copied().unwrap_or(0);
+                    left |= ctx.left_dc.get(y4 + i).copied().unwrap_or(0);
+                }
+            }
             let mut c = 7 + usize::from(above != 0) + usize::from(left != 0);
-            // bw * bh > w * h whenever the chroma block is bigger than 4x4.
-            if bw4 * bh4 > 1 {
+            if bw4 * MI_SIZE * bh4 * MI_SIZE > w * h {
                 c += 3;
             }
             c
         }
     }
 
-    /// `dc_sign` context (§8.3.2).
-    fn dc_sign_ctx(&self, plane: usize, x4: usize, y4: usize) -> usize {
+    /// `dc_sign` context (§8.3.2) over a `w4` by `h4` transform block.
+    fn dc_sign_ctx(&self, plane: usize, x4: usize, y4: usize, w4: usize, h4: usize) -> usize {
         let Some(ctx) = self.ctx.get(plane) else {
             return 0;
         };
+        let (max_x4, max_y4) = (self.mi_cols, self.mi_rows);
         let mut dc_sign = 0_i32;
-        match ctx.above_dc.get(x4).copied().unwrap_or(0) {
-            1 => dc_sign -= 1,
-            2 => dc_sign += 1,
-            _ => {}
+        for k in 0..w4 {
+            if x4 + k < max_x4 {
+                match ctx.above_dc.get(x4 + k).copied().unwrap_or(0) {
+                    1 => dc_sign -= 1,
+                    2 => dc_sign += 1,
+                    _ => {}
+                }
+            }
         }
-        match ctx.left_dc.get(y4).copied().unwrap_or(0) {
-            1 => dc_sign -= 1,
-            2 => dc_sign += 1,
-            _ => {}
+        for k in 0..h4 {
+            if y4 + k < max_y4 {
+                match ctx.left_dc.get(y4 + k).copied().unwrap_or(0) {
+                    1 => dc_sign -= 1,
+                    2 => dc_sign += 1,
+                    _ => {}
+                }
+            }
         }
         if dc_sign < 0 {
             1
@@ -1529,19 +1701,35 @@ impl TileState {
         }
     }
 
-    fn update_level_context(&mut self, plane: usize, x4: usize, y4: usize, cul: u8, dc: u8) {
+    /// Spread the block's `culLevel`/`dcCategory` across the `w4` above columns
+    /// and `h4` left rows it covers (§7.12.3 / level-context update).
+    #[allow(clippy::too_many_arguments, reason = "one level entry per plane axis")]
+    fn update_level_context(
+        &mut self,
+        plane: usize,
+        x4: usize,
+        y4: usize,
+        w4: usize,
+        h4: usize,
+        cul: u8,
+        dc: u8,
+    ) {
         if let Some(ctx) = self.ctx.get_mut(plane) {
-            if let Some(v) = ctx.above_level.get_mut(x4) {
-                *v = cul;
+            for i in 0..w4 {
+                if let Some(v) = ctx.above_level.get_mut(x4 + i) {
+                    *v = cul;
+                }
+                if let Some(v) = ctx.above_dc.get_mut(x4 + i) {
+                    *v = dc;
+                }
             }
-            if let Some(v) = ctx.above_dc.get_mut(x4) {
-                *v = dc;
-            }
-            if let Some(v) = ctx.left_level.get_mut(y4) {
-                *v = cul;
-            }
-            if let Some(v) = ctx.left_dc.get_mut(y4) {
-                *v = dc;
+            for i in 0..h4 {
+                if let Some(v) = ctx.left_level.get_mut(y4 + i) {
+                    *v = cul;
+                }
+                if let Some(v) = ctx.left_dc.get_mut(y4 + i) {
+                    *v = dc;
+                }
             }
         }
     }
@@ -1668,6 +1856,8 @@ struct BlockModes {
     cfl: Option<(i32, i32)>,
     /// The block's palette state (sizes zero when unused).
     palette: Palette,
+    /// The luma transform size (`read_block_tx_size`); chroma derives its own.
+    luma_tx_size: TxSize,
 }
 
 /// One block's palette: the colours and the per-sample colour-index maps.
@@ -1692,11 +1882,13 @@ struct Palette {
     block_h: usize,
 }
 
-/// One 4x4 transform block's prediction inputs.
+/// One transform block's prediction inputs.
 struct TxBlock<'a> {
     plane: usize,
     x: usize,
     y: usize,
+    /// This transform block's size.
+    tx_size: TxSize,
     mode: IntraMode,
     mode_index: usize,
     angle_delta: i32,
@@ -1722,6 +1914,18 @@ struct PaletteView<'a> {
     block_w: usize,
     base_x: usize,
     base_y: usize,
+}
+
+/// `get_tx_size` for a chroma plane in 4:4:4 (`§5.11.16`): the block's largest
+/// rectangular transform, with any 64-sample side reduced to 32 (chroma codes
+/// no 64-wide/high transform).
+fn chroma_tx_size(block: usize) -> TxSize {
+    match max_tx_size_rect(block) {
+        TxSize::Tx64x64 | TxSize::Tx32x64 | TxSize::Tx64x32 => TxSize::Tx32x32,
+        TxSize::Tx16x64 => TxSize::Tx16x32,
+        TxSize::Tx64x16 => TxSize::Tx32x16,
+        other => other,
+    }
 }
 
 /// Flat index into a `BlockDecoded` grid with a one-unit border (origin at

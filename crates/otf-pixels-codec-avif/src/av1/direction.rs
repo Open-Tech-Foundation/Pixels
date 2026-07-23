@@ -225,7 +225,9 @@ pub fn predict_directional(
 }
 
 /// Predict a 4x4 directional block (§7.11.2.4): a thin wrapper over the
-/// size-general [`predict_directional`], reshaping the flat result.
+/// size-general [`predict_directional`], reshaping the flat result. Retained for
+/// the unit tests; the tile drives the general path directly.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments, reason = "mirrors the §7.11.2.4 inputs")]
 #[must_use]
 pub fn predict_directional_4x4(
@@ -394,6 +396,8 @@ pub fn predict_filter_intra(
 
 /// Recursive filter-intra prediction for a 4x4 block (§7.11.2.3): a thin wrapper
 /// over the size-general [`predict_filter_intra`], reshaping the flat result.
+/// Retained for the unit tests; the tile drives the general path directly.
+#[cfg(test)]
 #[must_use]
 pub fn predict_filter_intra_4x4(
     filter_mode: usize,

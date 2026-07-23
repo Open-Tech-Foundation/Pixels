@@ -578,7 +578,37 @@ mod dsp {
         0, 1, 2, 3, 3, 5, 6, 7, 8, 9, 10, 3, 3, 13, 14, 15, 16, 9, 10,
     ];
 
+    /// All 19 transform sizes in `TX_SIZES_ALL` order, for index conversion.
+    const ALL_TX_SIZES: [TxSize; 19] = [
+        TxSize::Tx4x4,
+        TxSize::Tx8x8,
+        TxSize::Tx16x16,
+        TxSize::Tx32x32,
+        TxSize::Tx64x64,
+        TxSize::Tx4x8,
+        TxSize::Tx8x4,
+        TxSize::Tx8x16,
+        TxSize::Tx16x8,
+        TxSize::Tx16x32,
+        TxSize::Tx32x16,
+        TxSize::Tx32x64,
+        TxSize::Tx64x32,
+        TxSize::Tx4x16,
+        TxSize::Tx16x4,
+        TxSize::Tx8x32,
+        TxSize::Tx32x8,
+        TxSize::Tx16x64,
+        TxSize::Tx64x16,
+    ];
+
     impl TxSize {
+        /// The transform size for a `TX_SIZES_ALL` index, or `TX_4X4` if out of
+        /// range. Inverse of `self as usize`.
+        #[must_use]
+        pub fn from_index(index: usize) -> TxSize {
+            ALL_TX_SIZES.get(index).copied().unwrap_or(TxSize::Tx4x4)
+        }
+
         /// `Tx_Width_Log2[txSz]`.
         #[must_use]
         pub fn log2_width(self) -> u32 {

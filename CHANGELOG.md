@@ -68,6 +68,20 @@ versioning: [SemVer](https://semver.org/).
   generated-and-diffed approach exists to make visible, once something actually
   read the tables.
 
+### Changed
+- `otf-pixels-codec-avif` generalizes the AV1 tile reconstruct to arbitrary
+  transform sizes and non-zero quantisers. The residual loop now reads a
+  per-block luma transform size (`read_block_tx_size`, §5.11.16) and steps the
+  transform blocks by it, chroma derives its own size, and the coefficient
+  contexts (`all_zero`, `dc_sign`, level spread), the prediction edge/neighbour
+  assembly, chroma-from-luma, and the flip-aware residual add all run at the
+  block's real size — with real `Dc_Qlookup`/`Ac_Qlookup` steps per plane. The
+  lossless intra path flows through the same general code and stays bit-exact
+  against libavif, and the 4x4-transform lossy path decodes bit-exact too.
+  Lossy frames are still rejected: the coefficient decode for transforms larger
+  than 4x4 has a symbol desync under investigation, so a filter-free lossy frame
+  is not yet reproduced exactly and is refused rather than decoded wrongly.
+
 ### Added
 - `otf-pixels-codec-avif` reconstructs a transform block of any size with the
   `flipUD`/`flipLR` the transform type calls for. `add_residual` (§7.12.3 step 3)
