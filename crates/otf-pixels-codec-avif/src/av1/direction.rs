@@ -8,10 +8,11 @@
 //! (steps 7–11) interpolates between the two edge samples a fractional angle
 //! lands between.
 //!
-//! Only the 4x4 case is implemented, which is every transform block the
-//! lossless path emits. The edge arrays are addressed by signed index around a
-//! fixed origin so the negative entries (`AboveRow[-1]`, and `[-2]` after
-//! upsampling) read naturally without slice indexing.
+//! The projection ([`predict_directional`]) runs at any transform size;
+//! [`predict_directional_4x4`] is a thin wrapper the lossless 4x4 tile drives.
+//! The edge arrays are addressed by signed index around a fixed origin so the
+//! negative entries (`AboveRow[-1]`, and `[-2]` after upsampling) read naturally
+//! without slice indexing.
 
 /// `ANGLE_STEP` (§3): degrees per `angle_delta` unit.
 pub const ANGLE_STEP: i32 = 3;
@@ -39,9 +40,10 @@ pub fn mode_base_angle(mode: usize) -> Option<i32> {
 
 /// One edge array (`AboveRow` or `LeftCol`) addressed by signed index. The
 /// origin sits at [`Edge::OFF`], so index -1 (the corner) and -2 (produced by
-/// upsampling) are in range.
+/// upsampling) are in range. The buffer spans the largest block: a 64x64
+/// transform reads up to `AboveRow[w + h - 1]` (index 127) before the offset.
 pub struct Edge {
-    data: [i32; 64],
+    data: [i32; 320],
 }
 
 impl Edge {
@@ -50,7 +52,7 @@ impl Edge {
     /// An all-zero edge.
     #[must_use]
     pub fn new() -> Self {
-        Self { data: [0; 64] }
+        Self { data: [0; 320] }
     }
 
     /// The sample at signed index `i` (0 if out of range).
@@ -81,7 +83,8 @@ impl Default for Edge {
     }
 }
 
-/// Predict a 4x4 directional block (§7.11.2.4).
+/// Predict a directional block of any size (§7.11.2.4). The result is `w * h`
+/// samples in row-major order.
 ///
 /// `above` and `left` hold the raw edge samples: index -1 is the shared corner,
 /// indices `0..w+h` the row/column. `avail_above_px`/`avail_left_px` are how far
@@ -90,10 +93,12 @@ impl Default for Edge {
 /// upsampled in place). The result is the clipped prediction.
 #[allow(clippy::too_many_arguments, reason = "mirrors the §7.11.2.4 inputs")]
 #[must_use]
-pub fn predict_directional_4x4(
+pub fn predict_directional(
     p_angle: i32,
     above: &mut Edge,
     left: &mut Edge,
+    w: usize,
+    h: usize,
     have_left: bool,
     have_above: bool,
     filter_type: bool,
@@ -101,9 +106,9 @@ pub fn predict_directional_4x4(
     avail_above_px: i32,
     avail_left_px: i32,
     bit_depth: u8,
-) -> [[u16; 4]; 4] {
-    const W: i32 = 4;
-    const H: i32 = 4;
+) -> Vec<u16> {
+    let wi = w as i32;
+    let hi = h as i32;
     let max = (1_i32 << bit_depth) - 1;
     let clip1 = |v: i32| v.clamp(0, max);
 
@@ -112,7 +117,7 @@ pub fn predict_directional_4x4(
 
     if enable_edge_filter {
         if p_angle != 90 && p_angle != 180 {
-            if p_angle > 90 && p_angle < 180 && (W + H) >= 24 {
+            if p_angle > 90 && p_angle < 180 && (wi + hi) >= 24 {
                 // Filter corner: three-tap blend written to both corners.
                 let s = left.get(0) * 5 + above.get(-1) * 6 + above.get(0) * 5;
                 let corner = round2(s, 4);
@@ -120,24 +125,24 @@ pub fn predict_directional_4x4(
                 left.set(-1, corner);
             }
             if have_above {
-                let strength = edge_filter_strength(W, H, filter_type, p_angle - 90);
-                let num_px = W.min(avail_above_px) + if p_angle < 90 { H } else { 0 } + 1;
+                let strength = edge_filter_strength(wi, hi, filter_type, p_angle - 90);
+                let num_px = wi.min(avail_above_px) + if p_angle < 90 { hi } else { 0 } + 1;
                 intra_edge_filter(above, num_px, strength);
             }
             if have_left {
-                let strength = edge_filter_strength(W, H, filter_type, p_angle - 180);
-                let num_px = H.min(avail_left_px) + if p_angle > 180 { W } else { 0 } + 1;
+                let strength = edge_filter_strength(wi, hi, filter_type, p_angle - 180);
+                let num_px = hi.min(avail_left_px) + if p_angle > 180 { wi } else { 0 } + 1;
                 intra_edge_filter(left, num_px, strength);
             }
         }
-        upsample_above = edge_upsample(W, H, filter_type, p_angle - 90);
+        upsample_above = edge_upsample(wi, hi, filter_type, p_angle - 90);
         if upsample_above {
-            let num_px = W + if p_angle < 90 { H } else { 0 };
+            let num_px = wi + if p_angle < 90 { hi } else { 0 };
             intra_edge_upsample(above, num_px, max);
         }
-        upsample_left = edge_upsample(W, H, filter_type, p_angle - 180);
+        upsample_left = edge_upsample(wi, hi, filter_type, p_angle - 180);
         if upsample_left {
-            let num_px = H + if p_angle > 180 { W } else { 0 };
+            let num_px = hi + if p_angle > 180 { wi } else { 0 };
             intra_edge_upsample(left, num_px, max);
         }
     }
@@ -159,16 +164,16 @@ pub fn predict_directional_4x4(
         0
     };
 
-    let mut pred = [[0_u16; 4]; 4];
-    for (i, row) in pred.iter_mut().enumerate() {
-        let i = i as i32;
-        for (j, cell) in row.iter_mut().enumerate() {
-            let j = j as i32;
+    let mut pred = vec![0_u16; w * h];
+    for i in 0..h {
+        let ii = i as i32;
+        for j in 0..w {
+            let jj = j as i32;
             let value = if p_angle < 90 {
-                let idx = (i + 1) * dx;
-                let base = (idx >> (6 - ua)) + (j << ua);
+                let idx = (ii + 1) * dx;
+                let base = (idx >> (6 - ua)) + (jj << ua);
                 let shift = ((idx << ua) >> 1) & 0x1F;
-                let max_base_x = (W + H - 1) << ua;
+                let max_base_x = (wi + hi - 1) << ua;
                 if base < max_base_x {
                     round2(
                         above.get(base as isize) * (32 - shift)
@@ -179,7 +184,7 @@ pub fn predict_directional_4x4(
                     above.get(max_base_x as isize)
                 }
             } else if p_angle > 90 && p_angle < 180 {
-                let idx = (j << 6) - (i + 1) * dx;
+                let idx = (jj << 6) - (ii + 1) * dx;
                 let base = idx >> (6 - ua);
                 if base >= -(1 << ua) {
                     let shift = ((idx << ua) >> 1) & 0x1F;
@@ -189,7 +194,7 @@ pub fn predict_directional_4x4(
                         5,
                     )
                 } else {
-                    let idy = (i << 6) - (j + 1) * dy;
+                    let idy = (ii << 6) - (jj + 1) * dy;
                     let base = idy >> (6 - ul);
                     let shift = ((idy << ul) >> 1) & 0x1F;
                     round2(
@@ -199,19 +204,60 @@ pub fn predict_directional_4x4(
                     )
                 }
             } else if p_angle > 180 {
-                let idx = (j + 1) * dy;
-                let base = (idx >> (6 - ul)) + (i << ul);
+                let idx = (jj + 1) * dy;
+                let base = (idx >> (6 - ul)) + (ii << ul);
                 let shift = ((idx << ul) >> 1) & 0x1F;
                 round2(
                     left.get(base as isize) * (32 - shift) + left.get(base as isize + 1) * shift,
                     5,
                 )
             } else if p_angle == 90 {
-                above.get(j as isize)
+                above.get(jj as isize)
             } else {
-                left.get(i as isize)
+                left.get(ii as isize)
             };
-            *cell = clip1(value) as u16;
+            if let Some(cell) = pred.get_mut(i * w + j) {
+                *cell = clip1(value) as u16;
+            }
+        }
+    }
+    pred
+}
+
+/// Predict a 4x4 directional block (§7.11.2.4): a thin wrapper over the
+/// size-general [`predict_directional`], reshaping the flat result.
+#[allow(clippy::too_many_arguments, reason = "mirrors the §7.11.2.4 inputs")]
+#[must_use]
+pub fn predict_directional_4x4(
+    p_angle: i32,
+    above: &mut Edge,
+    left: &mut Edge,
+    have_left: bool,
+    have_above: bool,
+    filter_type: bool,
+    enable_edge_filter: bool,
+    avail_above_px: i32,
+    avail_left_px: i32,
+    bit_depth: u8,
+) -> [[u16; 4]; 4] {
+    let flat = predict_directional(
+        p_angle,
+        above,
+        left,
+        4,
+        4,
+        have_left,
+        have_above,
+        filter_type,
+        enable_edge_filter,
+        avail_above_px,
+        avail_left_px,
+        bit_depth,
+    );
+    let mut pred = [[0_u16; 4]; 4];
+    for (i, row) in pred.iter_mut().enumerate() {
+        for (j, cell) in row.iter_mut().enumerate() {
+            *cell = flat.get(i * 4 + j).copied().unwrap_or(0);
         }
     }
     pred
@@ -564,5 +610,40 @@ mod tests {
             predict_directional_4x4(45, &mut above, &mut left, true, true, false, false, 4, 4, 8);
         assert_eq!(pred[0], [1, 2, 3, 4]);
         assert_eq!(pred[1], [2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn vertical_angle_copies_the_above_row_at_8x8() {
+        // pAngle 90 at 8x8 with the edge filter off: every row copies AboveRow.
+        let mut above = Edge::new();
+        let mut left = Edge::new();
+        for i in 0..16 {
+            above.set(i, 5 + i as i32);
+        }
+        let pred = predict_directional(
+            90, &mut above, &mut left, 8, 8, true, true, false, false, 8, 8, 8,
+        );
+        assert_eq!(pred.len(), 64);
+        let expected: [u16; 8] = [5, 6, 7, 8, 9, 10, 11, 12];
+        for row in pred.chunks(8) {
+            assert_eq!(row, &expected[..]);
+        }
+    }
+
+    #[test]
+    fn diagonal_45_projects_the_above_row_at_8x8() {
+        // Same projection as 4x4, extended: pred[i][j] = above[i+j+1] while
+        // i+j+1 < maxBaseX = w+h-1 = 15.
+        let mut above = Edge::new();
+        let mut left = Edge::new();
+        for i in 0..16 {
+            above.set(i, i as i32);
+        }
+        let pred = predict_directional(
+            45, &mut above, &mut left, 8, 8, true, true, false, false, 8, 8, 8,
+        );
+        // Row 0: above[1..9]; row 7: above[8..16] but clamped at maxBaseX=15.
+        assert_eq!(&pred[0..8], &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(pred[7 * 8 + 7], 15); // i+j+1 = 15 == maxBaseX -> above[15]
     }
 }
