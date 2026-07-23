@@ -15,7 +15,7 @@
 //! stream that uses it fails cleanly instead of desynchronising.
 
 use super::cdf;
-use super::coeff::{CoeffCdfs, decode_coeffs};
+use super::coeff::{CoeffCdfs, TxTypeCtx, decode_coeffs};
 use super::direction::{
     ANGLE_STEP, Edge, mode_base_angle, predict_directional_4x4, predict_filter_intra_4x4,
 };
@@ -25,9 +25,8 @@ use super::plane::Plane;
 use super::predict::{IntraMode, Neighbours, predict_intra_4x4};
 use super::seq::SequenceHeader;
 use super::symbol::SymbolDecoder;
-use super::transform::{
-    TxSize, TxType, ac_q, add_residual_4x4, dc_q, dequantize, inverse_transform_2d,
-};
+use super::transform::{TxSize, ac_q, add_residual_4x4, dc_q, dequantize, inverse_transform_2d};
+use super::transform_type::{IntraTxTypeCdfs, intra_dir, intra_tx_set};
 use otf_pixels_core::{PixelsError, Result};
 
 /// `MI_SIZE` (§3): the side of the smallest coded block, in samples.
@@ -127,6 +126,7 @@ struct FrameCdfs {
     cfl_sign: [u16; 9],
     cfl_alpha: [[u16; 17]; 6],
     coeff: CoeffCdfs,
+    intra_tx_type: IntraTxTypeCdfs,
 }
 
 /// The seven palette colour-index CDFs, one per palette size 2..=8.
@@ -195,6 +195,7 @@ impl FrameCdfs {
             cfl_sign: cdf::DEFAULT_CFL_SIGN_CDF,
             cfl_alpha: cdf::DEFAULT_CFL_ALPHA_CDF,
             coeff: CoeffCdfs::new(qctx),
+            intra_tx_type: IntraTxTypeCdfs::new(),
         }
     }
 }
@@ -219,6 +220,11 @@ struct TileState {
     enable_filter_intra: bool,
     enable_edge_filter: bool,
     allow_screen_content: bool,
+    /// `reduced_tx_set` (frame header): shrinks the intra transform set.
+    reduced_tx_set: bool,
+    /// Whether `base_q_idx > 0`. `false` is the lossless path, where every block
+    /// is `DCT_DCT` and no `intra_tx_type` symbol is read.
+    qindex_positive: bool,
     sb_size4: usize,
     /// `BlockDecoded[plane]`, one flat `(sb+2) x (sb+2)` grid per plane, reset
     /// per superblock; addressed with a one-unit border so index -1 is valid.
@@ -274,6 +280,8 @@ impl TileState {
             enable_filter_intra: seq.enable_filter_intra,
             enable_edge_filter: seq.enable_intra_edge_filter,
             allow_screen_content: frame.allow_screen_content_tools,
+            reduced_tx_set: frame.reduced_tx_set,
+            qindex_positive: frame.quantization.base_q_idx > 0,
             sb_size4,
             block_decoded,
             y_modes: vec![0; mi_cols * mi_rows],
@@ -1175,11 +1183,30 @@ impl TileState {
             let all_zero_ctx = self.all_zero_ctx(plane, x4, y4, bw4, bh4);
             let dc_sign_ctx = self.dc_sign_ctx(plane, x4, y4);
             let ptype = usize::from(plane > 0);
+            // Resolve the block's PlaneTxType inside decode_coeffs, at the spec
+            // position between all_zero and eob_pt. Luma reads the intra_tx_type
+            // symbol against these contexts; chroma derives from its mode. In
+            // the lossless path qindex_positive is false, so no symbol is read
+            // and the type stays DCT_DCT.
+            let tx_set = intra_tx_set(TxSize::Tx4x4, self.reduced_tx_set);
+            let dir = if plane == 0 {
+                intra_dir(tb.mode_index, tb.filter_intra)
+            } else {
+                0
+            };
+            let qindex_positive = self.qindex_positive;
+            let tx_ctx = TxTypeCtx {
+                set: tx_set,
+                intra_cdfs: &mut self.cdfs.intra_tx_type,
+                intra_dir: dir,
+                uv_mode: tb.mode_index,
+                qindex_positive,
+            };
             let block = decode_coeffs(
                 dec,
                 &mut self.cdfs.coeff,
                 TxSize::Tx4x4,
-                TxType::DctDct,
+                tx_ctx,
                 ptype,
                 all_zero_ctx,
                 dc_sign_ctx,
@@ -1196,7 +1223,7 @@ impl TileState {
                 let residual = inverse_transform_2d(
                     &dequant,
                     TxSize::Tx4x4,
-                    TxType::DctDct,
+                    block.tx_type,
                     true,
                     self.bit_depth,
                 );

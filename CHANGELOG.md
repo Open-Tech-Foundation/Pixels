@@ -69,6 +69,15 @@ versioning: [SemVer](https://semver.org/).
   read the tables.
 
 ### Added
+- `otf-pixels-codec-avif` reads the transform type inside the coefficient decode
+  at its spec position. `decode_coeffs` now resolves each coded block's
+  `PlaneTxType` after `all_zero` and before `eob_pt` (§5.11.39): luma reads the
+  `intra_tx_type` symbol against its size-and-direction contexts, chroma derives
+  its type from the prediction mode, and the resolved type rides out on the
+  block to drive the inverse transform. The tile driver threads in the frame's
+  transform set and quantiser state. Lossless is qindex 0, so no symbol is read
+  and every block stays `DCT_DCT` — the fixtures remain bit-exact against
+  libavif — while the machinery is now in place for the lossy path.
 - `otf-pixels-codec-avif` gains the intra transform-type decode: `get_tx_set`
   (which of `DCT_DCT`-only, the seven-type set 1, or the five-type set 2 a
   transform of a given size uses), the `intra_tx_type` symbol read with its

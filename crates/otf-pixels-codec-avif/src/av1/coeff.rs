@@ -19,6 +19,7 @@
 use super::cdf;
 use super::symbol::SymbolDecoder;
 use super::transform::{TxSize, TxType};
+use super::transform_type::{IntraTxSet, IntraTxTypeCdfs, chroma_tx_type, read_transform_type};
 use otf_pixels_core::{PixelsError, Result};
 
 include!("scan_tables.rs");
@@ -200,6 +201,31 @@ pub struct CoeffBlock {
     pub cul_level: u8,
     /// `dcCategory`: 0 none, 1 negative DC, 2 positive DC.
     pub dc_category: u8,
+    /// The resolved `PlaneTxType` (`compute_tx_type`, §5.11.40): `DCT_DCT` for a
+    /// skipped or lossless block, otherwise the type read/derived here. The
+    /// dequantiser and inverse transform need it, so it travels with the block.
+    pub tx_type: TxType,
+}
+
+/// How a coded block's `PlaneTxType` is resolved once `all_zero` shows the block
+/// carries coefficients (`compute_tx_type` / `transform_type`, §5.11.40–47).
+///
+/// Luma reads the `intra_tx_type` symbol at this point — its spec position,
+/// after `all_zero` and before `eob_pt`; chroma derives its type from the
+/// prediction mode without consuming a symbol. A zero quantiser (the lossless
+/// path) or a `DCT_DCT`-only set forces `DCT_DCT`.
+pub struct TxTypeCtx<'a> {
+    /// The intra transform set for this size (`get_tx_set`).
+    pub set: IntraTxSet,
+    /// The adapting `intra_tx_type` CDFs; only luma reads them.
+    pub intra_cdfs: &'a mut IntraTxTypeCdfs,
+    /// `intraDir` for the luma symbol's context.
+    pub intra_dir: usize,
+    /// `UVMode` for the chroma (plane > 0) derivation.
+    pub uv_mode: usize,
+    /// Whether the quantiser index is non-zero; `false` is the lossless path,
+    /// which is always `DCT_DCT`.
+    pub qindex_positive: bool,
 }
 
 /// The scan order (`get_scan`, §5.11.41) for a transform size and type.
@@ -274,9 +300,11 @@ fn mcol_scan(tx_size: TxSize) -> &'static [u16] {
 /// Decode the coefficients of one transform block (`coeffs`, §5.11.39).
 ///
 /// `ptype` is 0 for luma and 1 for chroma. `all_zero_ctx` and `dc_sign_ctx` are
-/// the neighbour-derived contexts the tile driver computes. `tx_type` is the
-/// already-resolved plane transform type (`DCT_DCT` in the lossless path). The
-/// returned `Quant[]` feeds the dequantiser and inverse transform.
+/// the neighbour-derived contexts the tile driver computes. `tx` resolves the
+/// `PlaneTxType`: for a coded luma block the `intra_tx_type` symbol is read here,
+/// at its spec position between `all_zero` and `eob_pt`. The returned `Quant[]`
+/// feeds the dequantiser and inverse transform, and the resolved type rides
+/// along on the block.
 ///
 /// # Errors
 ///
@@ -286,7 +314,7 @@ pub fn decode_coeffs(
     dec: &mut SymbolDecoder<'_>,
     cdfs: &mut CoeffCdfs,
     tx_size: TxSize,
-    tx_type: TxType,
+    tx: TxTypeCtx<'_>,
     ptype: usize,
     all_zero_ctx: usize,
     dc_sign_ctx: usize,
@@ -294,7 +322,6 @@ pub fn decode_coeffs(
     let mut quant = [0_i32; MAX_COEFFS];
     let pt = ptype.min(1);
     let tx_ctx = tx_size.tx_size_ctx();
-    let cls = tx_class(tx_type);
 
     // all_zero (txb_skip): the whole block codes as zero.
     let skip_cdf = cdf_row(cdf_row(&mut cdfs.txb_skip, tx_ctx)?, all_zero_ctx)?;
@@ -305,8 +332,28 @@ pub fn decode_coeffs(
             eob: 0,
             cul_level: 0,
             dc_category: 0,
+            tx_type: TxType::DctDct,
         });
     }
+
+    // transform_type (§5.11.40/47): resolve the PlaneTxType now — luma reads the
+    // intra_tx_type symbol at this point, chroma derives from its prediction
+    // mode without a symbol. Lossless (qindex 0) forces DCT_DCT either way.
+    let tx_type = if ptype == 0 {
+        read_transform_type(
+            dec,
+            tx.intra_cdfs,
+            tx.set,
+            tx_size,
+            tx.intra_dir,
+            tx.qindex_positive,
+        )?
+    } else if tx.qindex_positive {
+        chroma_tx_type(tx.uv_mode, tx.set)
+    } else {
+        TxType::DctDct
+    };
+    let cls = tx_class(tx_type);
 
     let scan = get_scan(tx_size, tx_type);
     let eob_ctx = usize::from(cls != 0);
@@ -419,6 +466,7 @@ pub fn decode_coeffs(
         eob,
         cul_level: cul_level.min(63) as u8,
         dc_category,
+        tx_type,
     })
 }
 
@@ -656,8 +704,16 @@ mod tests {
         let data = [0x00; 8];
         let mut dec = SymbolDecoder::new(&data, true).unwrap();
         let mut cdfs = CoeffCdfs::new(0);
-        let block =
-            decode_coeffs(&mut dec, &mut cdfs, TxSize::Tx4x4, TxType::DctDct, 0, 0, 0).unwrap();
+        let mut intra = IntraTxTypeCdfs::new();
+        let tx = TxTypeCtx {
+            set: IntraTxSet::Set1,
+            intra_cdfs: &mut intra,
+            intra_dir: 0,
+            uv_mode: 0,
+            qindex_positive: false,
+        };
+        let block = decode_coeffs(&mut dec, &mut cdfs, TxSize::Tx4x4, tx, 0, 0, 0).unwrap();
+        assert_eq!(block.tx_type, TxType::DctDct);
         if block.eob == 0 {
             assert_eq!(block.quant, [0; MAX_COEFFS]);
             assert_eq!(block.cul_level, 0);

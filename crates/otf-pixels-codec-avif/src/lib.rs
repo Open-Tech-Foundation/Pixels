@@ -42,7 +42,7 @@ pub use av1::{
     BitReader, Cdef, CoeffBlock, CoeffCdfs, ColorConfig, DecodedFrame, Dequant, FilmGrain,
     FrameHeader, IntraMode, IntraTxSet, IntraTxTypeCdfs, LoopFilter, LoopRestoration, Neighbours,
     Obu, ObuHeader, ObuType, OperatingPoint, Plane, Quantization, Residual, Segmentation,
-    SequenceHeader, StillPicture, SymbolDecoder, TileInfo, TxMode, TxSize, TxType, ac_q,
+    SequenceHeader, StillPicture, SymbolDecoder, TileInfo, TxMode, TxSize, TxType, TxTypeCtx, ac_q,
     add_residual_4x4, chroma_tx_type, dc_q, decode_coeffs, decode_still, dequantize, floor_log2,
     intra_dir, intra_tx_set, inverse_transform_2d, is_tx_type_in_set_intra, mode_to_txfm,
     predict_intra_4x4, read_transform_type, sequence_header_from_config,

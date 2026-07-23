@@ -31,7 +31,7 @@ mod transform;
 mod transform_type;
 
 pub use bits::{BitReader, floor_log2};
-pub use coeff::{CoeffBlock, CoeffCdfs, decode_coeffs};
+pub use coeff::{CoeffBlock, CoeffCdfs, TxTypeCtx, decode_coeffs};
 pub use frame::{
     Cdef, FilmGrain, FrameHeader, LoopFilter, LoopRestoration, Quantization, Segmentation,
     TileInfo, TxMode,
