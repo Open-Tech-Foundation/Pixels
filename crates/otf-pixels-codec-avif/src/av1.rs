@@ -29,6 +29,7 @@ mod symbol;
 mod tile;
 mod transform;
 mod transform_type;
+mod tx_size;
 
 pub use bits::{BitReader, floor_log2};
 pub use coeff::{CoeffBlock, CoeffCdfs, TxTypeCtx, decode_coeffs};
@@ -50,6 +51,10 @@ pub use transform::{
 pub use transform_type::{
     IntraTxSet, IntraTxTypeCdfs, chroma_tx_type, intra_dir, intra_tx_set, is_tx_type_in_set_intra,
     mode_to_txfm, read_transform_type,
+};
+pub use tx_size::{
+    BLOCK_4X4, TxDepthCdfs, TxSizeParams, block_size_from_4x4, max_tx_depth, max_tx_size_rect,
+    read_tx_size, split_tx_size, tx_depth_ctx,
 };
 
 #[cfg(test)]

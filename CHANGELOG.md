@@ -69,6 +69,15 @@ versioning: [SemVer](https://semver.org/).
   read the tables.
 
 ### Added
+- `otf-pixels-codec-avif` gains the intra transform-size decode: `read_tx_size`
+  (§5.11.15) resolves a coding block's luma transform size — lossless forces
+  `TX_4X4`, otherwise the size starts at `Max_Tx_Size_Rect` and, under
+  `TX_MODE_SELECT`, a `tx_depth` symbol splits it down through `Split_Tx_Size`.
+  The `tx_depth` context (§8.3.2) counts the above/left neighbour transforms
+  that are at least as large as the block's maximum, and the four
+  `Default_Tx_*_Cdf` tables select the alphabet by maximum depth. Exposed as a
+  tested unit on the crate's AV1 surface; the tile still drives a `TX_4X4`-only
+  reconstruct, so the lossless fixtures are unaffected.
 - `otf-pixels-codec-avif` reads the transform type inside the coefficient decode
   at its spec position. `decode_coeffs` now resolves each coded block's
   `PlaneTxType` after `all_zero` and before `eob_pt` (§5.11.39): luma reads the
