@@ -321,10 +321,79 @@ const INTRA_FILTER_TAPS: [[[i32; 7]; 8]; 5] = [
     ],
 ];
 
-/// Recursive filter-intra prediction for a 4x4 block (§7.11.2.3). `above` and
-/// `left` hold the raw edge samples (index -1 is the corner). Every 4x2
-/// sub-block is a seven-tap filter of its neighbours, and later sub-blocks read
-/// the samples the earlier ones produced.
+/// Recursive filter-intra prediction for a block of any size (§7.11.2.3).
+/// `above` and `left` hold the raw edge samples (index -1 is the corner). Every
+/// 4x2 sub-block is a seven-tap filter of its neighbours, walked left-to-right
+/// then top-to-bottom so later sub-blocks read the samples earlier ones
+/// produced. The result is `w * h` samples in row-major order.
+#[must_use]
+pub fn predict_filter_intra(
+    filter_mode: usize,
+    above: &Edge,
+    left: &Edge,
+    w: usize,
+    h: usize,
+    bit_depth: u8,
+) -> Vec<u16> {
+    let max = (1_i32 << bit_depth) - 1;
+    let taps = INTRA_FILTER_TAPS
+        .get(filter_mode.min(4))
+        .copied()
+        .unwrap_or(INTRA_FILTER_TAPS[0]);
+    // pred as i32 so intermediate rows feed the next sub-block exactly.
+    let mut pred = vec![0_i32; w * h];
+    // Read pred[row][col] with signed indices (0 outside the block).
+    let get = |pred: &[i32], row: isize, col: isize| -> i32 {
+        match (usize::try_from(row), usize::try_from(col)) {
+            (Ok(r), Ok(c)) if r < h && c < w => pred.get(r * w + c).copied().unwrap_or(0),
+            _ => 0,
+        }
+    };
+    let w4 = w >> 2;
+    let h2 = h >> 1;
+    for i2 in 0..h2 {
+        for j4 in 0..w4 {
+            let mut p = [0_i32; 7];
+            for (i, slot) in p.iter_mut().enumerate() {
+                let ii = i as isize;
+                let base_x = (j4 << 2) as isize;
+                let base_y = (i2 << 1) as isize;
+                *slot = if i < 5 {
+                    if i2 == 0 {
+                        above.get(base_x + ii - 1)
+                    } else if j4 == 0 && i == 0 {
+                        left.get(base_y - 1)
+                    } else {
+                        get(&pred, base_y - 1, base_x + ii - 1)
+                    }
+                } else if j4 == 0 {
+                    left.get(base_y + ii - 5)
+                } else {
+                    get(&pred, base_y + ii - 5, base_x - 1)
+                };
+            }
+            for i1 in 0..2 {
+                for j1 in 0..4 {
+                    let row = taps.get((i1 << 2) + j1).copied().unwrap_or([0; 7]);
+                    let mut pr = 0;
+                    for (tap, &pv) in row.iter().zip(p.iter()) {
+                        pr += tap * pv;
+                    }
+                    let value = round2_signed(pr, INTRA_FILTER_SCALE_BITS).clamp(0, max);
+                    let r = (i2 << 1) + i1;
+                    let c = (j4 << 2) + j1;
+                    if let Some(slot) = pred.get_mut(r * w + c) {
+                        *slot = value;
+                    }
+                }
+            }
+        }
+    }
+    pred.iter().map(|&v| v.clamp(0, max) as u16).collect()
+}
+
+/// Recursive filter-intra prediction for a 4x4 block (§7.11.2.3): a thin wrapper
+/// over the size-general [`predict_filter_intra`], reshaping the flat result.
 #[must_use]
 pub fn predict_filter_intra_4x4(
     filter_mode: usize,
@@ -332,74 +401,14 @@ pub fn predict_filter_intra_4x4(
     left: &Edge,
     bit_depth: u8,
 ) -> [[u16; 4]; 4] {
-    let max = (1_i32 << bit_depth) - 1;
-    let taps = INTRA_FILTER_TAPS
-        .get(filter_mode.min(4))
-        .copied()
-        .unwrap_or(INTRA_FILTER_TAPS[0]);
-    // pred as i32 so intermediate rows feed the next sub-block exactly.
-    let mut pred = [[0_i32; 4]; 4];
-    // w4 = 1, h2 = 2 for a 4x4 block.
-    for i2 in 0..2 {
-        let j4 = 0;
-        let mut p = [0_i32; 7];
-        for (i, slot) in p.iter_mut().enumerate() {
-            *slot = if i < 5 {
-                if i2 == 0 {
-                    above.get((j4 << 2) + i as isize - 1)
-                } else if j4 == 0 && i == 0 {
-                    left.get((i2 << 1) - 1)
-                } else {
-                    pred_get(&pred, (i2 << 1) - 1, (j4 << 2) + i as isize - 1)
-                }
-            } else if j4 == 0 {
-                left.get((i2 << 1) + i as isize - 5)
-            } else {
-                pred_get(&pred, (i2 << 1) + i as isize - 5, (j4 << 2) - 1)
-            };
-        }
-        for i1 in 0..2 {
-            for j1 in 0..4 {
-                let row = taps.get((i1 << 2) + j1).copied().unwrap_or([0; 7]);
-                let mut pr = 0;
-                for (tap, &pv) in row.iter().zip(p.iter()) {
-                    pr += tap * pv;
-                }
-                let value = round2_signed(pr, INTRA_FILTER_SCALE_BITS).clamp(0, max);
-                set_pred(
-                    &mut pred,
-                    (i2 << 1) + i1 as isize,
-                    (j4 << 2) + j1 as isize,
-                    value,
-                );
-            }
-        }
-    }
+    let flat = predict_filter_intra(filter_mode, above, left, 4, 4, bit_depth);
     let mut out = [[0_u16; 4]; 4];
-    for (orow, prow) in out.iter_mut().zip(pred) {
-        for (cell, v) in orow.iter_mut().zip(prow) {
-            *cell = v.clamp(0, max) as u16;
+    for (i, row) in out.iter_mut().enumerate() {
+        for (j, cell) in row.iter_mut().enumerate() {
+            *cell = flat.get(i * 4 + j).copied().unwrap_or(0);
         }
     }
     out
-}
-
-/// Read `pred[row][col]` with signed indices (0 outside the block).
-fn pred_get(pred: &[[i32; 4]; 4], row: isize, col: isize) -> i32 {
-    usize::try_from(row)
-        .ok()
-        .zip(usize::try_from(col).ok())
-        .and_then(|(r, c)| pred.get(r).and_then(|rw| rw.get(c)).copied())
-        .unwrap_or(0)
-}
-
-/// Write `pred[row][col]` with signed indices (dropped if outside the block).
-fn set_pred(pred: &mut [[i32; 4]; 4], row: isize, col: isize, value: i32) {
-    if let (Ok(r), Ok(c)) = (usize::try_from(row), usize::try_from(col)) {
-        if let Some(slot) = pred.get_mut(r).and_then(|rw| rw.get_mut(c)) {
-            *slot = value;
-        }
-    }
 }
 
 /// `Round2Signed(x, n)` (§4.7).
@@ -628,6 +637,24 @@ mod tests {
         for row in pred.chunks(8) {
             assert_eq!(row, &expected[..]);
         }
+    }
+
+    #[test]
+    fn filter_intra_of_a_flat_edge_is_that_value() {
+        // Every tap row of Intra_Filter_Taps sums to 16 (= 1 << SCALE_BITS), so a
+        // constant edge reproduces that constant. Check at 4x4 and 8x8.
+        let mut above = Edge::new();
+        let mut left = Edge::new();
+        for i in -1..16 {
+            above.set(i, 100);
+            left.set(i, 100);
+        }
+        let flat = predict_filter_intra(2, &above, &left, 8, 8, 8);
+        assert_eq!(flat.len(), 64);
+        assert!(flat.iter().all(|&v| v == 100));
+        // The 4x4 wrapper agrees with the general path.
+        let out = predict_filter_intra_4x4(2, &above, &left, 8);
+        assert_eq!(out, [[100; 4]; 4]);
     }
 
     #[test]

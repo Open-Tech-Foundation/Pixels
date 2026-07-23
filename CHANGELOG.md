@@ -69,6 +69,12 @@ versioning: [SemVer](https://semver.org/).
   read the tables.
 
 ### Added
+- `otf-pixels-codec-avif` generalizes the recursive filter-intra predictor
+  (§7.11.2.3) to any transform size: `predict_filter_intra` walks the 4x2
+  sub-blocks over a `w x h` block, and `predict_filter_intra_4x4` is now a thin
+  wrapper. With this every intra predictor — DC, Paeth, Smooth, directional and
+  filter-intra — runs at any size; the lossless 4x4 tile drives them all and
+  stays bit-exact against libavif.
 - `otf-pixels-codec-avif` generalizes the slanted directional intra predictor to
   any transform size. `predict_directional` runs the §7.11.2.4 projection — edge
   filter, upsample, and the per-angle interpolation — over a `w x h` block, and
