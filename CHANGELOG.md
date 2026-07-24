@@ -94,6 +94,18 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- `otf-pixels-codec-avif` applies the constrained directional enhancement filter
+  (CDEF, §7.15) after deblocking: the per-64x64 `cdef_idx` is read during tile
+  decode (`read_cdef`, right after `read_skip`), and each 8x8 block is deringed
+  by the direction search (§7.15.2) — projecting the block onto eight oriented
+  lines and picking the highest-energy one — followed by the directional filter
+  (§7.15.3) with its primary/secondary taps and the `constrain` cap that leaves
+  genuine edges intact. The still-image intra subset takes the skip test straight
+  from the block `Skips`, and single-tile makes `is_inside_filter_region` the
+  frame bounds. The lossy gate no longer requires CDEF off. Three cdef fixtures
+  (`gradient_cdef`, `blocks_cdef`, `gradient_odd_cdef`), encoded with CDEF on and
+  deblocking off to isolate it, join the reference corpus and decode byte-exact
+  against libavif.
 - `otf-pixels-codec-avif` applies the deblocking loop filter (§7.14) after
   reconstruction: both passes (all vertical then all horizontal boundaries), the
   transform-edge and adaptive-strength derivation, and the narrow, 8-/14-tap

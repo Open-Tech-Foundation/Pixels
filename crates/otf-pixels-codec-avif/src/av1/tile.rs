@@ -10,9 +10,9 @@
 //! Scope is the single-tile intra still image in YUV 4:4:4. Both `CodedLossless`
 //! (every transform is 4x4 WHT) and lossy frames decode here — the lossy path
 //! runs the full DCT/ADST/identity inverse transforms at every transform size,
-//! followed by the deblocking loop filter (§7.14). The later post-filters (CDEF,
-//! loop restoration, super-resolution, film grain) are not implemented, so a
-//! lossy frame is reproduced exactly only when it codes those off
+//! followed by the deblocking loop filter (§7.14) and CDEF (§7.15). The later
+//! post-filters (loop restoration, super-resolution, film grain) are not
+//! implemented, so a lossy frame is reproduced exactly only when it codes those off
 //! (`unimplemented_filters_off`); any other lossy frame is refused. Every intra
 //! prediction mode is handled —
 //! DC, Paeth, the smooth family, the slanted directional modes (with their
@@ -21,13 +21,14 @@
 //! [`PixelsError::unsupported`] rather than decoded wrong, so a stream that uses
 //! it fails cleanly instead of desynchronising.
 
+use super::cdef::CdefFilter;
 use super::cdf;
 use super::coeff::{CoeffCdfs, TxTypeCtx, decode_coeffs};
 use super::deblock::Deblock;
 use super::direction::{
     ANGLE_STEP, Edge, mode_base_angle, predict_directional, predict_filter_intra,
 };
-use super::frame::{FrameHeader, LoopFilter, TxMode};
+use super::frame::{Cdef, FrameHeader, LoopFilter, TxMode};
 use super::palette::{PALETTE_COLORS, color_context, palette_cache};
 use super::plane::Plane;
 use super::predict::{IntraMode, PredBlock, predict_intra_block};
@@ -84,17 +85,18 @@ pub fn decode_still(
     frame: &FrameHeader,
     tile_data: &[u8],
 ) -> Result<DecodedFrame> {
-    // We reconstruct the residual and apply the deblocking loop filter (§7.14),
-    // but not the later post-filters. A lossy frame is reproduced exactly only
-    // when every unimplemented post-filter — CDEF, loop restoration,
-    // super-resolution and film grain — is disabled; deblocking may be on. Any
-    // other lossy frame would decode to a visibly wrong image, so it is refused.
-    // A coded-lossless frame turns all of these off by definition.
+    // We reconstruct the residual and apply the deblocking loop filter (§7.14)
+    // and CDEF (§7.15), but not the later post-filters. A lossy frame is
+    // reproduced exactly only when every unimplemented post-filter — loop
+    // restoration, super-resolution and film grain — is disabled; deblocking and
+    // CDEF may be on. Any other lossy frame would decode to a visibly wrong
+    // image, so it is refused. A coded-lossless frame turns all of these off by
+    // definition.
     if !frame.coded_lossless && !unimplemented_filters_off(frame) {
         return Err(PixelsError::unsupported(
-            "avif: lossy frames are decoded only with CDEF, loop restoration, \
-             super-resolution and film grain disabled (deblocking is applied); \
-             those post-filters are not implemented yet",
+            "avif: lossy frames are decoded only with loop restoration, \
+             super-resolution and film grain disabled (deblocking and CDEF are \
+             applied); those post-filters are not implemented yet",
         ));
     }
     if seq.color.subsampling_x != 0 || seq.color.subsampling_y != 0 {
@@ -123,23 +125,15 @@ pub fn decode_still(
 }
 
 /// Whether every post-filter this decoder does *not* implement is disabled, so
-/// the reconstruct plus deblocking reproduces the frame exactly. Checks CDEF
-/// (every strength zero), loop restoration (no plane uses it), super-resolution
-/// (the coded width equals the upscaled width) and film grain. Deblocking is
-/// implemented (§7.14) and so is not required to be off.
+/// the reconstruct plus the implemented in-loop filters reproduces the frame
+/// exactly. Checks loop restoration (no plane uses it), super-resolution (the
+/// coded width equals the upscaled width) and film grain. Deblocking (§7.14) and
+/// CDEF (§7.15) are implemented and so are not required to be off.
 fn unimplemented_filters_off(frame: &FrameHeader) -> bool {
-    let cdef_off = frame
-        .cdef
-        .y_pri_strength
-        .iter()
-        .chain(&frame.cdef.y_sec_strength)
-        .chain(&frame.cdef.uv_pri_strength)
-        .chain(&frame.cdef.uv_sec_strength)
-        .all(|&s| s == 0);
     let restoration_off = !frame.loop_restoration.uses_lr;
     let superres_off = frame.frame_width == frame.upscaled_width;
     let grain_off = !frame.film_grain.apply_grain;
-    cdef_off && restoration_off && superres_off && grain_off
+    restoration_off && superres_off && grain_off
 }
 
 /// Mutable CDFs for the frame, cloned from the defaults and adapted as symbols
@@ -289,6 +283,17 @@ struct TileState {
     frame_height: usize,
     /// The frame loop-filter parameters, for deblocking after reconstruct.
     loop_filter: LoopFilter,
+    /// The frame CDEF parameters, for the CDEF pass after deblocking (§7.15).
+    cdef: Cdef,
+    /// Whether CDEF is enabled at all (`enable_cdef`); when false no `cdef_idx`
+    /// is coded and the grid stays all -1.
+    enable_cdef: bool,
+    /// `cdef_idx[row][col]` (§5.11.56): the CDEF strength index per 64x64 block,
+    /// -1 until read. Only the 64x64-aligned entries are meaningful.
+    cdef_idx: Vec<i16>,
+    /// Chroma subsampling (0 for 4:4:4), for the CDEF filter's plane geometry.
+    subsampling_x: usize,
+    subsampling_y: usize,
     sb_size4: usize,
     /// `BlockDecoded[plane]`, one flat `(sb+2) x (sb+2)` grid per plane, reset
     /// per superblock; addressed with a one-unit border so index -1 is valid.
@@ -372,6 +377,11 @@ impl TileState {
             frame_width: frame.upscaled_width as usize,
             frame_height: frame.frame_height as usize,
             loop_filter: frame.loop_filter.clone(),
+            cdef: frame.cdef.clone(),
+            enable_cdef: seq.enable_cdef,
+            cdef_idx: vec![-1; mi_cols * mi_rows],
+            subsampling_x: seq.color.subsampling_x as usize,
+            subsampling_y: seq.color.subsampling_y as usize,
             sb_size4,
             block_decoded,
             y_modes: vec![0; mi_cols * mi_rows],
@@ -405,6 +415,7 @@ impl TileState {
             sb_row += sb_size4;
         }
         self.deblock();
+        self.cdef();
         Ok(())
     }
 
@@ -422,6 +433,25 @@ impl TileState {
             frame_width: self.frame_width,
             frame_height: self.frame_height,
             lf_tx_sizes: &self.lf_tx_sizes,
+        }
+        .run();
+    }
+
+    /// Apply the constrained directional enhancement filter (§7.15) to the
+    /// deblocked planes. A no-op when CDEF is disabled: the `cdef_idx` grid is
+    /// then all -1, so every 8x8 block is left as it is.
+    fn cdef(&mut self) {
+        CdefFilter {
+            planes: &mut self.planes,
+            cdef: &self.cdef,
+            cdef_idx: &self.cdef_idx,
+            skips: &self.skips,
+            bit_depth: self.bit_depth,
+            num_planes: self.num_planes,
+            mi_rows: self.mi_rows,
+            mi_cols: self.mi_cols,
+            subsampling_x: self.subsampling_x,
+            subsampling_y: self.subsampling_y,
         }
         .run();
     }
@@ -705,6 +735,11 @@ impl TileState {
         // --- intra_frame_mode_info (lossless key-frame subset) ---
         let skip = self.read_skip(dec, r, c, avail_u, avail_l)?;
 
+        // read_cdef (§5.11.56) sits right after read_skip; segment id and the
+        // delta-q/delta-lf reads that surround it in the spec are all absent in
+        // this subset.
+        self.read_cdef(dec, r, c, bw4, bh4, skip)?;
+
         let y_mode = self.read_intra_frame_y_mode(dec, r, c, avail_u, avail_l)?;
         let y_delta = self.read_angle_delta(dec, y_mode, bw4, bh4)?;
 
@@ -799,6 +834,49 @@ impl TileState {
         }
         let cdf_row = get_mut(&mut self.cdfs.skip, ctx)?;
         Ok(dec.read_symbol(cdf_row)? != 0)
+    }
+
+    /// `read_cdef` (§5.11.56): read the `cdef_idx` literal for the 64x64 block
+    /// containing `(r, c)`, the first time that block is reached. A skip block,
+    /// a coded-lossless frame, or CDEF being disabled reads nothing (`allow_intrabc`
+    /// is always false in this subset). `cdef_bits` is often zero, in which case
+    /// the literal is empty and the index is simply 0 (filtering with the single
+    /// coded strength).
+    fn read_cdef(
+        &mut self,
+        dec: &mut SymbolDecoder<'_>,
+        r: usize,
+        c: usize,
+        bw4: usize,
+        bh4: usize,
+        skip: bool,
+    ) -> Result<()> {
+        if skip || self.lossless || !self.enable_cdef {
+            return Ok(());
+        }
+        // CDEF parameters are stored per 64x64 luma block (16 units).
+        let cdef_size4 = 16;
+        let mask = !(cdef_size4 - 1);
+        let base_r = r & mask;
+        let base_c = c & mask;
+        if self.cdef_idx.get(base_r * self.mi_cols + base_c).copied() != Some(-1) {
+            return Ok(());
+        }
+        let value = dec.read_literal(self.cdef.bits)? as i16;
+        let mut i = base_r;
+        while i < base_r + bh4 {
+            let mut j = base_c;
+            while j < base_c + bw4 {
+                if i < self.mi_rows && j < self.mi_cols {
+                    if let Some(slot) = self.cdef_idx.get_mut(i * self.mi_cols + j) {
+                        *slot = value;
+                    }
+                }
+                j += cdef_size4;
+            }
+            i += cdef_size4;
+        }
+        Ok(())
     }
 
     fn read_intra_frame_y_mode(

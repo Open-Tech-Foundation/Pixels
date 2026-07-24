@@ -77,6 +77,9 @@ FIXTURES = {
     "gradient_deblock": (gradient(64, 64), False, 24, "444", 0),
     "blocks_deblock": (blocks(48, 40), False, 20, "444", 0),
     "gradient_odd_deblock": (gradient(50, 34), False, 28, "444", 0),
+    "gradient_cdef": (gradient(64, 64), False, 20, "444", 0),
+    "blocks_cdef": (blocks(48, 40), False, 20, "444", 0),
+    "gradient_odd_cdef": (gradient(50, 34), False, 22, "444", 0),
 }
 
 # aom options that disable every in-loop post-filter, so a filter-free decoder
@@ -101,6 +104,20 @@ DEBLOCK_AOM_OPTS = [
     "enable-tpl-model=0",
 ]
 
+# "cdef" fixtures turn the CDEF post-filter (§7.15) ON and, to isolate it,
+# deblocking OFF (loopfilter-control=0), so a CDEF bug is the only thing that can
+# make the raster differ. CDEF must be enabled explicitly here — with these `-a`
+# overrides it otherwise defaults off. Loop restoration stays off (unimplemented)
+# and the quantiser is uniform. Our reconstruct applies CDEF, so these decode
+# byte-exact.
+CDEF_AOM_OPTS = [
+    "enable-cdef=1",
+    "enable-restoration=0",
+    "loopfilter-control=0",
+    "deltaq-mode=0",
+    "enable-tpl-model=0",
+]
+
 
 def encode(image: Image.Image, path: str, lossless: bool, quality: int, yuv: str) -> None:
     png = path + ".src.png"
@@ -113,7 +130,13 @@ def encode(image: Image.Image, path: str, lossless: bool, quality: int, yuv: str
         # range) so the decode compares in the same RGB == (V, Y, U) space the
         # lossless fixtures use, and with every post-filter disabled.
         cmd += ["-q", str(quality), "-r", "full", "--cicp", "1/13/0"]
-        opts = DEBLOCK_AOM_OPTS if "deblock" in os.path.basename(path) else NOFILTER_AOM_OPTS
+        basename = os.path.basename(path)
+        if "cdef" in basename:
+            opts = CDEF_AOM_OPTS
+        elif "deblock" in basename:
+            opts = DEBLOCK_AOM_OPTS
+        else:
+            opts = NOFILTER_AOM_OPTS
         for opt in opts:
             cmd += ["-a", opt]
     cmd += [png, path]

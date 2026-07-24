@@ -556,6 +556,10 @@ mod tests {
         // The last "left" sample rose and the first "right" sample fell.
         let row = planes[0].row(4).unwrap();
         assert!(row[7] > 100, "left edge sample should rise, got {}", row[7]);
-        assert!(row[8] < 140, "right edge sample should fall, got {}", row[8]);
+        assert!(
+            row[8] < 140,
+            "right edge sample should fall, got {}",
+            row[8]
+        );
     }
 }

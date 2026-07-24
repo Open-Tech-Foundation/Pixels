@@ -67,16 +67,18 @@ fn decode(bytes: &[u8]) -> otf_pixels_core::Result<(Vec<u8>, otf_pixels_core::Im
 }
 
 /// Exact means exact: for every fixture this decoder can handle the raster must
-/// equal libavif's to the byte. Three flavours: `lossless` (4x4 WHT, no
-/// filters); `nofilter` (genuinely lossy — DCT/ADST, larger transforms,
-/// chroma-from-luma — but every in-loop filter off); and `deblock` (lossy with
-/// the deblocking loop filter §7.14 on, CDEF/restoration off). All must match
-/// exactly, since the reconstruct now applies deblocking.
+/// equal libavif's to the byte. Four flavours: `lossless` (4x4 WHT, no filters);
+/// `nofilter` (genuinely lossy — DCT/ADST, larger transforms, chroma-from-luma —
+/// but every in-loop filter off); `deblock` (lossy with the deblocking loop
+/// filter §7.14 on, CDEF/restoration off); and `cdef` (lossy with CDEF §7.15 on,
+/// deblocking/restoration off, to isolate it). All must match exactly, since the
+/// reconstruct now applies both deblocking and CDEF.
 #[test]
 fn reference_fixtures_decode_exactly() {
     let mut compared = 0;
     let mut lossy_compared = 0;
     let mut deblock_compared = 0;
+    let mut cdef_compared = 0;
     for reference in references() {
         let result = decode(&read_fixture(&reference.name, "avif"));
         let (ours, descriptor) = match result {
@@ -118,6 +120,9 @@ fn reference_fixtures_decode_exactly() {
         if reference.name.contains("deblock") {
             deblock_compared += 1;
         }
+        if reference.name.contains("cdef") {
+            cdef_compared += 1;
+        }
     }
     assert!(compared >= 2, "only {compared} fixtures decoded");
     assert!(
@@ -129,5 +134,10 @@ fn reference_fixtures_decode_exactly() {
         deblock_compared >= 1,
         "no deblock fixture was compared — deblocking regressed to Unsupported \
          or the manifest lost its deblock entries"
+    );
+    assert!(
+        cdef_compared >= 1,
+        "no cdef fixture was compared — CDEF regressed to Unsupported or the \
+         manifest lost its cdef entries"
     );
 }
