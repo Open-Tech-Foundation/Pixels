@@ -424,6 +424,40 @@ def reference_raster(path: str) -> Image.Image:
     return rgb
 
 
+# Files this decoder must *refuse*: each uses one coding tool it does not
+# implement yet, and decoding past such a tool without it yields a wrong image
+# with no error. `tests/unsupported.rs` asserts every file here decodes to
+# `Unsupported`; when a tool lands, its file moves into FIXTURES with a
+# reference raster. name -> (image, avifenc arguments). All lossy, 4:4:4 with
+# the identity matrix unless the tool under test is the colour format itself.
+IDENTITY_444 = ["-y", "444", "-r", "full", "--cicp", "1/13/0", "-q", "60"]
+UNSUPPORTED = {
+    "delta_q": (mixed(128, 64, 3), [*IDENTITY_444, "-a", "deltaq-mode=3"]),
+    "qmatrix": (textured(64, 64), [*IDENTITY_444, "-a", "enable-qm=1"]),
+    "depth10": (textured(32, 32), [*IDENTITY_444, "-d", "10"]),
+    "monochrome": (textured(32, 32), ["-y", "400", "-q", "60"]),
+    "yuv420": (textured(32, 32), ["-y", "420", "-q", "60"]),
+    "tiles": (textured(128, 64), [*IDENTITY_444, "--tilecolslog2", "1"]),
+}
+
+
+def write_unsupported(fixtures: str) -> None:
+    directory = os.path.join(fixtures, "unsupported")
+    os.makedirs(directory, exist_ok=True)
+    for name, (image, args) in sorted(UNSUPPORTED.items()):
+        png = os.path.join(directory, name + ".src.png")
+        image.save(png, "PNG")
+        path = os.path.join(directory, name + ".avif")
+        subprocess.run(
+            ["avifenc", "-s", "6", *args, png, path],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        os.remove(png)
+        print(f"unsupported/{name}: {os.path.getsize(path)} bytes")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("fixtures", help="directory to write fixtures into")
@@ -454,6 +488,8 @@ def main() -> int:
             out.write(raster)
         manifest.append(f"{name} {width} {height} {channels} {tolerance}")
         print(f"{name}: {width}x{height}x{channels}, {os.path.getsize(path)} bytes")
+
+    write_unsupported(args.fixtures)
 
     with open(os.path.join(args.fixtures, "REFERENCE"), "w") as out:
         out.write("\n".join(manifest) + "\n")

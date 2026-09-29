@@ -103,6 +103,11 @@ pub fn decode_still(
              grain synthesis is not implemented yet",
         ));
     }
+    if let Some(tool) = unimplemented_tool(seq, frame) {
+        return Err(PixelsError::unsupported(format!(
+            "avif: {tool} is not implemented yet"
+        )));
+    }
     if seq.color.subsampling_x != 0 || seq.color.subsampling_y != 0 {
         return Err(PixelsError::unsupported(
             "avif: only 4:4:4 is implemented in the lossless path",
@@ -134,6 +139,30 @@ pub fn decode_still(
 /// super-resolution (§7.16) and loop restoration (§7.17) are all implemented.
 fn unimplemented_filters_off(frame: &FrameHeader) -> bool {
     !frame.film_grain.apply_grain
+}
+
+/// The first coding tool `seq`/`frame` switch on that the tile decoder does not
+/// implement, if any. Each of these changes what is *coded* — extra symbols
+/// (`segment_id`, `delta_qindex`, `delta_lf`) or a different dequantisation
+/// (quantizer matrices) — so decoding past one without it produces a wrong
+/// image with no error. Bit depths other than 8 and monochrome are refused
+/// until their reconstruct and output paths are verified against libaom.
+fn unimplemented_tool(seq: &SequenceHeader, frame: &FrameHeader) -> Option<&'static str> {
+    if seq.color.bit_depth != 8 {
+        Some("a bit depth other than 8")
+    } else if seq.color.mono_chrome {
+        Some("monochrome")
+    } else if frame.segmentation.enabled {
+        Some("segmentation")
+    } else if frame.delta_q_present {
+        Some("per-superblock quantizer deltas (delta_q)")
+    } else if frame.delta_lf_present {
+        Some("per-superblock loop-filter deltas (delta_lf)")
+    } else if frame.quantization.using_qmatrix {
+        Some("quantizer matrices")
+    } else {
+        None
+    }
 }
 
 /// `MiSize >= BLOCK_8X8` for a block of `bw4 x bh4` 4x4 units. The spec compares

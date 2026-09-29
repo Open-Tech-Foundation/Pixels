@@ -53,6 +53,17 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Fixed
+- The AVIF decoder silently produced a wrong image — no error — for frames
+  coded with per-superblock quantizer deltas (`delta_q`) or quantizer matrices,
+  both of which libaom emits under common tuning (`deltaq-mode=3`,
+  `enable-qm=1`); a 10-bit frame failed with a misleading "raster is short"
+  malformed error. The tile decoder reads none of these tools, so it now
+  refuses them — along with segmentation, `delta_lf` and monochrome — as
+  `Unsupported` before decoding, keeping the promise that an unimplemented tool
+  fails cleanly rather than decoding wrong. A new `tests/unsupported.rs` holds
+  one real avifenc encode per refused tool and asserts each is refused *for its
+  own tool*; verified by removing the check, which let `delta_q` and `qmatrix`
+  "decode".
 - The AVIF decoder read `angle_delta` and `palette_mode_info` only for blocks at
   least 8 samples in *both* dimensions. The spec's gate is `MiSize >=
   BLOCK_8X8` in block-size *enum* order, where 4x16 and 16x4 sort after 8x8, so
