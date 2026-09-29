@@ -57,6 +57,42 @@ def blocks(width: int, height: int) -> Image.Image:
     return image
 
 
+def textured(width: int, height: int) -> Image.Image:
+    """A gradient with deterministic high-frequency noise. Lossy coding of this
+    rings, which is exactly what loop restoration is designed to clean up, so it
+    is what makes the encoder actually pick Wiener/self-guided units."""
+    import random
+
+    rng = random.Random(1234)
+    image = gradient(width, height)
+    pixels = image.load()
+    for y in range(height):
+        for x in range(width):
+            n = rng.randint(-55, 55)
+            pixels[x, y] = tuple(max(0, min(255, c + n)) for c in pixels[x, y])
+    return image
+
+
+def mixed(width: int, height: int, seed: int) -> Image.Image:
+    """A gradient split into a 4x3 grid of regions with different noise
+    amplitudes, from clean to heavy. Regions that ring differently make the
+    encoder choose differently per restoration unit — none, Wiener or
+    self-guided, and a switchable frame type — across a multi-unit grid."""
+    import random
+
+    amplitudes = [0, 10, 30, 60, 5, 45, 20, 70, 15, 0, 40, 25]
+    rng = random.Random(seed)
+    image = gradient(width, height)
+    pixels = image.load()
+    for y in range(height):
+        for x in range(width):
+            region = (x * 4 // width) + (y * 3 // height) * 4
+            amplitude = amplitudes[region % len(amplitudes)]
+            n = rng.randint(-amplitude, amplitude) if amplitude else 0
+            pixels[x, y] = tuple(max(0, min(255, c + n)) for c in pixels[x, y])
+    return image
+
+
 # name -> (image, lossless, quality, yuv, tolerance)
 #
 # Lossless fixtures are `CodedLossless` and must round-trip exactly. The
@@ -80,6 +116,25 @@ FIXTURES = {
     "gradient_cdef": (gradient(64, 64), False, 20, "444", 0),
     "blocks_cdef": (blocks(48, 40), False, 20, "444", 0),
     "gradient_odd_cdef": (gradient(50, 34), False, 22, "444", 0),
+    # Loop restoration (§7.17). The encoder only picks Wiener/self-guided units
+    # at speed <= 4 on content that rings, so these are textured and encoded
+    # slower (see `encode`). "restore" isolates loop restoration (deblock + CDEF
+    # off); "restore_full" runs the whole in-loop pipeline (deblock + CDEF + LR)
+    # so the stripe boundary — where restoration fetches pre-CDEF samples — is
+    # exercised for real.
+    "textured_nofilter": (textured(128, 128), False, 18, "444", 0),
+    "textured_restore": (textured(128, 128), False, 18, "444", 0),
+    "textured_odd_restore": (textured(100, 70), False, 22, "444", 0),
+    "textured_restore_full": (textured(128, 128), False, 18, "444", 0),
+    # Multi-unit restoration: a 2x2 unit grid per plane (256-sample units).
+    # "mixed_restore" codes luma as none + Wiener units and chroma as a
+    # switchable frame with none, Wiener and self-guided units; the "_full"
+    # variant codes luma as switchable Wiener + self-guided under the whole
+    # in-loop pipeline. Together they cover the restoration_type symbol, the
+    # running per-plane Wiener/self-guided references across units, and unit
+    # boundaries inside a stripe.
+    "mixed_restore": (mixed(512, 384, 7), False, 18, "444", 0),
+    "mixed_restore_full": (mixed(400, 384, 3), False, 25, "444", 0),
 }
 
 # aom options that disable every in-loop post-filter, so a filter-free decoder
@@ -118,20 +173,52 @@ CDEF_AOM_OPTS = [
     "enable-tpl-model=0",
 ]
 
+# "restore" fixtures turn loop restoration (§7.17) ON, isolated by turning
+# deblocking and CDEF off, so a restoration bug is the only thing that can make
+# the raster differ. Restoration must be enabled explicitly (it defaults off with
+# these `-a` overrides).
+RESTORE_AOM_OPTS = [
+    "enable-restoration=1",
+    "enable-cdef=0",
+    "loopfilter-control=0",
+    "deltaq-mode=0",
+    "enable-tpl-model=0",
+]
+
+# "restore_full" fixtures run the whole implemented in-loop pipeline: deblocking,
+# CDEF and loop restoration all ON. This exercises the restoration stripe
+# boundary, where samples are fetched from the pre-CDEF frame rather than the
+# CDEF output.
+RESTORE_FULL_AOM_OPTS = [
+    "enable-restoration=1",
+    "enable-cdef=1",
+    "deltaq-mode=0",
+    "enable-tpl-model=0",
+]
+
 
 def encode(image: Image.Image, path: str, lossless: bool, quality: int, yuv: str) -> None:
     png = path + ".src.png"
     image.save(png, "PNG")
-    cmd = ["avifenc", "-s", "6", "-y", yuv]
+    basename = os.path.basename(path)
+    # The encoder only searches loop-restoration units at speed <= 4, so the
+    # "restore" fixtures are encoded slower. The "nofilter" fixtures are too:
+    # speed 4 also reaches block shapes (4x16/16x4 with angle deltas and
+    # palettes) that speed 6 never picks. Everything else stays at speed 6.
+    speed = "4" if ("restore" in basename or "nofilter" in basename) else "6"
+    cmd = ["avifenc", "-s", speed, "-y", yuv]
     if lossless:
         cmd.append("--lossless")
     else:
         # Lossy with an identity colour matrix (matrix_coefficients == 0, full
         # range) so the decode compares in the same RGB == (V, Y, U) space the
-        # lossless fixtures use, and with every post-filter disabled.
+        # lossless fixtures use, and with the relevant post-filters selected.
         cmd += ["-q", str(quality), "-r", "full", "--cicp", "1/13/0"]
-        basename = os.path.basename(path)
-        if "cdef" in basename:
+        if "restore_full" in basename:
+            opts = RESTORE_FULL_AOM_OPTS
+        elif "restore" in basename:
+            opts = RESTORE_AOM_OPTS
+        elif "cdef" in basename:
             opts = CDEF_AOM_OPTS
         elif "deblock" in basename:
             opts = DEBLOCK_AOM_OPTS

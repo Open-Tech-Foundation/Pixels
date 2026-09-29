@@ -67,18 +67,20 @@ fn decode(bytes: &[u8]) -> otf_pixels_core::Result<(Vec<u8>, otf_pixels_core::Im
 }
 
 /// Exact means exact: for every fixture this decoder can handle the raster must
-/// equal libavif's to the byte. Four flavours: `lossless` (4x4 WHT, no filters);
+/// equal libavif's to the byte. Flavours: `lossless` (4x4 WHT, no filters);
 /// `nofilter` (genuinely lossy — DCT/ADST, larger transforms, chroma-from-luma —
 /// but every in-loop filter off); `deblock` (lossy with the deblocking loop
-/// filter §7.14 on, CDEF/restoration off); and `cdef` (lossy with CDEF §7.15 on,
-/// deblocking/restoration off, to isolate it). All must match exactly, since the
-/// reconstruct now applies both deblocking and CDEF.
+/// filter §7.14 on, CDEF/restoration off); `cdef` (lossy with CDEF §7.15 on,
+/// deblocking/restoration off, to isolate it); `restore` (loop restoration §7.17
+/// on, deblocking/CDEF off); and `restore_full` (all three in-loop filters on).
+/// All must match exactly, since the reconstruct applies every in-loop filter.
 #[test]
 fn reference_fixtures_decode_exactly() {
     let mut compared = 0;
     let mut lossy_compared = 0;
     let mut deblock_compared = 0;
     let mut cdef_compared = 0;
+    let mut restore_compared = 0;
     for reference in references() {
         let result = decode(&read_fixture(&reference.name, "avif"));
         let (ours, descriptor) = match result {
@@ -123,6 +125,9 @@ fn reference_fixtures_decode_exactly() {
         if reference.name.contains("cdef") {
             cdef_compared += 1;
         }
+        if reference.name.contains("restore") {
+            restore_compared += 1;
+        }
     }
     assert!(compared >= 2, "only {compared} fixtures decoded");
     assert!(
@@ -139,5 +144,10 @@ fn reference_fixtures_decode_exactly() {
         cdef_compared >= 1,
         "no cdef fixture was compared — CDEF regressed to Unsupported or the \
          manifest lost its cdef entries"
+    );
+    assert!(
+        restore_compared >= 1,
+        "no restore fixture was compared — loop restoration regressed to \
+         Unsupported or the manifest lost its restore entries"
     );
 }

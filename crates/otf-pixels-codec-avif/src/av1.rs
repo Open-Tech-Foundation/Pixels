@@ -25,6 +25,7 @@ mod obu;
 mod palette;
 mod plane;
 mod predict;
+mod restoration;
 mod seq;
 mod still;
 mod symbol;

@@ -10,9 +10,9 @@
 //! Scope is the single-tile intra still image in YUV 4:4:4. Both `CodedLossless`
 //! (every transform is 4x4 WHT) and lossy frames decode here — the lossy path
 //! runs the full DCT/ADST/identity inverse transforms at every transform size,
-//! followed by the deblocking loop filter (§7.14) and CDEF (§7.15). The later
-//! post-filters (loop restoration, super-resolution, film grain) are not
-//! implemented, so a lossy frame is reproduced exactly only when it codes those off
+//! followed by the in-loop filters: deblocking (§7.14), CDEF (§7.15) and loop
+//! restoration (§7.17). Super-resolution and film grain are not implemented, so
+//! a lossy frame is reproduced exactly only when it codes those off
 //! (`unimplemented_filters_off`); any other lossy frame is refused. Every intra
 //! prediction mode is handled —
 //! DC, Paeth, the smooth family, the slanted directional modes (with their
@@ -32,6 +32,10 @@ use super::frame::{Cdef, FrameHeader, LoopFilter, TxMode};
 use super::palette::{PALETTE_COLORS, color_context, palette_cache};
 use super::plane::Plane;
 use super::predict::{IntraMode, PredBlock, predict_intra_block};
+use super::restoration::{
+    LoopRestore, PlaneLr, RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_SWITCHABLE, RESTORE_WIENER,
+    SGRPROJ_XQD_MID, WIENER_TAPS_MID, count_units_in_frame, read_sgrproj_unit, read_wiener_unit,
+};
 use super::seq::SequenceHeader;
 use super::symbol::SymbolDecoder;
 use super::transform::{TxSize, ac_q, add_residual, dc_q, dequantize, inverse_transform_2d};
@@ -71,32 +75,31 @@ pub struct DecodedFrame {
 }
 
 /// Decode a single-tile intra still frame into its sample planes. Handles both
-/// lossless and lossy frames, the latter only when every in-loop post-filter is
-/// disabled (see `unimplemented_filters_off`).
+/// lossless and lossy frames, the latter only when super-resolution and film
+/// grain are disabled (see `unimplemented_filters_off`).
 ///
 /// # Errors
 ///
 /// Returns [`PixelsError::unsupported`] for anything outside the 4:4:4 intra
 /// subset this decodes — subsampled chroma, multiple tiles, intra block copy, or
-/// a lossy frame with post-filters active — and [`PixelsError::malformed`] for a
+/// a lossy frame using super-resolution or film grain — and [`PixelsError::malformed`] for a
 /// stream that ends early or violates the syntax.
 pub fn decode_still(
     seq: &SequenceHeader,
     frame: &FrameHeader,
     tile_data: &[u8],
 ) -> Result<DecodedFrame> {
-    // We reconstruct the residual and apply the deblocking loop filter (§7.14)
-    // and CDEF (§7.15), but not the later post-filters. A lossy frame is
-    // reproduced exactly only when every unimplemented post-filter — loop
-    // restoration, super-resolution and film grain — is disabled; deblocking and
-    // CDEF may be on. Any other lossy frame would decode to a visibly wrong
-    // image, so it is refused. A coded-lossless frame turns all of these off by
+    // We reconstruct the residual and apply every in-loop filter — deblocking
+    // (§7.14), CDEF (§7.15) and loop restoration (§7.17) — but not
+    // super-resolution or film grain. A lossy frame is reproduced exactly only
+    // when those two are disabled; any other lossy frame would decode to a
+    // visibly wrong image, so it is refused. A coded-lossless frame turns all of these off by
     // definition.
     if !frame.coded_lossless && !unimplemented_filters_off(frame) {
         return Err(PixelsError::unsupported(
-            "avif: lossy frames are decoded only with loop restoration, \
-             super-resolution and film grain disabled (deblocking and CDEF are \
-             applied); those post-filters are not implemented yet",
+            "avif: lossy frames are decoded only with super-resolution and film \
+             grain disabled (deblocking, CDEF and loop restoration are applied); \
+             those are not implemented yet",
         ));
     }
     if seq.color.subsampling_x != 0 || seq.color.subsampling_y != 0 {
@@ -126,14 +129,54 @@ pub fn decode_still(
 
 /// Whether every post-filter this decoder does *not* implement is disabled, so
 /// the reconstruct plus the implemented in-loop filters reproduces the frame
-/// exactly. Checks loop restoration (no plane uses it), super-resolution (the
-/// coded width equals the upscaled width) and film grain. Deblocking (§7.14) and
-/// CDEF (§7.15) are implemented and so are not required to be off.
+/// exactly. Checks super-resolution (the coded width equals the upscaled width)
+/// and film grain. Deblocking (§7.14), CDEF (§7.15) and loop restoration (§7.17)
+/// are implemented and so are not required to be off.
 fn unimplemented_filters_off(frame: &FrameHeader) -> bool {
-    let restoration_off = !frame.loop_restoration.uses_lr;
     let superres_off = frame.frame_width == frame.upscaled_width;
     let grain_off = !frame.film_grain.apply_grain;
-    restoration_off && superres_off && grain_off
+    superres_off && grain_off
+}
+
+/// `MiSize >= BLOCK_8X8` for a block of `bw4 x bh4` 4x4 units. The spec compares
+/// block-size *enum* values, and 4x16/16x4 sort after 8x8, so this excludes only
+/// 4x4, 4x8 and 8x4 — an area of at least four units — rather than requiring
+/// both dimensions to reach 8. Gates `angle_delta` and `palette_mode_info`.
+fn at_least_block_8x8(bw4: usize, bh4: usize) -> bool {
+    bw4 * bh4 >= 4
+}
+
+/// Build the per-plane loop-restoration records (§7.17): the frame filter type,
+/// the unit size, and the unit-grid dimensions (`count_units_in_frame` over the
+/// plane's rounded dimensions). Per-unit data is filled later by `read_lr`.
+fn build_plane_lr(seq: &SequenceHeader, frame: &FrameHeader) -> Vec<PlaneLr> {
+    let num_planes = seq.color.num_planes as usize;
+    let lr = &frame.loop_restoration;
+    let upscaled_width = frame.upscaled_width as usize;
+    let frame_height = frame.frame_height as usize;
+    // Round2(x, n) for n in {0, 1}: the only subsampling shifts.
+    let round2 = |x: usize, n: usize| if n == 0 { x } else { (x + 1) >> 1 };
+    (0..num_planes)
+        .map(|plane| {
+            let frt = lr
+                .frame_restoration_type
+                .get(plane)
+                .copied()
+                .unwrap_or(RESTORE_NONE);
+            let unit_size = lr.unit_size.get(plane).copied().unwrap_or(256) as usize;
+            let (sub_x, sub_y) = if plane == 0 {
+                (0, 0)
+            } else {
+                (
+                    seq.color.subsampling_x as usize,
+                    seq.color.subsampling_y as usize,
+                )
+            };
+            let rows = count_units_in_frame(unit_size, round2(frame_height, sub_y));
+            let cols = count_units_in_frame(unit_size, round2(upscaled_width, sub_x));
+            PlaneLr::new(frt, unit_size, rows, cols)
+        })
+        .collect()
 }
 
 /// Mutable CDFs for the frame, cloned from the defaults and adapted as symbols
@@ -162,6 +205,9 @@ struct FrameCdfs {
     coeff: CoeffCdfs,
     intra_tx_type: IntraTxTypeCdfs,
     tx_depth: TxDepthCdfs,
+    restoration_type: [u16; 4],
+    use_wiener: [u16; 3],
+    use_sgrproj: [u16; 3],
 }
 
 /// The seven palette colour-index CDFs, one per palette size 2..=8.
@@ -232,6 +278,9 @@ impl FrameCdfs {
             coeff: CoeffCdfs::new(qctx),
             intra_tx_type: IntraTxTypeCdfs::new(),
             tx_depth: TxDepthCdfs::new(),
+            restoration_type: cdf::DEFAULT_RESTORATION_TYPE_CDF,
+            use_wiener: cdf::DEFAULT_USE_WIENER_CDF,
+            use_sgrproj: cdf::DEFAULT_USE_SGRPROJ_CDF,
         }
     }
 }
@@ -294,6 +343,16 @@ struct TileState {
     /// Chroma subsampling (0 for 4:4:4), for the CDEF filter's plane geometry.
     subsampling_x: usize,
     subsampling_y: usize,
+    /// Whether any plane uses loop restoration (`UsesLr`).
+    uses_lr: bool,
+    /// Per-plane loop-restoration parameters and per-unit filter data, filled by
+    /// `read_lr` during tile decode. Empty when `uses_lr` is false.
+    lr: Vec<PlaneLr>,
+    /// `RefLrWiener[plane][pass][coeff]`: the running Wiener reference, reset per
+    /// tile and updated by each coded unit.
+    ref_lr_wiener: [[[i32; 3]; 2]; 3],
+    /// `RefSgrXqd[plane][i]`: the running self-guided projection reference.
+    ref_sgr_xqd: [[i32; 2]; 3],
     sb_size4: usize,
     /// `BlockDecoded[plane]`, one flat `(sb+2) x (sb+2)` grid per plane, reset
     /// per superblock; addressed with a one-unit border so index -1 is valid.
@@ -382,6 +441,10 @@ impl TileState {
             cdef_idx: vec![-1; mi_cols * mi_rows],
             subsampling_x: seq.color.subsampling_x as usize,
             subsampling_y: seq.color.subsampling_y as usize,
+            uses_lr: frame.loop_restoration.uses_lr,
+            lr: build_plane_lr(seq, frame),
+            ref_lr_wiener: [[WIENER_TAPS_MID; 2]; 3],
+            ref_sgr_xqd: [SGRPROJ_XQD_MID; 3],
             sb_size4,
             block_decoded,
             y_modes: vec![0; mi_cols * mi_rows],
@@ -409,13 +472,24 @@ impl TileState {
             let mut sb_col = 0;
             while sb_col < self.mi_cols {
                 self.clear_block_decoded(sb_row, sb_col);
+                self.read_lr(&mut dec, sb_row, sb_col)?;
                 self.decode_partition(&mut dec, sb_row, sb_col, sb_size4)?;
                 sb_col += sb_size4;
             }
             sb_row += sb_size4;
         }
         self.deblock();
-        self.cdef();
+        // Loop restoration reads both the pre-CDEF (deblocked) and post-CDEF
+        // frames, so when it runs, snapshot the deblocked frame before CDEF and
+        // the CDEF output after, then restore in place. When it does not, CDEF
+        // alone finishes the frame.
+        if self.uses_lr {
+            let curr = self.planes.clone();
+            self.cdef();
+            self.loop_restore(&curr);
+        } else {
+            self.cdef();
+        }
         Ok(())
     }
 
@@ -452,6 +526,27 @@ impl TileState {
             mi_cols: self.mi_cols,
             subsampling_x: self.subsampling_x,
             subsampling_y: self.subsampling_y,
+        }
+        .run();
+    }
+
+    /// Apply loop restoration (§7.17) to the CDEF output. `curr` is the pre-CDEF
+    /// (deblocked) frame; the post-CDEF frame is the current `planes`, which also
+    /// seed `LrFrame` — restoration overwrites only the blocks that need it,
+    /// reading throughout from the two snapshots so it never sees its own output.
+    fn loop_restore(&mut self, curr: &[Plane]) {
+        let cdef = self.planes.clone();
+        LoopRestore {
+            planes: &mut self.planes,
+            curr,
+            cdef: &cdef,
+            lr: &self.lr,
+            bit_depth: self.bit_depth,
+            num_planes: self.num_planes,
+            subsampling_x: self.subsampling_x,
+            subsampling_y: self.subsampling_y,
+            upscaled_width: self.frame_width,
+            frame_height: self.frame_height,
         }
         .run();
     }
@@ -751,15 +846,15 @@ impl TileState {
             (DC_PRED, 0, None)
         };
 
-        // palette_mode_info (§5.11.46): only for DC blocks of 8x8..64x64 when
-        // screen-content tools are enabled.
+        // palette_mode_info (§5.11.46): only when screen-content tools are
+        // enabled, for `MiSize >= BLOCK_8X8` up to 64x64.
         let mut palette = Palette {
             block_w: bw4 * MI_SIZE,
             block_h: bh4 * MI_SIZE,
             ..Palette::default()
         };
         let palette_ok =
-            self.allow_screen_content && bw4 >= 2 && bh4 >= 2 && bw4 <= 16 && bh4 <= 16;
+            self.allow_screen_content && at_least_block_8x8(bw4, bh4) && bw4 <= 16 && bh4 <= 16;
         if palette_ok {
             self.read_palette_mode_info(
                 dec,
@@ -879,6 +974,112 @@ impl TileState {
         Ok(())
     }
 
+    /// `read_lr` (§5.11.57): read the loop-restoration units this superblock
+    /// covers, once per plane that uses restoration. `allow_intrabc` is always
+    /// false in this subset, and there is no super-resolution, so the unit-column
+    /// mapping uses `MI_SIZE >> subX` directly.
+    fn read_lr(&mut self, dec: &mut SymbolDecoder<'_>, r: usize, c: usize) -> Result<()> {
+        if !self.uses_lr {
+            return Ok(());
+        }
+        let (w4, h4) = (self.sb_size4, self.sb_size4);
+        for plane in 0..self.num_planes {
+            let Some(info) = self.lr.get(plane) else {
+                continue;
+            };
+            if info.frame_restoration_type == RESTORE_NONE {
+                continue;
+            }
+            let (sub_x, sub_y) = if plane == 0 {
+                (0, 0)
+            } else {
+                (self.subsampling_x, self.subsampling_y)
+            };
+            let unit_size = info.unit_size;
+            let unit_rows = info.unit_rows;
+            let unit_cols = info.unit_cols;
+            let unit_row_start = (r * (MI_SIZE >> sub_y)).div_ceil(unit_size);
+            let unit_row_end = unit_rows.min(((r + h4) * (MI_SIZE >> sub_y)).div_ceil(unit_size));
+            let numerator = MI_SIZE >> sub_x;
+            let unit_col_start = (c * numerator).div_ceil(unit_size);
+            let unit_col_end = unit_cols.min(((c + w4) * numerator).div_ceil(unit_size));
+            for unit_row in unit_row_start..unit_row_end {
+                for unit_col in unit_col_start..unit_col_end {
+                    self.read_lr_unit(dec, plane, unit_row, unit_col)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `read_lr_unit` (§5.11.58): read one restoration unit's type and, for a
+    /// Wiener or self-guided unit, its coefficients (which update the running
+    /// per-plane reference used by the sub-exponential coding).
+    fn read_lr_unit(
+        &mut self,
+        dec: &mut SymbolDecoder<'_>,
+        plane: usize,
+        unit_row: usize,
+        unit_col: usize,
+    ) -> Result<()> {
+        let frame_type = self
+            .lr
+            .get(plane)
+            .map_or(RESTORE_NONE, |p| p.frame_restoration_type);
+        let restoration_type = match frame_type {
+            RESTORE_WIENER => {
+                if dec.read_symbol(&mut self.cdfs.use_wiener)? != 0 {
+                    RESTORE_WIENER
+                } else {
+                    RESTORE_NONE
+                }
+            }
+            RESTORE_SGRPROJ => {
+                if dec.read_symbol(&mut self.cdfs.use_sgrproj)? != 0 {
+                    RESTORE_SGRPROJ
+                } else {
+                    RESTORE_NONE
+                }
+            }
+            RESTORE_SWITCHABLE => dec.read_symbol(&mut self.cdfs.restoration_type)? as u8,
+            _ => RESTORE_NONE,
+        };
+
+        let unit_cols = self.lr.get(plane).map_or(0, |p| p.unit_cols);
+        let idx = unit_row * unit_cols + unit_col;
+        if let Some(p) = self.lr.get_mut(plane) {
+            if let Some(t) = p.lr_type.get_mut(idx) {
+                *t = restoration_type;
+            }
+        }
+
+        if restoration_type == RESTORE_WIENER {
+            let coeffs = match self.ref_lr_wiener.get_mut(plane) {
+                Some(reference) => read_wiener_unit(dec, reference, plane != 0)?,
+                None => return Ok(()),
+            };
+            if let Some(p) = self.lr.get_mut(plane) {
+                if let Some(slot) = p.wiener.get_mut(idx) {
+                    *slot = coeffs;
+                }
+            }
+        } else if restoration_type == RESTORE_SGRPROJ {
+            let (set, xqd) = match self.ref_sgr_xqd.get_mut(plane) {
+                Some(reference) => read_sgrproj_unit(dec, reference)?,
+                None => return Ok(()),
+            };
+            if let Some(p) = self.lr.get_mut(plane) {
+                if let Some(s) = p.sgr_set.get_mut(idx) {
+                    *s = set;
+                }
+                if let Some(x) = p.sgr_xqd.get_mut(idx) {
+                    *x = xqd;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn read_intra_frame_y_mode(
         &mut self,
         dec: &mut SymbolDecoder<'_>,
@@ -980,7 +1181,8 @@ impl TileState {
         palette: &mut Palette,
     ) -> Result<()> {
         // bsizeCtx = Mi_Width_Log2 + Mi_Height_Log2 - 2 (spec §5.11.46); palette
-        // is only reached for 8x8 and larger, so the subtraction never underflows.
+        // is only reached for blocks of at least four 4x4 units (log2 sum >= 2),
+        // so the subtraction never underflows.
         let bsize_ctx = (floor_log2_usize(bw4) + floor_log2_usize(bh4)).saturating_sub(2) as usize;
         let avail_u = r > 0;
         let avail_l = c > 0;
@@ -1183,9 +1385,9 @@ impl TileState {
         Ok(map)
     }
 
-    /// Read `angle_delta` for a directional mode on a block of at least 8x8,
-    /// returning the signed delta (`angle_delta - MAX_ANGLE_DELTA`). Zero for
-    /// non-directional modes and small blocks, which read nothing.
+    /// Read `angle_delta` for a directional mode on a `MiSize >= BLOCK_8X8`
+    /// block, returning the signed delta (`angle_delta - MAX_ANGLE_DELTA`). Zero
+    /// for non-directional modes and small blocks, which read nothing.
     fn read_angle_delta(
         &mut self,
         dec: &mut SymbolDecoder<'_>,
@@ -1194,8 +1396,7 @@ impl TileState {
         bh4: usize,
     ) -> Result<i32> {
         let directional = (1..=8).contains(&mode);
-        // "MiSize >= BLOCK_8X8": both dimensions at least two 4x4 units.
-        if directional && bw4 >= 2 && bh4 >= 2 {
+        if directional && at_least_block_8x8(bw4, bh4) {
             let index = mode - 1;
             let cdf_row = get_mut(&mut self.cdfs.angle_delta, index)?;
             let symbol = dec.read_symbol(cdf_row)? as i32;
@@ -2182,6 +2383,45 @@ mod tests {
         assert_eq!(block_size_index(2, 2), 3);
         assert_eq!(block_size_index(16, 16), 12);
         assert_eq!(block_size_index(16, 4), 21);
+    }
+
+    #[test]
+    fn at_least_block_8x8_follows_the_enum_order_not_the_dimensions() {
+        // Every block shape (in 4x4 units, up to 64x64): the gate must agree
+        // with `MiSize >= BLOCK_8X8` on the spec's enum. 4x16 and 16x4 sort
+        // after 8x8 though one side is 4 — missing that desynchronised
+        // `angle_delta` and `palette_mode_info` reads on those shapes.
+        let shapes = [
+            (1, 1),
+            (1, 2),
+            (2, 1),
+            (2, 2),
+            (2, 4),
+            (4, 2),
+            (4, 4),
+            (4, 8),
+            (8, 4),
+            (8, 8),
+            (8, 16),
+            (16, 8),
+            (16, 16),
+            (1, 4),
+            (4, 1),
+            (2, 8),
+            (8, 2),
+            (4, 16),
+            (16, 4),
+        ];
+        for (bw4, bh4) in shapes {
+            assert_eq!(
+                at_least_block_8x8(bw4, bh4),
+                block_size_index(bw4, bh4) >= 3,
+                "{bw4}x{bh4}"
+            );
+        }
+        assert!(at_least_block_8x8(1, 4));
+        assert!(at_least_block_8x8(4, 1));
+        assert!(!at_least_block_8x8(1, 2));
     }
 
     #[test]

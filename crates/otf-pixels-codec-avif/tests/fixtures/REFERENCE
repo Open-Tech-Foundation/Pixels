@@ -12,4 +12,10 @@ gradient_odd_cdef 50 34 3 0
 gradient_odd_deblock 50 34 3 0
 gradient_odd_lossless 37 29 3 0
 gradient_odd_nofilter 37 29 3 0
+mixed_restore 512 384 3 0
+mixed_restore_full 400 384 3 0
+textured_nofilter 128 128 3 0
+textured_odd_restore 100 70 3 0
+textured_restore 128 128 3 0
+textured_restore_full 128 128 3 0
 tiny_lossless 4 4 3 0

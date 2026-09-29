@@ -53,6 +53,16 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Fixed
+- The AVIF decoder read `angle_delta` and `palette_mode_info` only for blocks at
+  least 8 samples in *both* dimensions. The spec's gate is `MiSize >=
+  BLOCK_8X8` in block-size *enum* order, where 4x16 and 16x4 sort after 8x8, so
+  those two shapes do code both. A directional 4x16/16x4 block skipped its
+  `angle_delta` symbol and a DC one skipped its palette flag, desynchronising
+  the rest of the tile. The encoder only reaches for these shapes at slower
+  speeds, which is why every fixture encoded at speed 6 decoded correctly; the
+  filters-off lossy fixtures are now encoded at speed 4, and `textured_nofilter`
+  joins them. Found by diffing our symbol stream value for value against an
+  instrumented libaom decoder.
 - The AVIF decoder judged chroma-from-luma allowed only for a 4x4 block, which
   is the *lossless* 4:4:4 rule; for a lossy frame CfL is allowed for any block
   up to 32x32. An 8x8-or-larger lossy block therefore read `uv_mode` against the
@@ -94,6 +104,22 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- `otf-pixels-codec-avif` applies loop restoration (§7.17), the last in-loop
+  filter, after CDEF. Each restoration unit's type and coefficients are read
+  during tile decode (`read_lr`/`read_lr_unit`, §5.11.57–58): a Wiener, a
+  self-guided or — for a switchable frame — a `restoration_type` symbol, with
+  the coefficients sub-exponentially coded against a running per-plane
+  reference. The filter then runs in 64-row stripes: the separable 7-tap
+  (luma) / 5-tap (chroma) Wiener filter (§7.17.4), or the self-guided filter
+  (§7.17.2–3) blending two box-filter passes through the coded projection
+  weights. Samples within a stripe come from the CDEF output, and the rows just
+  beyond it from the pre-CDEF frame (§7.17.6). Lossy frames are now refused only
+  for super-resolution and film grain. Five restoration fixtures join the
+  reference corpus and decode byte-exact against libavif: restoration alone
+  (`textured_restore`, `textured_odd_restore`, `mixed_restore`) and the whole
+  deblock + CDEF + restoration pipeline (`textured_restore_full`,
+  `mixed_restore_full`). Between them they cover Wiener and self-guided units, a
+  switchable frame type on luma and on chroma, and multi-unit grids.
 - `otf-pixels-codec-avif` applies the constrained directional enhancement filter
   (CDEF, §7.15) after deblocking: the per-64x64 `cdef_idx` is read during tile
   decode (`read_cdef`, right after `read_skip`), and each 8x8 block is deringed
