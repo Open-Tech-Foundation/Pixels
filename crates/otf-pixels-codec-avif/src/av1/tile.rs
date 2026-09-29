@@ -145,12 +145,10 @@ fn unimplemented_filters_off(frame: &FrameHeader) -> bool {
 /// implement, if any. Each of these changes what is *coded* — extra symbols
 /// (`segment_id`, `delta_qindex`, `delta_lf`) or a different dequantisation
 /// (quantizer matrices) — so decoding past one without it produces a wrong
-/// image with no error. Bit depths other than 8 and monochrome are refused
-/// until their reconstruct and output paths are verified against libaom.
+/// image with no error. Monochrome is refused until its output path exists
+/// and is verified against libaom.
 fn unimplemented_tool(seq: &SequenceHeader, frame: &FrameHeader) -> Option<&'static str> {
-    if seq.color.bit_depth != 8 {
-        Some("a bit depth other than 8")
-    } else if seq.color.mono_chrome {
+    if seq.color.mono_chrome {
         Some("monochrome")
     } else if frame.segmentation.enabled {
         Some("segmentation")

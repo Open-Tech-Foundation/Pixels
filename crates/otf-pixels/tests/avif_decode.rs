@@ -51,6 +51,32 @@ fn a_420_avif_opens_and_crops_to_libavifs_pixels() {
 }
 
 #[test]
+fn a_ten_bit_avif_decodes_to_full_range_sixteen_bit_rgb() {
+    // photo_420_10bit: 10-bit 4:2:0. The engine has no 10-bit format, so it
+    // arrives as Rgb16 over the full 0..=65535 range, native-endian — within
+    // one 16-bit step of libavif's (little-endian) reference.
+    let image = Image::open(fixture("photo_420_10bit.avif")).unwrap();
+    assert_eq!(image.metadata().unwrap().pixel, PixelFormat::Rgb16);
+    let ours = image
+        .output(Format::Raw, EncodeOptions::default())
+        .bytes()
+        .unwrap();
+    let theirs = std::fs::read(fixture("photo_420_10bit.raw")).unwrap();
+    assert_eq!(ours.len(), 96 * 64 * 3 * 2);
+    let mut brightest = 0;
+    for (a, b) in ours.chunks_exact(2).zip(theirs.chunks_exact(2)) {
+        let (a, b) = (
+            u16::from_ne_bytes([a[0], a[1]]),
+            u16::from_le_bytes([b[0], b[1]]),
+        );
+        assert!(a.abs_diff(b) <= 1, "{a} vs {b}");
+        brightest = brightest.max(a);
+    }
+    // Rescaled, not left in 10-bit units.
+    assert!(brightest > 1023 * 16, "brightest sample {brightest}");
+}
+
+#[test]
 fn an_avif_using_an_unimplemented_tool_fails_cleanly_through_the_facade() {
     // Opening only reads the container; the refusal comes when pixels are
     // pulled, and it is a catchable Unsupported rather than a wrong image.

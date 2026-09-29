@@ -164,6 +164,22 @@ FIXTURES = {
     "photo_444": (mixed(96, 64, 3), False, 0, "", 1),
     "photo_420_bt709_studio": (mixed(96, 64, 3), False, 0, "", 5),
     "photo_420_bt2020": (mixed(96, 64, 3), False, 0, "", 2),
+    # 10- and 12-bit: decoded to 16-bit RGB over the full 0..=65535 range.
+    # Here libavif converts in floating point rather than through libyuv, and
+    # we agree on 99% of samples and within one 16-bit step on the rest — the
+    # tolerance is 1 step in 65535.
+    "photo_420_10bit": (mixed(96, 64, 3), False, 0, "", 1),
+    "photo_420_10bit_studio": (mixed(96, 64, 3), False, 0, "", 1),
+    "photo_444_12bit": (mixed(96, 64, 3), False, 0, "", 1),
+    "photo_444_10bit_identity": (mixed(96, 64, 3), False, 0, "", 1),
+}
+
+# The fixtures whose references are 16 bits per sample.
+WIDE = {
+    "photo_420_10bit",
+    "photo_420_10bit_studio",
+    "photo_444_12bit",
+    "photo_444_10bit_identity",
 }
 
 # avifenc arguments for the "photo" fixtures, used verbatim. Without --cicp
@@ -176,6 +192,10 @@ PHOTO_ARGS = {
     "photo_444": ["-y", "444", "-q", "60"],
     "photo_420_bt709_studio": ["-y", "420", "-q", "60", "--cicp", "1/13/1", "-r", "limited"],
     "photo_420_bt2020": ["-y", "420", "-q", "60", "--cicp", "9/16/9"],
+    "photo_420_10bit": ["-d", "10", "-y", "420", "-q", "60"],
+    "photo_420_10bit_studio": ["-d", "10", "-y", "420", "-q", "60", "--cicp", "1/13/1", "-r", "limited"],
+    "photo_444_12bit": ["-d", "12", "-y", "444", "-q", "60"],
+    "photo_444_10bit_identity": ["-d", "10", "-y", "444", "-q", "60", "--cicp", "1/13/0", "-r", "full"],
 }
 
 # SuperresDenom for each "superres" fixture (SUPERRES_NUM is 8).
@@ -448,6 +468,69 @@ def encode(image: Image.Image, path: str, lossless: bool, quality: int, yuv: str
     os.remove(png)
 
 
+def read_png16_rgb(path: str) -> tuple:
+    """`(width, height, samples)` of a non-interlaced 16-bit RGB PNG, the
+    samples as little-endian bytes. Pillow cannot hold 16-bit RGB, so this is
+    a minimal reader for exactly what `avifdec -d 16` writes."""
+    import zlib
+
+    with open(path, "rb") as f:
+        data = f.read()
+    pos, idat, header = 8, b"", None
+    while pos < len(data):
+        length, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + length]
+        if kind == b"IHDR":
+            header = struct.unpack(">IIBBBBB", body)
+        elif kind == b"IDAT":
+            idat += body
+        pos += 12 + length
+    width, height, depth, colour, _, _, interlace = header
+    if (depth, colour, interlace) != (16, 2, 0):
+        sys.exit(f"{path}: expected 16-bit non-interlaced RGB, got {header}")
+    raw = zlib.decompress(idat)
+    bpp, stride = 6, width * 6
+    out = bytearray()
+    prev = bytearray(stride)
+    for y in range(height):
+        kind = raw[y * (stride + 1)]
+        line = bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - bpp] if i >= bpp else 0
+            b = prev[i]
+            c = prev[i - bpp] if i >= bpp else 0
+            if kind == 1:
+                line[i] = (line[i] + a) & 0xFF
+            elif kind == 2:
+                line[i] = (line[i] + b) & 0xFF
+            elif kind == 3:
+                line[i] = (line[i] + (a + b) // 2) & 0xFF
+            elif kind == 4:
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                pred = a if pa <= pb and pa <= pc else (b if pb <= pc else c)
+                line[i] = (line[i] + pred) & 0xFF
+        prev = line
+        # PNG stores big-endian; the fixtures are little-endian.
+        for i in range(0, stride, 2):
+            out += bytes((line[i + 1], line[i]))
+    return width, height, bytes(out)
+
+
+def reference_raster16(path: str) -> tuple:
+    """What libavif's decoder makes of these bytes at 16 bits per sample:
+    `(width, height, little-endian samples)`."""
+    png = path + ".ref.png"
+    subprocess.run(
+        ["avifdec", "-d", "16", path, png],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    decoded = read_png16_rgb(png)
+    os.remove(png)
+    return decoded
+
+
 def reference_raster(path: str) -> Image.Image:
     """What libavif's decoder makes of these exact bytes, as 8-bit RGB."""
     png = path + ".ref.png"
@@ -509,6 +592,10 @@ PLANES = {
         blocks(50, 36),
         ["-y", "444", "-r", "full", "--cicp", "1/13/0", "-q", "60", "-s", "6", *FILTERS_ON],
     ),
+    # 10- and 12-bit: aomdec writes these planes as 16-bit little-endian.
+    "textured_odd_420_10bit": (textured(101, 37), ["-d", "10", "-y", "420", "-q", "40", "-s", "4", *FILTERS_ON]),
+    "textured_444_12bit": (textured(99, 70), ["-d", "12", "-y", "444", "-q", "40", "-s", "4", *FILTERS_ON]),
+    "blocks_420_10bit_palette": (blocks(90, 70), ["-d", "10", "-y", "420", "-q", "40", "-s", "6", *FILTERS_ON]),
     # 128x128 superblocks holding 128-wide blocks: the 64x64 residual chunks.
     "soft_420_sb128": (soft(136, 72), ["-y", "420", "-q", "5", "-s", "4", "-a", "sb-size=128", *FILTERS_ON]),
 }
@@ -580,7 +667,6 @@ IDENTITY_444 = ["-y", "444", "-r", "full", "--cicp", "1/13/0", "-q", "60"]
 UNSUPPORTED = {
     "delta_q": (mixed(128, 64, 3), [*IDENTITY_444, "-a", "deltaq-mode=3"]),
     "qmatrix": (textured(64, 64), [*IDENTITY_444, "-a", "enable-qm=1"]),
-    "depth10": (textured(32, 32), [*IDENTITY_444, "-d", "10"]),
     "monochrome": (textured(32, 32), ["-y", "400", "-q", "60"]),
     "alpha": (with_alpha(textured(32, 32)), ["-q", "60"]),
     "ycgco": (textured(32, 32), ["-y", "444", "-q", "60", "--cicp", "1/13/8"]),
@@ -613,27 +699,31 @@ def main() -> int:
 
     manifest = [
         "# Regenerate with scripts/regenerate-avif-reference.py",
-        "# name width height channels tolerance",
+        "# name width height channels tolerance bits",
     ]
     for name, (image, lossless, quality, yuv, tolerance) in sorted(FIXTURES.items()):
         path = os.path.join(args.fixtures, f"{name}.avif")
         encode(image, path, lossless, quality, yuv)
 
-        reference = reference_raster(path)
-        width, height = reference.size
-        raster = reference.tobytes()
-
-        if lossless and reference.tobytes() != image.convert("RGB").tobytes():
-            sys.exit(f"{name}: lossless fixture did not round-trip through libavif")
+        # 10- and 12-bit files decode to 16-bit samples (little-endian here).
+        bits = 16 if name in WIDE else 8
+        if bits == 16:
+            width, height, raster = reference_raster16(path)
+        else:
+            reference = reference_raster(path)
+            width, height = reference.size
+            raster = reference.tobytes()
+            if lossless and raster != image.convert("RGB").tobytes():
+                sys.exit(f"{name}: lossless fixture did not round-trip through libavif")
 
         channels = 3
-        expected = width * height * channels
+        expected = width * height * channels * bits // 8
         if len(raster) != expected:
             sys.exit(f"{name}: raster is {len(raster)} bytes, expected {expected}")
 
         with open(os.path.join(args.fixtures, f"{name}.raw"), "wb") as out:
             out.write(raster)
-        manifest.append(f"{name} {width} {height} {channels} {tolerance}")
+        manifest.append(f"{name} {width} {height} {channels} {tolerance} {bits}")
         print(f"{name}: {width}x{height}x{channels}, {os.path.getsize(path)} bytes")
 
     write_unsupported(args.fixtures)

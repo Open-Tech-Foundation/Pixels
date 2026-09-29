@@ -5,7 +5,8 @@
 //! 4:2:2 cannot use the identity matrix), so the AV1 reconstruction of those
 //! formats is verified here instead: each fixture in `tests/fixtures/planes` is
 //! an avifenc encode, and its `.yuv` is what `aomdec --rawvideo` makes of the
-//! same coded frame — Y, then U, then V, display-cropped, 8-bit. Our planes must
+//! same coded frame — Y, then U, then V, display-cropped, one byte per sample
+//! at 8 bits and two little-endian bytes at 10 or 12. Our planes must
 //! equal it sample for sample, which holds independently of how YUV later
 //! becomes RGB.
 //!
@@ -35,6 +36,9 @@ const CASES: &[(&str, (u8, u8))] = &[
     ("blocks_422_palette", (1, 0)),
     ("blocks_444_palette", (0, 0)),
     ("soft_420_sb128", (1, 1)),
+    ("textured_odd_420_10bit", (1, 1)),
+    ("textured_444_12bit", (0, 0)),
+    ("blocks_420_10bit_palette", (1, 1)),
 ];
 
 fn fixture_dir() -> String {
@@ -78,6 +82,7 @@ fn decoded_planes_match_libaom() {
         let width = still.frame.upscaled_width as usize;
         let height = still.frame.frame_height as usize;
         let (sub_x, sub_y) = (usize::from(expect_sub_x), usize::from(expect_sub_y));
+        let wide = color.bit_depth > 8;
         let mut offset = 0;
         for (index, plane) in decoded.planes.iter().enumerate() {
             let (w, h) = if index == 0 {
@@ -87,7 +92,12 @@ fn decoded_planes_match_libaom() {
             };
             for y in 0..h {
                 for x in 0..w {
-                    let expected = u16::from(theirs[offset + y * w + x]);
+                    let i = offset + y * w + x;
+                    let expected = if wide {
+                        u16::from_le_bytes([theirs[2 * i], theirs[2 * i + 1]])
+                    } else {
+                        u16::from(theirs[i])
+                    };
                     let ours = plane.get(x, y).unwrap();
                     assert_eq!(
                         ours, expected,
@@ -97,7 +107,12 @@ fn decoded_planes_match_libaom() {
             }
             offset += w * h;
         }
-        assert_eq!(offset, theirs.len(), "{name}: reference plane sizes");
+        let bytes = if wide { 2 } else { 1 };
+        assert_eq!(
+            offset * bytes,
+            theirs.len(),
+            "{name}: reference plane sizes"
+        );
     }
 }
 

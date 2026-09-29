@@ -1,33 +1,37 @@
 # Regenerate with scripts/regenerate-avif-reference.py
-# name width height channels tolerance
-blocks_cdef 48 40 3 0
-blocks_deblock 48 40 3 0
-blocks_lossless 64 48 3 0
-blocks_nofilter 48 40 3 0
-gradient_cdef 64 64 3 0
-gradient_deblock 64 64 3 0
-gradient_lossless 64 48 3 0
-gradient_nofilter 64 48 3 0
-gradient_odd_cdef 50 34 3 0
-gradient_odd_deblock 50 34 3 0
-gradient_odd_lossless 37 29 3 0
-gradient_odd_nofilter 37 29 3 0
-gradient_superres 64 48 3 0
-mixed_restore 512 384 3 0
-mixed_restore_full 400 384 3 0
-mixed_superres_full 420 64 3 0
-photo_420 96 64 3 2
-photo_420_bt2020 96 64 3 2
-photo_420_bt709_studio 96 64 3 5
-photo_422 96 64 3 2
-photo_444 96 64 3 1
-photo_default 160 120 3 1
-photo_odd_420 37 29 3 3
-textured_nofilter 128 128 3 0
-textured_odd_restore 100 70 3 0
-textured_odd_superres 101 37 3 0
-textured_restore 128 128 3 0
-textured_restore_full 128 128 3 0
-textured_superres 128 96 3 0
-textured_superres_full 99 70 3 0
-tiny_lossless 4 4 3 0
+# name width height channels tolerance bits
+blocks_cdef 48 40 3 0 8
+blocks_deblock 48 40 3 0 8
+blocks_lossless 64 48 3 0 8
+blocks_nofilter 48 40 3 0 8
+gradient_cdef 64 64 3 0 8
+gradient_deblock 64 64 3 0 8
+gradient_lossless 64 48 3 0 8
+gradient_nofilter 64 48 3 0 8
+gradient_odd_cdef 50 34 3 0 8
+gradient_odd_deblock 50 34 3 0 8
+gradient_odd_lossless 37 29 3 0 8
+gradient_odd_nofilter 37 29 3 0 8
+gradient_superres 64 48 3 0 8
+mixed_restore 512 384 3 0 8
+mixed_restore_full 400 384 3 0 8
+mixed_superres_full 420 64 3 0 8
+photo_420 96 64 3 2 8
+photo_420_10bit 96 64 3 1 16
+photo_420_10bit_studio 96 64 3 1 16
+photo_420_bt2020 96 64 3 2 8
+photo_420_bt709_studio 96 64 3 5 8
+photo_422 96 64 3 2 8
+photo_444 96 64 3 1 8
+photo_444_10bit_identity 96 64 3 1 16
+photo_444_12bit 96 64 3 1 16
+photo_default 160 120 3 1 8
+photo_odd_420 37 29 3 3 8
+textured_nofilter 128 128 3 0 8
+textured_odd_restore 100 70 3 0 8
+textured_odd_superres 101 37 3 0 8
+textured_restore 128 128 3 0 8
+textured_restore_full 128 128 3 0 8
+textured_superres 128 96 3 0 8
+textured_superres_full 99 70 3 0 8
+tiny_lossless 4 4 3 0 8

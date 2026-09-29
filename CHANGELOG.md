@@ -126,6 +126,17 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- 10- and 12-bit AVIF now decodes, to `Rgb16` over its full 0..=65535 range
+  (the conversion computes RGB at 16 bits directly, as libavif does, rather
+  than leaving samples in 10-bit units — the old doc comment claiming they
+  "keep their original range" contradicted `Rgb16`'s contract and is fixed).
+  The AV1 reconstruction needed no change beyond lifting the refusal: bit
+  depth was already threaded through every stage, and three new 10/12-bit
+  plane fixtures match libaom exactly. Four 16-bit RGB reference fixtures
+  (4:2:0, studio range, 12-bit 4:4:4, identity) agree with libavif — which
+  converts wide samples in floating point — on 99% of samples and within one
+  16-bit step on the rest. The regeneration script reads avifdec's 16-bit
+  PNGs itself, since Pillow cannot hold 16-bit RGB.
 - AVIF files with real YUV now decode to RGB: 4:2:0, 4:2:2 and 4:4:4 with the
   BT.601, BT.709 or BT.2020 matrix at full or studio range — which covers what
   avifenc writes by default and what most AVIF in the wild uses. Chroma is

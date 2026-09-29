@@ -28,14 +28,19 @@ fn read_fixture(name: &str, extension: &str) -> Vec<u8> {
     std::fs::read(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"))
 }
 
-/// One fixture as the manifest describes it: `name width height channels tolerance`.
+/// One fixture as the manifest describes it:
+/// `name width height channels tolerance bits`.
 struct Reference {
     name: String,
     width: u32,
     height: u32,
     channels: usize,
-    /// The largest per-channel difference from libavif's raster allowed.
-    tolerance: u8,
+    /// The largest per-channel difference from libavif's raster allowed, in
+    /// steps of the output depth.
+    tolerance: u16,
+    /// Bits per output sample: 8, or 16 for a 10/12-bit file (the reference is
+    /// then little-endian, ours native-endian).
+    bits: u8,
 }
 
 fn references() -> Vec<Reference> {
@@ -52,6 +57,7 @@ fn references() -> Vec<Reference> {
                 height: f[2].parse().unwrap(),
                 channels: f[3].parse().unwrap(),
                 tolerance: f[4].parse().unwrap(),
+                bits: f[5].parse().unwrap(),
             }
         })
         .collect()
@@ -106,21 +112,30 @@ fn reference_fixtures_decode_exactly() {
         );
         assert_eq!(
             descriptor.pixel,
-            if reference.channels == 4 {
-                PixelFormat::Rgba8
-            } else {
-                PixelFormat::Rgb8
+            match (reference.channels, reference.bits) {
+                (4, 16) => PixelFormat::Rgba16,
+                (4, _) => PixelFormat::Rgba8,
+                (_, 16) => PixelFormat::Rgb16,
+                _ => PixelFormat::Rgb8,
             },
             "{}: pixel format",
             reference.name
         );
         assert_eq!(ours.len(), theirs.len(), "{}: raster size", reference.name);
-        let worst = ours
-            .iter()
-            .zip(&theirs)
-            .map(|(a, b)| a.abs_diff(*b))
-            .max()
-            .unwrap_or(0);
+        let worst = if reference.bits == 16 {
+            ours.chunks_exact(2)
+                .zip(theirs.chunks_exact(2))
+                .map(|(a, b)| {
+                    u16::from_ne_bytes([a[0], a[1]]).abs_diff(u16::from_le_bytes([b[0], b[1]]))
+                })
+                .max()
+        } else {
+            ours.iter()
+                .zip(&theirs)
+                .map(|(a, b)| u16::from(a.abs_diff(*b)))
+                .max()
+        }
+        .unwrap_or(0);
         assert!(
             worst <= reference.tolerance,
             "{}: differs from libavif's by up to {worst}, tolerance {}",

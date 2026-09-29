@@ -8,16 +8,17 @@
 //! partial raster, so the decode is inherently whole-image (SPEC §Memory).
 //!
 //! The AV1 reconstruction covers the single-tile intra still in 4:4:4, 4:2:2
-//! and 4:2:0 at 8 bits, and the raster conversion handles the identity matrix
-//! and the BT.601/709/2020 YUV matrices at full and studio range (`yuv.rs`).
-//! Anything outside that (other matrices, alpha, multiple tiles, intra block
-//! copy, grids, 10/12-bit, film grain, the tools `decode_still` refuses) is
+//! and 4:2:0 at 8, 10 and 12 bits, and the raster conversion handles the
+//! identity matrix and the BT.601/709/2020 YUV matrices at full and studio
+//! range (`yuv.rs`), to `Rgb8` or — for 10/12-bit — full-range `Rgb16`.
+//! Anything outside that (other matrices, alpha, monochrome, multiple tiles,
+//! intra block copy, grids, film grain, the tools `decode_still` refuses) is
 //! reported as [`PixelsError::Unsupported`] rather than decoded wrong.
 
 use crate::boxes::{FourCc, Reader};
 use crate::meta::Meta;
 use crate::props::{Av1Config, Colour, Subsampling};
-use crate::yuv::{Layout, YuvMatrix, yuv_to_rgb};
+use crate::yuv::{Depths, Layout, YuvMatrix, identity_to_rgb, yuv_to_rgb};
 use otf_pixels_core::{
     Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, PixelFormat, PixelsError,
     Result, Source,
@@ -272,14 +273,15 @@ fn decode_raster(info: &AvifInfo, frame_data: &[u8]) -> Result<Vec<u8>> {
         usize::from(color.subsampling_x),
         usize::from(color.subsampling_y),
     );
+    let layout = Layout {
+        width,
+        height,
+        subsampling_x: sub_x,
+        subsampling_y: sub_y,
+    };
+    let depths = Depths::for_input(color.bit_depth);
     if matrix != 0 {
-        let yuv = YuvMatrix::new(matrix, color.color_range)?;
-        let layout = Layout {
-            width,
-            height,
-            subsampling_x: sub_x,
-            subsampling_y: sub_y,
-        };
+        let yuv = YuvMatrix::new(matrix, color.color_range, depths)?;
         return yuv_to_rgb(&frame.planes, layout, &yuv);
     }
     if (sub_x, sub_y) != (0, 0) {
@@ -288,28 +290,7 @@ fn decode_raster(info: &AvifInfo, frame_data: &[u8]) -> Result<Vec<u8>> {
             "the identity colour matrix requires 4:4:4, but the chroma is subsampled",
         ));
     }
-    let plane = |i: usize| {
-        frame
-            .planes
-            .get(i)
-            .ok_or_else(|| PixelsError::malformed("avif", "a colour plane is missing"))
-    };
-    // Identity matrix (matrix_coefficients == 0): the planes are G, B, R.
-    let (g, b, r) = (plane(0)?, plane(1)?, plane(2)?);
-    let mut raster = vec![0_u8; width * height * 3];
-    for y in 0..height {
-        for x in 0..width {
-            let base = (y * width + x) * 3;
-            if let Some(px) = raster.get_mut(base..base + 3) {
-                px.copy_from_slice(&[
-                    r.get(x, y).unwrap_or(0) as u8,
-                    g.get(x, y).unwrap_or(0) as u8,
-                    b.get(x, y).unwrap_or(0) as u8,
-                ]);
-            }
-        }
-    }
-    Ok(raster)
+    identity_to_rgb(&frame.planes, layout, depths)
 }
 
 /// The pixel format this image decodes to.
@@ -317,8 +298,8 @@ fn decode_raster(info: &AvifInfo, frame_data: &[u8]) -> Result<Vec<u8>> {
 /// AV1 codes YUV; the engine's formats are RGB and greyscale, so the mapping
 /// happens here and the colour conversion happens at decode. Ten- and
 /// twelve-bit samples widen to sixteen because SPEC §Pixel formats has no
-/// narrower wide type — the sample values keep their original range and are
-/// not rescaled by this choice.
+/// narrower wide type, and they are rescaled to its full 0..=65535 range —
+/// the conversion computes RGB at 16 bits directly (`yuv.rs`).
 fn pixel_format(info: &AvifInfo) -> PixelFormat {
     let wide = info.config.bit_depth > 8;
     let monochrome = info.config.subsampling == Subsampling::Monochrome;
