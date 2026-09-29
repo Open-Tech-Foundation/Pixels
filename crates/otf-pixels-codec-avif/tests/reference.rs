@@ -113,6 +113,9 @@ fn reference_fixtures_decode_exactly() {
         assert_eq!(
             descriptor.pixel,
             match (reference.channels, reference.bits) {
+                (1, 16) => PixelFormat::Gray16,
+                (1, _) => PixelFormat::Gray8,
+                (2, _) => PixelFormat::GrayA8,
                 (4, 16) => PixelFormat::Rgba16,
                 (4, _) => PixelFormat::Rgba8,
                 (_, 16) => PixelFormat::Rgb16,

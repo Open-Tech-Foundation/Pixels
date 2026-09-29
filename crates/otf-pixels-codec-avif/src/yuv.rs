@@ -156,9 +156,9 @@ pub(crate) struct Layout {
     pub(crate) subsampling_y: usize,
 }
 
-/// Convert decoded Y/U/V `planes` to an interleaved RGB raster of `layout`'s
-/// display size, at the matrix's output depth (16-bit samples native-endian).
-pub(crate) fn yuv_to_rgb(planes: &[Plane], layout: Layout, matrix: &YuvMatrix) -> Result<Vec<u8>> {
+/// Convert decoded Y/U/V `planes` to RGB samples at the matrix's output depth,
+/// three per pixel in raster order over `layout`'s display size.
+pub(crate) fn yuv_to_rgb(planes: &[Plane], layout: Layout, matrix: &YuvMatrix) -> Result<Vec<u16>> {
     let [y_plane, u_plane, v_plane] = planes else {
         return Err(PixelsError::malformed("avif", "a colour plane is missing"));
     };
@@ -168,7 +168,7 @@ pub(crate) fn yuv_to_rgb(planes: &[Plane], layout: Layout, matrix: &YuvMatrix) -
         sub_x: layout.subsampling_x,
         sub_y: layout.subsampling_y,
     };
-    Ok(interleave(layout, matrix.depths, |x, y| {
+    Ok(samples(layout, |x, y| {
         let luma = y_plane.get(x, y).unwrap_or(0);
         let u = i64::from(chroma.upsample(u_plane, x, y));
         let v = i64::from(chroma.upsample(v_plane, x, y));
@@ -177,41 +177,78 @@ pub(crate) fn yuv_to_rgb(planes: &[Plane], layout: Layout, matrix: &YuvMatrix) -
 }
 
 /// Convert identity-matrix planes — G, B, R stored as Y, U, V, always 4:4:4 —
-/// to an interleaved RGB raster, rescaling each sample from the input depth to
-/// the output depth.
-pub(crate) fn identity_to_rgb(planes: &[Plane], layout: Layout, depths: Depths) -> Result<Vec<u8>> {
+/// to RGB samples, each rescaled from the input depth to the output depth.
+pub(crate) fn identity_to_rgb(
+    planes: &[Plane],
+    layout: Layout,
+    depths: Depths,
+) -> Result<Vec<u16>> {
     let [g, b, r] = planes else {
         return Err(PixelsError::malformed("avif", "a colour plane is missing"));
     };
-    let input_max = (1_i64 << depths.input) - 1;
-    let output_max = depths.output_max();
-    // round(v * output_max / input_max), exactly.
-    let rescale = |v: u16| ((i64::from(v) * output_max * 2 + input_max) / (2 * input_max)) as u16;
-    Ok(interleave(layout, depths, |x, y| {
-        let at = |plane: &Plane| rescale(plane.get(x, y).unwrap_or(0));
+    let scale = Scale::new(depths, true);
+    Ok(samples(layout, |x, y| {
+        let at = |plane: &Plane| scale.apply(plane.get(x, y).unwrap_or(0));
         [at(r), at(g), at(b)]
     }))
 }
 
-/// Build the interleaved raster from a per-pixel `[R, G, B]` function: one
-/// byte per sample at 8-bit output, two native-endian bytes at 16-bit.
-fn interleave(layout: Layout, depths: Depths, pixel: impl Fn(usize, usize) -> [u16; 3]) -> Vec<u8> {
-    let bytes = usize::from(depths.output / 8);
-    let (width, height) = (layout.width, layout.height);
-    let mut raster = vec![0_u8; width * height * 3 * bytes];
-    for (y, row) in raster.chunks_exact_mut(width * 3 * bytes).enumerate() {
-        for (x, px) in row.chunks_exact_mut(3 * bytes).enumerate() {
-            let rgb = pixel(x, y);
-            for (slot, value) in px.chunks_exact_mut(bytes).zip(rgb) {
-                if bytes == 1 {
-                    slot.copy_from_slice(&[value as u8]);
-                } else {
-                    slot.copy_from_slice(&value.to_ne_bytes());
-                }
-            }
+/// A single plane — monochrome luma, or an alpha item — as samples at the
+/// output depth, one per pixel. Studio-range luma is expanded to the full
+/// output range (16 maps to 0, 235 to the maximum, clamped beyond); a
+/// monochrome picture has no chroma, so this *is* its YUV to grey conversion.
+pub(crate) fn plane_to_grey(
+    plane: &Plane,
+    layout: Layout,
+    depths: Depths,
+    full_range: bool,
+) -> Vec<u16> {
+    let scale = Scale::new(depths, full_range);
+    samples(layout, |x, y| [scale.apply(plane.get(x, y).unwrap_or(0))])
+}
+
+/// An exact affine rescale of one luma-like sample to the output depth:
+/// `round((v - offset) * output_max / span)`, clamped.
+#[derive(Debug, Clone, Copy)]
+struct Scale {
+    offset: i64,
+    span: i64,
+    output_max: i64,
+}
+
+impl Scale {
+    fn new(depths: Depths, full_range: bool) -> Self {
+        let step = 1_i64 << (depths.input - 8);
+        let (offset, span) = if full_range {
+            (0, (1_i64 << depths.input) - 1)
+        } else {
+            (16 * step, 219 * step)
+        };
+        Self {
+            offset,
+            span,
+            output_max: depths.output_max(),
         }
     }
-    raster
+
+    fn apply(self, v: u16) -> u16 {
+        let num = (i64::from(v) - self.offset) * self.output_max;
+        // Round half up, flooring correctly for negative numerators.
+        (2 * num + self.span)
+            .div_euclid(2 * self.span)
+            .clamp(0, self.output_max) as u16
+    }
+}
+
+/// Collect `N` samples per pixel, in raster order, from a per-pixel function.
+fn samples<const N: usize>(layout: Layout, pixel: impl Fn(usize, usize) -> [u16; N]) -> Vec<u16> {
+    let mut out = Vec::with_capacity(layout.width * layout.height * N);
+    for y in 0..layout.height {
+        for x in 0..layout.width {
+            out.extend_from_slice(&pixel(x, y));
+        }
+    }
+    out
 }
 
 /// The displayed chroma plane's size and subsampling, for upsampling.
@@ -378,10 +415,10 @@ mod tests {
     }
 
     #[test]
-    fn wide_output_is_native_endian_full_range_sixteen_bit() {
+    fn wide_output_is_full_range_sixteen_bit() {
         // A 10-bit identity picture: 1023 must become 65535 and 512 its exact
-        // rescale, round(512 * 65535 / 1023) = 32800, two native-endian bytes
-        // per sample in R, G, B order (planes are G, B, R).
+        // rescale, round(512 * 65535 / 1023) = 32800, in R, G, B order (the
+        // planes are G, B, R).
         let mut planes = [Plane::new(1, 1), Plane::new(1, 1), Plane::new(1, 1)];
         planes[0].set(0, 0, 1023); // G
         planes[1].set(0, 0, 0); // B
@@ -392,12 +429,39 @@ mod tests {
             subsampling_x: 0,
             subsampling_y: 0,
         };
-        let raster = identity_to_rgb(&planes, layout, Depths::for_input(10)).unwrap();
-        let samples: Vec<u16> = raster
-            .chunks_exact(2)
-            .map(|b| u16::from_ne_bytes([b[0], b[1]]))
-            .collect();
-        assert_eq!(samples, [32800, 65535, 0]);
+        let rgb = identity_to_rgb(&planes, layout, Depths::for_input(10)).unwrap();
+        assert_eq!(rgb, [32800, 65535, 0]);
+    }
+
+    #[test]
+    fn grey_expands_studio_range_and_rescales_depth() {
+        let layout = Layout {
+            width: 4,
+            height: 1,
+            subsampling_x: 0,
+            subsampling_y: 0,
+        };
+        let mut plane = Plane::new(4, 1);
+        for (x, v) in [0, 16, 126, 235].into_iter().enumerate() {
+            plane.set(x, 0, v);
+        }
+        // Full range at 8 bits is the identity; studio range maps 16..=235
+        // onto 0..=255, clamping below 16, with 126 -> round(110*255/219).
+        let eight = Depths::for_input(8);
+        assert_eq!(
+            plane_to_grey(&plane, layout, eight, true),
+            [0, 16, 126, 235]
+        );
+        assert_eq!(
+            plane_to_grey(&plane, layout, eight, false),
+            [0, 0, 128, 255]
+        );
+        // A 12-bit full-range maximum lands on the 16-bit maximum.
+        let mut wide = Plane::new(4, 1);
+        wide.set(0, 0, 4095);
+        wide.set(1, 0, 2048);
+        let grey = plane_to_grey(&wide, layout, Depths::for_input(12), true);
+        assert_eq!(&grey[..2], [65535, 32776]);
     }
 
     #[test]

@@ -96,6 +96,17 @@ def mixed(width: int, height: int, seed: int) -> Image.Image:
     return image
 
 
+def with_alpha(image: Image.Image) -> Image.Image:
+    """`image` with a horizontal alpha ramp, so the encoder writes an alpha item."""
+    rgba = image.convert("RGBA")
+    pixels = rgba.load()
+    for y in range(rgba.height):
+        for x in range(rgba.width):
+            r, g, b, _ = pixels[x, y]
+            pixels[x, y] = (r, g, b, (x * 255) // max(rgba.width - 1, 1))
+    return rgba
+
+
 # name -> (image, lossless, quality, yuv, tolerance)
 #
 # Lossless fixtures are `CodedLossless` and must round-trip exactly. The
@@ -172,6 +183,33 @@ FIXTURES = {
     "photo_420_10bit_studio": (mixed(96, 64, 3), False, 0, "", 1),
     "photo_444_12bit": (mixed(96, 64, 3), False, 0, "", 1),
     "photo_444_10bit_identity": (mixed(96, 64, 3), False, 0, "", 1),
+    # Alpha (an auxiliary monochrome AV1 item) and monochrome pictures: RGBA,
+    # grey and grey+alpha, 8- and 16-bit.
+    "photo_alpha": (with_alpha(mixed(96, 64, 3)), False, 0, "", 1),
+    "photo_alpha_420": (with_alpha(mixed(96, 64, 3)), False, 0, "", 2),
+    "photo_alpha_10bit": (with_alpha(mixed(96, 64, 3)), False, 0, "", 1),
+    "grey": (mixed(96, 64, 3), False, 0, "", 0),
+    "grey_studio": (mixed(96, 64, 3), False, 0, "", 0),
+    "grey_10bit": (mixed(96, 64, 3), False, 0, "", 1),
+    "grey_alpha": (with_alpha(mixed(96, 64, 3)), False, 0, "", 0),
+}
+
+# 8-bit fixtures whose reference is taken from avifdec's 16-bit output and
+# rounded to 8 bits. avifdec writes an 8-bit monochrome picture as a grey PNG of
+# the raw Y samples, skipping the studio-range expansion (Y = 16 stays 16
+# rather than becoming black); its 16-bit path converts properly, and rounded
+# to 8 bits it matches our decode exactly.
+VIA_16 = {"grey_studio"}
+
+# Channels in our raster where it is not RGB: 1 grey, 2 grey+alpha, 4 RGBA.
+CHANNELS = {
+    "photo_alpha": 4,
+    "photo_alpha_420": 4,
+    "photo_alpha_10bit": 4,
+    "grey": 1,
+    "grey_studio": 1,
+    "grey_10bit": 1,
+    "grey_alpha": 2,
 }
 
 # The fixtures whose references are 16 bits per sample.
@@ -180,6 +218,8 @@ WIDE = {
     "photo_420_10bit_studio",
     "photo_444_12bit",
     "photo_444_10bit_identity",
+    "photo_alpha_10bit",
+    "grey_10bit",
 }
 
 # avifenc arguments for the "photo" fixtures, used verbatim. Without --cicp
@@ -196,6 +236,13 @@ PHOTO_ARGS = {
     "photo_420_10bit_studio": ["-d", "10", "-y", "420", "-q", "60", "--cicp", "1/13/1", "-r", "limited"],
     "photo_444_12bit": ["-d", "12", "-y", "444", "-q", "60"],
     "photo_444_10bit_identity": ["-d", "10", "-y", "444", "-q", "60", "--cicp", "1/13/0", "-r", "full"],
+    "photo_alpha": ["-q", "60"],
+    "photo_alpha_420": ["-y", "420", "-q", "60"],
+    "photo_alpha_10bit": ["-d", "10", "-q", "60"],
+    "grey": ["-y", "400", "-q", "60"],
+    "grey_studio": ["-y", "400", "-q", "60", "-r", "limited"],
+    "grey_10bit": ["-d", "10", "-y", "400", "-q", "60"],
+    "grey_alpha": ["-y", "400", "-q", "60"],
 }
 
 # SuperresDenom for each "superres" fixture (SUPERRES_NUM is 8).
@@ -468,10 +515,11 @@ def encode(image: Image.Image, path: str, lossless: bool, quality: int, yuv: str
     os.remove(png)
 
 
-def read_png16_rgb(path: str) -> tuple:
-    """`(width, height, samples)` of a non-interlaced 16-bit RGB PNG, the
-    samples as little-endian bytes. Pillow cannot hold 16-bit RGB, so this is
-    a minimal reader for exactly what `avifdec -d 16` writes."""
+def read_png16(path: str) -> tuple:
+    """`(width, height, channels, samples)` of a non-interlaced 16-bit PNG
+    (grey, grey+alpha, RGB or RGBA), the samples as a flat list of ints.
+    Pillow cannot hold 16-bit colour, so this is a minimal reader for exactly
+    what `avifdec -d 16` writes."""
     import zlib
 
     with open(path, "rb") as f:
@@ -486,11 +534,13 @@ def read_png16_rgb(path: str) -> tuple:
             idat += body
         pos += 12 + length
     width, height, depth, colour, _, _, interlace = header
-    if (depth, colour, interlace) != (16, 2, 0):
-        sys.exit(f"{path}: expected 16-bit non-interlaced RGB, got {header}")
+    channels = {0: 1, 4: 2, 2: 3, 6: 4}.get(colour)
+    if depth != 16 or interlace != 0 or channels is None:
+        sys.exit(f"{path}: expected a 16-bit non-interlaced PNG, got {header}")
     raw = zlib.decompress(idat)
-    bpp, stride = 6, width * 6
-    out = bytearray()
+    bpp = channels * 2
+    stride = width * bpp
+    samples = []
     prev = bytearray(stride)
     for y in range(height):
         kind = raw[y * (stride + 1)]
@@ -510,41 +560,57 @@ def read_png16_rgb(path: str) -> tuple:
                 pred = a if pa <= pb and pa <= pc else (b if pb <= pc else c)
                 line[i] = (line[i] + pred) & 0xFF
         prev = line
-        # PNG stores big-endian; the fixtures are little-endian.
-        for i in range(0, stride, 2):
-            out += bytes((line[i + 1], line[i]))
-    return width, height, bytes(out)
+        samples += [(line[i] << 8) | line[i + 1] for i in range(0, stride, 2)]
+    return width, height, channels, samples
 
 
-def reference_raster16(path: str) -> tuple:
-    """What libavif's decoder makes of these bytes at 16 bits per sample:
-    `(width, height, little-endian samples)`."""
+def to_layout(name: str, samples: list, have: int, want: int) -> list:
+    """Rearrange pixels of `have` channels into our layout of `want`: grey
+    (1), grey+alpha (2), RGB (3) or RGBA (4). libavif writes grey as equal
+    R, G and B; that is checked, then one of them is kept."""
+    out = []
+    for i in range(0, len(samples), have):
+        px = samples[i:i + have]
+        colour, alpha = (px[:-1], px[-1:]) if have in (2, 4) else (px, [])
+        if want in (1, 2):
+            if len(set(colour)) != 1:
+                sys.exit(f"{name}: a grey fixture decoded to non-grey {colour}")
+            colour = colour[:1]
+        elif len(colour) == 1:
+            colour = colour * 3
+        out += colour + (alpha if want in (2, 4) else [])
+    return out
+
+
+def reference_samples(path: str, name: str, channels: int, bits: int) -> tuple:
+    """libavif's decode of these bytes in our layout: `(width, height, raster
+    bytes)`, one byte per sample at 8 bits and little-endian pairs at 16."""
     png = path + ".ref.png"
+    if bits == 8 and name in VIA_16:
+        width, height, raster = reference_samples(path, name, channels, 16)
+        wide = struct.unpack(f"<{len(raster) // 2}H", raster)
+        return width, height, bytes((v * 255 * 2 + 65535) // (2 * 65535) for v in wide)
     subprocess.run(
-        ["avifdec", "-d", "16", path, png],
+        ["avifdec", "-d", str(bits), path, png],
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    decoded = read_png16_rgb(png)
+    if bits == 16:
+        width, height, have, samples = read_png16(png)
+        values = to_layout(name, samples, have, channels)
+        raster = b"".join(struct.pack("<H", v) for v in values)
+    else:
+        with Image.open(png) as decoded:
+            decoded.load()
+            have = {"L": 1, "LA": 2, "RGB": 3, "RGBA": 4}.get(decoded.mode)
+            if have is None:
+                sys.exit(f"{name}: unexpected PNG mode {decoded.mode}")
+            width, height = decoded.size
+            values = to_layout(name, list(decoded.tobytes()), have, channels)
+            raster = bytes(values)
     os.remove(png)
-    return decoded
-
-
-def reference_raster(path: str) -> Image.Image:
-    """What libavif's decoder makes of these exact bytes, as 8-bit RGB."""
-    png = path + ".ref.png"
-    subprocess.run(
-        ["avifdec", "-d", "8", path, png],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    with Image.open(png) as decoded:
-        decoded.load()
-        rgb = decoded.convert("RGB")
-    os.remove(png)
-    return rgb
+    return width, height, raster
 
 
 def soft(width: int, height: int) -> Image.Image:
@@ -592,6 +658,9 @@ PLANES = {
         blocks(50, 36),
         ["-y", "444", "-r", "full", "--cicp", "1/13/0", "-q", "60", "-s", "6", *FILTERS_ON],
     ),
+    # Monochrome (4:0:0): aomdec writes the Y plane alone.
+    "textured_odd_400": (textured(101, 37), ["-y", "400", "-q", "40", "-s", "4", *FILTERS_ON]),
+    "blocks_400_palette": (blocks(90, 70), ["-y", "400", "-q", "40", "-s", "6", *FILTERS_ON]),
     # 10- and 12-bit: aomdec writes these planes as 16-bit little-endian.
     "textured_odd_420_10bit": (textured(101, 37), ["-d", "10", "-y", "420", "-q", "40", "-s", "4", *FILTERS_ON]),
     "textured_444_12bit": (textured(99, 70), ["-d", "12", "-y", "444", "-q", "40", "-s", "4", *FILTERS_ON]),
@@ -646,17 +715,6 @@ def write_planes(fixtures: str) -> None:
         print(f"planes/{name}: {os.path.getsize(base + '.avif')} bytes")
 
 
-def with_alpha(image: Image.Image) -> Image.Image:
-    """`image` with a horizontal alpha ramp, so the encoder writes an alpha item."""
-    rgba = image.convert("RGBA")
-    pixels = rgba.load()
-    for y in range(rgba.height):
-        for x in range(rgba.width):
-            r, g, b, _ = pixels[x, y]
-            pixels[x, y] = (r, g, b, (x * 255) // max(rgba.width - 1, 1))
-    return rgba
-
-
 # Files this decoder must *refuse*: each uses one coding tool it does not
 # implement yet, and decoding past such a tool without it yields a wrong image
 # with no error. `tests/unsupported.rs` asserts every file here decodes to
@@ -667,8 +725,7 @@ IDENTITY_444 = ["-y", "444", "-r", "full", "--cicp", "1/13/0", "-q", "60"]
 UNSUPPORTED = {
     "delta_q": (mixed(128, 64, 3), [*IDENTITY_444, "-a", "deltaq-mode=3"]),
     "qmatrix": (textured(64, 64), [*IDENTITY_444, "-a", "enable-qm=1"]),
-    "monochrome": (textured(32, 32), ["-y", "400", "-q", "60"]),
-    "alpha": (with_alpha(textured(32, 32)), ["-q", "60"]),
+    "premultiplied": (with_alpha(textured(32, 32)), ["-q", "60", "--premultiply"]),
     "ycgco": (textured(32, 32), ["-y", "444", "-q", "60", "--cicp", "1/13/8"]),
     "tiles": (textured(128, 64), [*IDENTITY_444, "--tilecolslog2", "1"]),
 }
@@ -707,16 +764,11 @@ def main() -> int:
 
         # 10- and 12-bit files decode to 16-bit samples (little-endian here).
         bits = 16 if name in WIDE else 8
-        if bits == 16:
-            width, height, raster = reference_raster16(path)
-        else:
-            reference = reference_raster(path)
-            width, height = reference.size
-            raster = reference.tobytes()
-            if lossless and raster != image.convert("RGB").tobytes():
-                sys.exit(f"{name}: lossless fixture did not round-trip through libavif")
+        channels = CHANNELS.get(name, 3)
+        width, height, raster = reference_samples(path, name, channels, bits)
+        if lossless and raster != image.convert("RGB").tobytes():
+            sys.exit(f"{name}: lossless fixture did not round-trip through libavif")
 
-        channels = 3
         expected = width * height * channels * bits // 8
         if len(raster) != expected:
             sys.exit(f"{name}: raster is {len(raster)} bytes, expected {expected}")

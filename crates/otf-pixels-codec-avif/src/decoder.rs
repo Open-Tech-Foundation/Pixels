@@ -11,14 +11,16 @@
 //! and 4:2:0 at 8, 10 and 12 bits, and the raster conversion handles the
 //! identity matrix and the BT.601/709/2020 YUV matrices at full and studio
 //! range (`yuv.rs`), to `Rgb8` or — for 10/12-bit — full-range `Rgb16`.
-//! Anything outside that (other matrices, alpha, monochrome, multiple tiles,
+//! Monochrome pictures decode to grey, and a straight (not premultiplied)
+//! alpha auxiliary item — a second AV1 image — becomes the alpha channel.
+//! Anything outside that (other matrices, premultiplied alpha, multiple tiles,
 //! intra block copy, grids, film grain, the tools `decode_still` refuses) is
 //! reported as [`PixelsError::Unsupported`] rather than decoded wrong.
 
 use crate::boxes::{FourCc, Reader};
 use crate::meta::Meta;
 use crate::props::{Av1Config, Colour, Subsampling};
-use crate::yuv::{Depths, Layout, YuvMatrix, identity_to_rgb, yuv_to_rgb};
+use crate::yuv::{Depths, Layout, YuvMatrix, identity_to_rgb, plane_to_grey, yuv_to_rgb};
 use otf_pixels_core::{
     Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, PixelFormat, PixelsError,
     Result, Source,
@@ -56,6 +58,18 @@ pub struct AvifInfo {
     pub colour: Option<Colour>,
 }
 
+/// An alpha plane's coded image: a second AV1 still, usually monochrome.
+#[derive(Debug)]
+struct AlphaItem {
+    /// Its coded AV1 bytes.
+    frame_data: Vec<u8>,
+    /// Its `av1C` configuration OBUs.
+    config_obus: Vec<u8>,
+    /// Whether the colour is premultiplied by it (a `prem` reference from the
+    /// colour item to this one).
+    premultiplied: bool,
+}
+
 /// Decodes an AVIF stream.
 #[derive(Debug)]
 pub struct AvifDecoder {
@@ -64,6 +78,8 @@ pub struct AvifDecoder {
     /// The primary item's coded AV1 bytes, retained for the lazy pixel decode.
     /// `None` for a grid, whose per-tile decode is not implemented.
     frame_data: Option<Vec<u8>>,
+    /// The alpha auxiliary item, when there is one and it can be decoded.
+    alpha: Option<AlphaItem>,
     /// The reconstructed interleaved raster, produced on the first row read.
     raster: Option<Vec<u8>>,
     /// Rows already served.
@@ -85,10 +101,10 @@ impl AvifDecoder {
     pub fn new<S: Source>(source: S, limits: Limits) -> Result<Self> {
         let bytes = read_all(source)?;
         let info = parse_container(&bytes)?;
-        let frame_data = if info.is_grid {
-            None
+        let (frame_data, alpha) = if info.is_grid {
+            (None, None)
         } else {
-            Some(locate_primary_frame(&bytes)?)
+            (Some(locate_primary_frame(&bytes)?), locate_alpha(&bytes)?)
         };
         let pixel = pixel_format(&info);
         let descriptor = ImageDescriptor::with_limits(info.width, info.height, pixel, &limits)?;
@@ -96,6 +112,7 @@ impl AvifDecoder {
             descriptor,
             info,
             frame_data,
+            alpha,
             raster: None,
             row: 0,
         })
@@ -240,28 +257,100 @@ fn locate_primary_frame(bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(meta.item_data(bytes, primary)?.into_owned())
 }
 
-/// Decode the primary AV1 still and convert it to the interleaved raster the
-/// descriptor promises.
-fn decode_raster(info: &AvifInfo, frame_data: &[u8]) -> Result<Vec<u8>> {
+/// Locate the primary item's alpha auxiliary item, if it has one.
+fn locate_alpha(bytes: &[u8]) -> Result<Option<AlphaItem>> {
+    let mut reader = Reader::new(bytes);
+    reader.next_box();
+    let meta_reader = reader
+        .find(b"meta")?
+        .ok_or_else(|| PixelsError::malformed("avif", "the file has no meta box"))?;
+    let meta = Meta::parse(meta_reader)?;
+    let primary = meta
+        .primary_item()
+        .ok_or_else(|| PixelsError::malformed("avif", "the file names no primary image item"))?;
+    let Some(alpha) = meta.alpha_item(primary.id) else {
+        return Ok(None);
+    };
+    let config = meta.properties.av1_config(alpha.id).ok_or_else(|| {
+        PixelsError::malformed(
+            "avif",
+            format!("alpha item {} has no av1C property", alpha.id),
+        )
+    })?;
+    Ok(Some(AlphaItem {
+        frame_data: meta.item_data(bytes, alpha)?.into_owned(),
+        config_obus: config.config_obus.clone(),
+        // `prem` runs from the colour (master) item to its alpha item.
+        premultiplied: meta.referenced(primary.id, b"prem").contains(&alpha.id),
+    }))
+}
+
+/// Decode one coded AV1 still to its sample planes and sequence header.
+fn decode_frame(
+    config_obus: &[u8],
+    frame_data: &[u8],
+) -> Result<(crate::av1::DecodedFrame, crate::av1::SequenceHeader)> {
     use crate::av1::{StillPicture, decode_still};
 
-    let still = StillPicture::parse(&info.config.config_obus, frame_data)?;
+    let still = StillPicture::parse(config_obus, frame_data)?;
     let located = frame_data
         .get(still.tile_data_offset..still.tile_data_offset + still.tile_data_len)
         .ok_or_else(|| PixelsError::malformed("avif", "tile data runs past the coded frame"))?;
     let frame = decode_still(&still.sequence, &still.frame, located)?;
+    Ok((frame, still.sequence))
+}
 
-    if info.has_alpha {
-        // The alpha plane is a second coded item; the descriptor promises
-        // RGBA, so producing RGB here would hand back a raster of the wrong
-        // shape.
-        return Err(PixelsError::unsupported(
-            "avif: decoding the alpha plane is not implemented yet",
-        ));
-    }
-    let width = info.width as usize;
-    let height = info.height as usize;
-    let color = &still.sequence.color;
+/// Decode the primary AV1 still and convert it to the interleaved raster the
+/// descriptor promises.
+fn decode_raster(
+    info: &AvifInfo,
+    pixel: PixelFormat,
+    frame_data: &[u8],
+    alpha: Option<&AlphaItem>,
+) -> Result<Vec<u8>> {
+    let (frame, sequence) = decode_frame(&info.config.config_obus, frame_data)?;
+    let color = &sequence.color;
+    let layout = Layout {
+        width: info.width as usize,
+        height: info.height as usize,
+        subsampling_x: usize::from(color.subsampling_x),
+        subsampling_y: usize::from(color.subsampling_y),
+    };
+    let depths = Depths::for_input(color.bit_depth);
+    let (colour, channels) = if color.mono_chrome {
+        let luma = frame
+            .planes
+            .first()
+            .ok_or_else(|| PixelsError::malformed("avif", "the luma plane is missing"))?;
+        (plane_to_grey(luma, layout, depths, color.color_range), 1)
+    } else {
+        (
+            colour_to_rgb(info, &frame.planes, color, layout, depths)?,
+            3,
+        )
+    };
+    let alpha = match (info.has_alpha, alpha) {
+        (false, _) => None,
+        (true, Some(item)) => Some(decode_alpha(item, layout, depths)?),
+        // The container declares alpha but it could not be located (a grid's
+        // alpha, say); the descriptor promises it, so this cannot continue.
+        (true, None) => {
+            return Err(PixelsError::unsupported(
+                "avif: this file's alpha plane is not decodable yet",
+            ));
+        }
+    };
+    Ok(pack(pixel, &colour, channels, alpha.as_deref()))
+}
+
+/// Convert a colour (non-monochrome) frame's planes to RGB samples.
+fn colour_to_rgb(
+    info: &AvifInfo,
+    planes: &[crate::av1::Plane],
+    color: &crate::av1::ColorConfig,
+    layout: Layout,
+    depths: Depths,
+) -> Result<Vec<u16>> {
     // The container's nclx, when present, is what the file declares; the
     // sequence header is the fallback. The range is the sequence header's:
     // it is what governs the decoded samples.
@@ -269,28 +358,85 @@ fn decode_raster(info: &AvifInfo, frame_data: &[u8]) -> Result<Vec<u8>> {
         Some(Colour::Nclx { matrix, .. }) => *matrix,
         _ => u16::from(color.matrix_coefficients),
     };
-    let (sub_x, sub_y) = (
-        usize::from(color.subsampling_x),
-        usize::from(color.subsampling_y),
-    );
-    let layout = Layout {
-        width,
-        height,
-        subsampling_x: sub_x,
-        subsampling_y: sub_y,
-    };
-    let depths = Depths::for_input(color.bit_depth);
     if matrix != 0 {
         let yuv = YuvMatrix::new(matrix, color.color_range, depths)?;
-        return yuv_to_rgb(&frame.planes, layout, &yuv);
+        return yuv_to_rgb(planes, layout, &yuv);
     }
-    if (sub_x, sub_y) != (0, 0) {
+    if (layout.subsampling_x, layout.subsampling_y) != (0, 0) {
         return Err(PixelsError::malformed(
             "avif",
             "the identity colour matrix requires 4:4:4, but the chroma is subsampled",
         ));
     }
-    identity_to_rgb(&frame.planes, layout, depths)
+    identity_to_rgb(planes, layout, depths)
+}
+
+/// Decode the alpha item to samples at the colour's output depth. Alpha is
+/// its image's luma — any chroma it codes is ignored — expanded to full range
+/// if the item was coded at studio range.
+fn decode_alpha(item: &AlphaItem, layout: Layout, colour_depths: Depths) -> Result<Vec<u16>> {
+    if item.premultiplied {
+        // Samples at the API boundary are straight alpha (SPEC §Pixel
+        // formats); un-premultiplying is not implemented.
+        return Err(PixelsError::unsupported(
+            "avif: premultiplied alpha is not implemented yet",
+        ));
+    }
+    let (frame, sequence) = decode_frame(&item.config_obus, &item.frame_data)?;
+    let luma = frame
+        .planes
+        .first()
+        .ok_or_else(|| PixelsError::malformed("avif", "the alpha plane is missing"))?;
+    let depths = Depths {
+        input: sequence.color.bit_depth,
+        output: colour_depths.output,
+    };
+    let alpha_layout = Layout {
+        subsampling_x: 0,
+        subsampling_y: 0,
+        ..layout
+    };
+    Ok(plane_to_grey(
+        luma,
+        alpha_layout,
+        depths,
+        sequence.color.color_range,
+    ))
+}
+
+/// Interleave colour samples (`channels` per pixel: 1 grey or 3 RGB) and
+/// optional alpha into the raster `pixel` describes — one byte per sample for
+/// the 8-bit formats, two native-endian bytes for the 16-bit ones. Grey with
+/// alpha at 16 bits has no format of its own (SPEC §Pixel formats), so it is
+/// widened to RGBA.
+fn pack(pixel: PixelFormat, colour: &[u16], channels: usize, alpha: Option<&[u16]>) -> Vec<u8> {
+    let wide = matches!(
+        pixel,
+        PixelFormat::Rgb16 | PixelFormat::Rgba16 | PixelFormat::Gray16
+    );
+    let out_colour = match pixel {
+        PixelFormat::Gray8 | PixelFormat::Gray16 | PixelFormat::GrayA8 => 1,
+        _ => 3,
+    };
+    let pixels = colour.len() / channels.max(1);
+    let mut raster = Vec::with_capacity(pixels * (out_colour + 1) * if wide { 2 } else { 1 });
+    let mut put = |v: u16| {
+        if wide {
+            raster.extend_from_slice(&v.to_ne_bytes());
+        } else {
+            raster.push(v as u8);
+        }
+    };
+    for (i, px) in colour.chunks_exact(channels.max(1)).enumerate() {
+        for c in 0..out_colour {
+            // Grey widened to RGB repeats its one sample.
+            put(px.get(c).or_else(|| px.first()).copied().unwrap_or(0));
+        }
+        if let Some(alpha) = alpha {
+            put(alpha.get(i).copied().unwrap_or(0));
+        }
+    }
+    raster
 }
 
 /// The pixel format this image decodes to.
@@ -358,7 +504,12 @@ impl Decoder for AvifDecoder {
                 .frame_data
                 .as_deref()
                 .ok_or_else(|| PixelsError::unsupported("avif: grid images are not decoded yet"))?;
-            self.raster = Some(decode_raster(&self.info, frame_data)?);
+            self.raster = Some(decode_raster(
+                &self.info,
+                self.descriptor.pixel,
+                frame_data,
+                self.alpha.as_ref(),
+            )?);
         }
         let raster = self.raster.as_deref().unwrap_or(&[]);
         let start = self.row as usize * row_bytes;
@@ -624,6 +775,30 @@ mod tests {
             (128, 64)
         );
         assert_eq!(decoder.info().config.bit_depth, 8);
+    }
+
+    #[test]
+    fn pack_interleaves_colour_and_alpha_in_the_formats_layout() {
+        // Grey + alpha at 8 bits: one byte each, grey first.
+        assert_eq!(
+            pack(PixelFormat::GrayA8, &[10, 20], 1, Some(&[200, 100])),
+            [10, 200, 20, 100]
+        );
+        // RGB + alpha at 8 bits.
+        assert_eq!(
+            pack(PixelFormat::Rgba8, &[1, 2, 3], 3, Some(&[4])),
+            [1, 2, 3, 4]
+        );
+        // Wide grey + alpha has no format of its own and widens to RGBA16:
+        // the grey sample repeats, native-endian.
+        let wide = pack(PixelFormat::Rgba16, &[0x1234], 1, Some(&[0xFFFF]));
+        let samples: Vec<u16> = wide
+            .chunks_exact(2)
+            .map(|b| u16::from_ne_bytes([b[0], b[1]]))
+            .collect();
+        assert_eq!(samples, [0x1234, 0x1234, 0x1234, 0xFFFF]);
+        // No alpha: grey stays one sample per pixel.
+        assert_eq!(pack(PixelFormat::Gray8, &[7, 8], 1, None), [7, 8]);
     }
 
     #[test]

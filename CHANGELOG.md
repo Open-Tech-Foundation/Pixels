@@ -126,6 +126,18 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- AVIF alpha and monochrome decode. A straight alpha plane — stored as a
+  second, usually monochrome, AV1 image — becomes the alpha channel (`Rgba8`,
+  `Rgba16`, `GrayA8`), expanded to full range if coded at studio range; a
+  monochrome picture decodes to `Gray8`/`Gray16`. Monochrome reconstruction
+  needed only the refusal lifted (two 4:0:0 plane fixtures match libaom), and
+  seven reference fixtures cover RGBA at 8/10 bits, 4:2:0 with alpha, grey at
+  8/10 bits and studio range, and grey + alpha. Premultiplied alpha (a `prem`
+  reference, colour item to alpha item) is refused as `Unsupported`, since
+  the API boundary is straight alpha. Note for the studio-range grey fixture:
+  avifdec writes an 8-bit monochrome picture as a grey PNG of raw Y samples,
+  skipping the range expansion, so that reference is taken from its 16-bit
+  output instead — against which our decode is exact.
 - 10- and 12-bit AVIF now decodes, to `Rgb16` over its full 0..=65535 range
   (the conversion computes RGB at 16 bits directly, as libavif does, rather
   than leaving samples in 10-bit units — the old doc comment claiming they

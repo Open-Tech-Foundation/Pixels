@@ -25,8 +25,7 @@ use otf_pixels_core::{Decoder, ErrorCode, Limits};
 const CASES: &[(&str, &str)] = &[
     ("delta_q", "delta_q"),
     ("qmatrix", "quantizer matrices"),
-    ("monochrome", "monochrome"),
-    ("alpha", "alpha plane"),
+    ("premultiplied", "premultiplied alpha"),
     ("ycgco", "colour matrix 8"),
     ("tiles", "multi-tile"),
 ];

@@ -39,6 +39,9 @@ const CASES: &[(&str, (u8, u8))] = &[
     ("textured_odd_420_10bit", (1, 1)),
     ("textured_444_12bit", (0, 0)),
     ("blocks_420_10bit_palette", (1, 1)),
+    // Monochrome signals 4:2:0 subsampling but codes no chroma planes.
+    ("textured_odd_400", (1, 1)),
+    ("blocks_400_palette", (1, 1)),
 ];
 
 fn fixture_dir() -> String {

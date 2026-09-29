@@ -77,6 +77,27 @@ fn a_ten_bit_avif_decodes_to_full_range_sixteen_bit_rgb() {
 }
 
 #[test]
+fn an_avif_with_alpha_decodes_to_rgba_with_libavifs_alpha() {
+    // photo_alpha: the transparency is a second, monochrome AV1 image; it
+    // must come back as the fourth channel, matching libavif's exactly (the
+    // colour within its one-step conversion gap).
+    let image = Image::open(fixture("photo_alpha.avif")).unwrap();
+    assert_eq!(image.metadata().unwrap().pixel, PixelFormat::Rgba8);
+    let ours = image
+        .output(Format::Raw, EncodeOptions::default())
+        .bytes()
+        .unwrap();
+    let theirs = std::fs::read(fixture("photo_alpha.raw")).unwrap();
+    assert_eq!(ours.len(), theirs.len());
+    for (a, b) in ours.chunks_exact(4).zip(theirs.chunks_exact(4)) {
+        assert_eq!(a[3], b[3], "alpha");
+        for c in 0..3 {
+            assert!(a[c].abs_diff(b[c]) <= 1, "{a:?} vs {b:?}");
+        }
+    }
+}
+
+#[test]
 fn an_avif_using_an_unimplemented_tool_fails_cleanly_through_the_facade() {
     // Opening only reads the container; the refusal comes when pixels are
     // pulled, and it is a catchable Unsupported rather than a wrong image.

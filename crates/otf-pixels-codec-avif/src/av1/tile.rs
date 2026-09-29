@@ -108,7 +108,7 @@ pub fn decode_still(
              grain synthesis is not implemented yet",
         ));
     }
-    if let Some(tool) = unimplemented_tool(seq, frame) {
+    if let Some(tool) = unimplemented_tool(frame) {
         return Err(PixelsError::unsupported(format!(
             "avif: {tool} is not implemented yet"
         )));
@@ -141,16 +141,13 @@ fn unimplemented_filters_off(frame: &FrameHeader) -> bool {
     !frame.film_grain.apply_grain
 }
 
-/// The first coding tool `seq`/`frame` switch on that the tile decoder does not
+/// The first coding tool `frame` switches on that the tile decoder does not
 /// implement, if any. Each of these changes what is *coded* — extra symbols
 /// (`segment_id`, `delta_qindex`, `delta_lf`) or a different dequantisation
 /// (quantizer matrices) — so decoding past one without it produces a wrong
-/// image with no error. Monochrome is refused until its output path exists
-/// and is verified against libaom.
-fn unimplemented_tool(seq: &SequenceHeader, frame: &FrameHeader) -> Option<&'static str> {
-    if seq.color.mono_chrome {
-        Some("monochrome")
-    } else if frame.segmentation.enabled {
+/// image with no error.
+fn unimplemented_tool(frame: &FrameHeader) -> Option<&'static str> {
+    if frame.segmentation.enabled {
         Some("segmentation")
     } else if frame.delta_q_present {
         Some("per-superblock quantizer deltas (delta_q)")

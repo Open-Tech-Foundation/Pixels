@@ -13,6 +13,10 @@ gradient_odd_deblock 50 34 3 0 8
 gradient_odd_lossless 37 29 3 0 8
 gradient_odd_nofilter 37 29 3 0 8
 gradient_superres 64 48 3 0 8
+grey 96 64 1 0 8
+grey_10bit 96 64 1 1 16
+grey_alpha 96 64 2 0 8
+grey_studio 96 64 1 0 8
 mixed_restore 512 384 3 0 8
 mixed_restore_full 400 384 3 0 8
 mixed_superres_full 420 64 3 0 8
@@ -25,6 +29,9 @@ photo_422 96 64 3 2 8
 photo_444 96 64 3 1 8
 photo_444_10bit_identity 96 64 3 1 16
 photo_444_12bit 96 64 3 1 16
+photo_alpha 96 64 4 1 8
+photo_alpha_10bit 96 64 4 1 16
+photo_alpha_420 96 64 4 2 8
 photo_default 160 120 3 1 8
 photo_odd_420 37 29 3 3 8
 textured_nofilter 128 128 3 0 8
