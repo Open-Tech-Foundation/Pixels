@@ -16,6 +16,13 @@ gradient_superres 64 48 3 0
 mixed_restore 512 384 3 0
 mixed_restore_full 400 384 3 0
 mixed_superres_full 420 64 3 0
+photo_420 96 64 3 2
+photo_420_bt2020 96 64 3 2
+photo_420_bt709_studio 96 64 3 5
+photo_422 96 64 3 2
+photo_444 96 64 3 1
+photo_default 160 120 3 1
+photo_odd_420 37 29 3 3
 textured_nofilter 128 128 3 0
 textured_odd_restore 100 70 3 0
 textured_odd_superres 101 37 3 0

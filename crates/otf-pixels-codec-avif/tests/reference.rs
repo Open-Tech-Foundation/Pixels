@@ -17,7 +17,7 @@
 )]
 
 use otf_pixels_codec_avif::AvifDecoder;
-use otf_pixels_core::{Decoder, ErrorCode, Limits, PixelFormat};
+use otf_pixels_core::{Decoder, Limits, PixelFormat};
 
 fn fixture_dir() -> String {
     format!("{}/tests/fixtures", env!("CARGO_MANIFEST_DIR"))
@@ -34,6 +34,8 @@ struct Reference {
     width: u32,
     height: u32,
     channels: usize,
+    /// The largest per-channel difference from libavif's raster allowed.
+    tolerance: u8,
 }
 
 fn references() -> Vec<Reference> {
@@ -49,6 +51,7 @@ fn references() -> Vec<Reference> {
                 width: f[1].parse().unwrap(),
                 height: f[2].parse().unwrap(),
                 channels: f[3].parse().unwrap(),
+                tolerance: f[4].parse().unwrap(),
             }
         })
         .collect()
@@ -66,16 +69,22 @@ fn decode(bytes: &[u8]) -> otf_pixels_core::Result<(Vec<u8>, otf_pixels_core::Im
     Ok((pixels, descriptor))
 }
 
-/// Exact means exact: for every fixture this decoder can handle the raster must
-/// equal libavif's to the byte. Flavours: `lossless` (4x4 WHT, no filters);
+/// Every fixture decodes, and its raster matches libavif's within the manifest's
+/// tolerance. For everything coded in 4:4:4 with the identity matrix the
+/// tolerance is 0: the RGB raster *is* the decoded planes, so the whole AV1
+/// decode must match to the byte. Flavours: `lossless` (4x4 WHT, no filters);
 /// `nofilter` (genuinely lossy — DCT/ADST, larger transforms, chroma-from-luma —
 /// but every in-loop filter off); `deblock` (lossy with the deblocking loop
 /// filter §7.14 on, CDEF/restoration off); `cdef` (lossy with CDEF §7.15 on,
 /// deblocking/restoration off, to isolate it); `restore` (loop restoration §7.17
-/// on, deblocking/CDEF off); `restore_full` (all three in-loop filters on); and
+/// on, deblocking/CDEF off); `restore_full` (all three in-loop filters on);
 /// `superres` / `superres_full` (coded at a reduced width and upscaled, §7.16,
-/// with the in-loop filters off / on). All must match exactly, since the
-/// reconstruct applies every in-loop filter and the upscale.
+/// with the in-loop filters off / on); and `photo` — real YUV (4:2:0, 4:2:2,
+/// BT.601/709/2020, full and studio range) converted to RGB, where the
+/// tolerance is the gap to libavif's libyuv-based conversion (see the
+/// regeneration script) and the decode underneath is pinned exactly by
+/// `tests/planes.rs`. Files that must be refused live in `tests/unsupported.rs`,
+/// so here a refusal is a failure.
 #[test]
 fn reference_fixtures_decode_exactly() {
     let mut compared = 0;
@@ -85,16 +94,8 @@ fn reference_fixtures_decode_exactly() {
     let mut restore_compared = 0;
     let mut superres_compared = 0;
     for reference in references() {
-        let result = decode(&read_fixture(&reference.name, "avif"));
-        let (ours, descriptor) = match result {
-            Ok(pair) => pair,
-            Err(e) if e.code() == ErrorCode::Unsupported => {
-                // A tool this phase does not implement (e.g. palette). The
-                // decode refused cleanly rather than producing a wrong raster.
-                continue;
-            }
-            Err(e) => panic!("{}: {e}", reference.name),
-        };
+        let (ours, descriptor) = decode(&read_fixture(&reference.name, "avif"))
+            .unwrap_or_else(|e| panic!("{}: {e}", reference.name));
         let theirs = read_fixture(&reference.name, "raw");
 
         assert_eq!(
@@ -113,10 +114,18 @@ fn reference_fixtures_decode_exactly() {
             "{}: pixel format",
             reference.name
         );
-        assert_eq!(
-            ours, theirs,
-            "{}: a decode differs from libavif's",
-            reference.name
+        assert_eq!(ours.len(), theirs.len(), "{}: raster size", reference.name);
+        let worst = ours
+            .iter()
+            .zip(&theirs)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0);
+        assert!(
+            worst <= reference.tolerance,
+            "{}: differs from libavif's by up to {worst}, tolerance {}",
+            reference.name,
+            reference.tolerance
         );
         compared += 1;
         if reference.name.contains("nofilter") {

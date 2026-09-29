@@ -36,6 +36,7 @@ mod boxes;
 mod decoder;
 mod meta;
 mod props;
+mod yuv;
 
 pub use av1::cdf;
 pub use av1::{

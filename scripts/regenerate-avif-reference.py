@@ -148,6 +148,34 @@ FIXTURES = {
     "textured_odd_superres": (textured(101, 37), False, 30, "444", 0),
     "textured_superres_full": (textured(99, 70), False, 30, "444", 0),
     "mixed_superres_full": (mixed(420, 64, 5), False, 30, "444", 0),
+    # Real YUV: subsampled chroma and non-identity matrices, converted to RGB
+    # (see PHOTO_ARGS). The AV1 decode under these is pinned exactly by the
+    # plane-level suite; what these check is the conversion, against libavif's.
+    # libavif converts through libyuv, whose 8-bit matrices carry about six
+    # fractional bits, so it sits a step or two from the exact result at full
+    # range and up to five at studio range; our conversion matches exact
+    # arithmetic (unit-tested in yuv.rs). The tolerances are those measured
+    # gaps. "photo_default" is avifenc with no options at all (4:4:4, BT.601,
+    # full range, speed 6) — the typical file this decoder meets.
+    "photo_default": (mixed(160, 120, 11), False, 0, "", 1),
+    "photo_420": (mixed(96, 64, 3), False, 0, "", 2),
+    "photo_odd_420": (textured(37, 29), False, 0, "", 3),
+    "photo_422": (mixed(96, 64, 3), False, 0, "", 2),
+    "photo_444": (mixed(96, 64, 3), False, 0, "", 1),
+    "photo_420_bt709_studio": (mixed(96, 64, 3), False, 0, "", 5),
+    "photo_420_bt2020": (mixed(96, 64, 3), False, 0, "", 2),
+}
+
+# avifenc arguments for the "photo" fixtures, used verbatim. Without --cicp
+# avifenc writes BT.601 (matrix 6) at full range.
+PHOTO_ARGS = {
+    "photo_default": [],
+    "photo_420": ["-y", "420", "-q", "60"],
+    "photo_odd_420": ["-y", "420", "-q", "60"],
+    "photo_422": ["-y", "422", "-q", "60"],
+    "photo_444": ["-y", "444", "-q", "60"],
+    "photo_420_bt709_studio": ["-y", "420", "-q", "60", "--cicp", "1/13/1", "-r", "limited"],
+    "photo_420_bt2020": ["-y", "420", "-q", "60", "--cicp", "9/16/9"],
 }
 
 # SuperresDenom for each "superres" fixture (SUPERRES_NUM is 8).
@@ -373,6 +401,17 @@ def encode_superres(image: Image.Image, path: str, cq_level: int, denominator: i
 
 def encode(image: Image.Image, path: str, lossless: bool, quality: int, yuv: str) -> None:
     name = os.path.splitext(os.path.basename(path))[0]
+    if name in PHOTO_ARGS:
+        png = path + ".src.png"
+        image.save(png, "PNG")
+        subprocess.run(
+            ["avifenc", *PHOTO_ARGS[name], png, path],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        os.remove(png)
+        return
     if name in SUPERRES_DENOMINATORS:
         encode_superres(image, path, quality, SUPERRES_DENOMINATORS[name])
         return
@@ -520,6 +559,17 @@ def write_planes(fixtures: str) -> None:
         print(f"planes/{name}: {os.path.getsize(base + '.avif')} bytes")
 
 
+def with_alpha(image: Image.Image) -> Image.Image:
+    """`image` with a horizontal alpha ramp, so the encoder writes an alpha item."""
+    rgba = image.convert("RGBA")
+    pixels = rgba.load()
+    for y in range(rgba.height):
+        for x in range(rgba.width):
+            r, g, b, _ = pixels[x, y]
+            pixels[x, y] = (r, g, b, (x * 255) // max(rgba.width - 1, 1))
+    return rgba
+
+
 # Files this decoder must *refuse*: each uses one coding tool it does not
 # implement yet, and decoding past such a tool without it yields a wrong image
 # with no error. `tests/unsupported.rs` asserts every file here decodes to
@@ -532,7 +582,8 @@ UNSUPPORTED = {
     "qmatrix": (textured(64, 64), [*IDENTITY_444, "-a", "enable-qm=1"]),
     "depth10": (textured(32, 32), [*IDENTITY_444, "-d", "10"]),
     "monochrome": (textured(32, 32), ["-y", "400", "-q", "60"]),
-    "yuv420": (textured(32, 32), ["-y", "420", "-q", "60"]),
+    "alpha": (with_alpha(textured(32, 32)), ["-q", "60"]),
+    "ycgco": (textured(32, 32), ["-y", "444", "-q", "60", "--cicp", "1/13/8"]),
     "tiles": (textured(128, 64), [*IDENTITY_444, "--tilecolslog2", "1"]),
 }
 

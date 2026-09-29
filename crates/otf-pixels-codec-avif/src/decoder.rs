@@ -8,14 +8,16 @@
 //! partial raster, so the decode is inherently whole-image (SPEC §Memory).
 //!
 //! The AV1 reconstruction covers the single-tile intra still in 4:4:4, 4:2:2
-//! and 4:2:0 at 8 bits; the raster conversion currently handles only the
-//! identity colour matrix. Anything outside that (other matrices, multiple
-//! tiles, intra block copy, grids, 10/12-bit, film grain) is reported as
-//! [`PixelsError::Unsupported`] rather than decoded wrong.
+//! and 4:2:0 at 8 bits, and the raster conversion handles the identity matrix
+//! and the BT.601/709/2020 YUV matrices at full and studio range (`yuv.rs`).
+//! Anything outside that (other matrices, alpha, multiple tiles, intra block
+//! copy, grids, 10/12-bit, film grain, the tools `decode_still` refuses) is
+//! reported as [`PixelsError::Unsupported`] rather than decoded wrong.
 
 use crate::boxes::{FourCc, Reader};
 use crate::meta::Meta;
-use crate::props::{Av1Config, Subsampling};
+use crate::props::{Av1Config, Colour, Subsampling};
+use crate::yuv::{Layout, YuvMatrix, yuv_to_rgb};
 use otf_pixels_core::{
     Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, PixelFormat, PixelsError,
     Result, Source,
@@ -48,6 +50,9 @@ pub struct AvifInfo {
     /// Whether the primary item is a derived grid rather than a single coded
     /// image.
     pub is_grid: bool,
+    /// The primary item's `colr` colour information, if it has any. Its `nclx`
+    /// matrix, when present, overrides the one in the AV1 sequence header.
+    pub colour: Option<Colour>,
 }
 
 /// Decodes an AVIF stream.
@@ -216,6 +221,7 @@ fn parse_container(bytes: &[u8]) -> Result<AvifInfo> {
         config,
         has_alpha: meta.alpha_item(primary.id).is_some(),
         is_grid: primary.is_grid(),
+        colour: meta.properties.colour(primary.id).cloned(),
     })
 }
 
@@ -244,14 +250,43 @@ fn decode_raster(info: &AvifInfo, frame_data: &[u8]) -> Result<Vec<u8>> {
         .ok_or_else(|| PixelsError::malformed("avif", "tile data runs past the coded frame"))?;
     let frame = decode_still(&still.sequence, &still.frame, located)?;
 
+    if info.has_alpha {
+        // The alpha plane is a second coded item; the descriptor promises
+        // RGBA, so producing RGB here would hand back a raster of the wrong
+        // shape.
+        return Err(PixelsError::unsupported(
+            "avif: decoding the alpha plane is not implemented yet",
+        ));
+    }
     let width = info.width as usize;
     let height = info.height as usize;
-    let matrix = still.sequence.color.matrix_coefficients;
+    let color = &still.sequence.color;
+    // The container's nclx, when present, is what the file declares; the
+    // sequence header is the fallback. The range is the sequence header's:
+    // it is what governs the decoded samples.
+    let matrix = match &info.colour {
+        Some(Colour::Nclx { matrix, .. }) => *matrix,
+        _ => u16::from(color.matrix_coefficients),
+    };
+    let (sub_x, sub_y) = (
+        usize::from(color.subsampling_x),
+        usize::from(color.subsampling_y),
+    );
     if matrix != 0 {
-        return Err(PixelsError::unsupported(format!(
-            "avif: YUV to RGB conversion (colour matrix {matrix}) is not implemented yet; \
-             only the identity matrix is"
-        )));
+        let yuv = YuvMatrix::new(matrix, color.color_range)?;
+        let layout = Layout {
+            width,
+            height,
+            subsampling_x: sub_x,
+            subsampling_y: sub_y,
+        };
+        return yuv_to_rgb(&frame.planes, layout, &yuv);
+    }
+    if (sub_x, sub_y) != (0, 0) {
+        return Err(PixelsError::malformed(
+            "avif",
+            "the identity colour matrix requires 4:4:4, but the chroma is subsampled",
+        ));
     }
     let plane = |i: usize| {
         frame
@@ -627,6 +662,7 @@ mod tests {
                 },
                 has_alpha,
                 is_grid: false,
+                colour: None,
             };
             pixel_format(&info)
         }
@@ -648,6 +684,7 @@ mod tests {
                 },
                 has_alpha: alpha,
                 is_grid: false,
+                colour: None,
             })
         };
         assert_eq!(mono(8, false), PixelFormat::Gray8);

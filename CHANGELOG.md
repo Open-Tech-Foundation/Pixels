@@ -53,6 +53,10 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Fixed
+- An AVIF file with an alpha plane, or with a colour matrix other than
+  identity/BT.601/709/2020 (YCgCo, say), is now refused as `Unsupported`; an
+  alpha file previously failed with a misleading "raster is short" error,
+  because the descriptor promised RGBA while the decode produced RGB.
 - The AVIF decoder dropped the samples a transform block writes past the
   decoded area's right or bottom edge; the spec keeps them, and a later
   chroma-from-luma prediction reads that luma back. Planes now cover whole
@@ -122,6 +126,19 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- AVIF files with real YUV now decode to RGB: 4:2:0, 4:2:2 and 4:4:4 with the
+  BT.601, BT.709 or BT.2020 matrix at full or studio range — which covers what
+  avifenc writes by default and what most AVIF in the wild uses. Chroma is
+  upsampled with the triangle filter (9:3:3:1 in 4:2:0) and converted in
+  16-bit fixed point, matching exact arithmetic to within one step (unit
+  tested against a floating-point reference); the matrix comes from the
+  container's `nclx`, else the sequence header. libavif converts through
+  libyuv's coarser matrices, so seven new `photo_*` reference fixtures hold
+  our raster to libavif's within the measured 1-5 step gap, and the
+  reference suite now honours each fixture's manifest tolerance. It also no
+  longer skips a fixture that reports `Unsupported`: refusals are
+  `tests/unsupported.rs`'s job, so here every fixture must decode. A facade
+  test opens a 4:2:0 file through `Image::open` and crops it.
 - `otf-pixels-codec-avif` reconstructs 4:2:0 and 4:2:2 frames — the chroma
   formats nearly every real AVIF uses. Each chroma plane is decoded in its own
   subsampled grid: a block one unit wide or high shares its chroma with its
