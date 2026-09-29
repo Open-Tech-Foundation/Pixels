@@ -14,8 +14,8 @@
 //! is handed *both* frames and picks per sample in `get_source_sample` (§7.17.6).
 //! When CDEF is disabled the two frames are identical and the distinction is
 //! moot. With super-resolution both frames arrive already upscaled (§7.16), so
-//! this module only ever sees `UpscaledWidth`. This is the intra 4:4:4 subset
-//! (`subsampling_x`/`y` are zero) and the single-tile path.
+//! this module only ever sees `UpscaledWidth`. Chroma planes use their own
+//! (subsampled) unit grid and stripe offsets. This is the single-tile path.
 //!
 //! Like the transform DSP and CDEF, the filters are transcribed straight from
 //! the spec's indexed working arrays and constant tables, so the module opts into
@@ -277,7 +277,7 @@ pub struct LoopRestore<'a> {
     pub lr: &'a [PlaneLr],
     /// Sample bit depth (8/10/12).
     pub bit_depth: u8,
-    /// Number of planes (3 for 4:4:4).
+    /// Number of planes (1 monochrome, 3 otherwise).
     pub num_planes: usize,
     /// Horizontal chroma subsampling (0 for 4:4:4).
     pub subsampling_x: usize,

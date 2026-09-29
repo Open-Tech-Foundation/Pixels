@@ -7,9 +7,11 @@
 //! the cache — an AVIF still is one AV1 key frame with no prefix that yields a
 //! partial raster, so the decode is inherently whole-image (SPEC §Memory).
 //!
-//! The reconstruction covers the lossless 4:4:4 intra subset; anything outside
-//! it (lossy transforms, subsampled chroma, intra block copy, grids) is
-//! reported as [`PixelsError::Unsupported`] rather than decoded wrong.
+//! The AV1 reconstruction covers the single-tile intra still in 4:4:4, 4:2:2
+//! and 4:2:0 at 8 bits; the raster conversion currently handles only the
+//! identity colour matrix. Anything outside that (other matrices, multiple
+//! tiles, intra block copy, grids, 10/12-bit, film grain) is reported as
+//! [`PixelsError::Unsupported`] rather than decoded wrong.
 
 use crate::boxes::{FourCc, Reader};
 use crate::meta::Meta;
@@ -246,9 +248,10 @@ fn decode_raster(info: &AvifInfo, frame_data: &[u8]) -> Result<Vec<u8>> {
     let height = info.height as usize;
     let matrix = still.sequence.color.matrix_coefficients;
     if matrix != 0 {
-        return Err(PixelsError::unsupported(
-            "avif: only the identity colour matrix is implemented in the lossless path",
-        ));
+        return Err(PixelsError::unsupported(format!(
+            "avif: YUV to RGB conversion (colour matrix {matrix}) is not implemented yet; \
+             only the identity matrix is"
+        )));
     }
     let plane = |i: usize| {
         frame

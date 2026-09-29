@@ -27,7 +27,9 @@ const CASES: &[(&str, &str)] = &[
     ("qmatrix", "quantizer matrices"),
     ("depth10", "bit depth"),
     ("monochrome", "monochrome"),
-    ("yuv420", "4:4:4"),
+    // 4:2:0 itself decodes (see tests/planes.rs); what remains is turning
+    // its YUV into RGB, which a subsampled format always needs.
+    ("yuv420", "YUV to RGB"),
     ("tiles", "multi-tile"),
 ];
 

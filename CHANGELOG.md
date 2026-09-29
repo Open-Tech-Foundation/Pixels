@@ -53,6 +53,13 @@ versioning: [SemVer](https://semver.org/).
   -source exception rather than leaving the guarantee quietly overstated.
 
 ### Fixed
+- The AVIF decoder dropped the samples a transform block writes past the
+  decoded area's right or bottom edge; the spec keeps them, and a later
+  chroma-from-luma prediction reads that luma back. Planes now cover whole
+  superblocks, with the decoded area tracked separately for intra edges.
+- A palette block overhanging the frame edge had its whole colour map decoded;
+  only the on-screen part is coded, the rest replicating its last column and
+  row, so such a block desynchronised the tile.
 - The AVIF decoder silently produced a wrong image — no error — for frames
   coded with per-superblock quantizer deltas (`delta_q`) or quantizer matrices,
   both of which libaom emits under common tuning (`deltaq-mode=3`,
@@ -115,6 +122,21 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- `otf-pixels-codec-avif` reconstructs 4:2:0 and 4:2:2 frames — the chroma
+  formats nearly every real AVIF uses. Each chroma plane is decoded in its own
+  subsampled grid: a block one unit wide or high shares its chroma with its
+  neighbour, the odd one of the pair coding it (`HasChroma`) with its own
+  neighbour availability; residual, transform sizes, coefficient contexts,
+  prediction edges, the smooth-filter neighbour lookup, palette maps and
+  chroma-from-luma's 2x2 luma averaging all follow the plane's subsampling, as
+  do deblocking's edge walk and CDEF/restoration. Verified sample for sample
+  against libaom's decoded planes by a new plane-level suite
+  (`tests/planes.rs`, ten fixtures: 4:2:0 with filters off and on, odd sizes,
+  4:2:2, palettes, 128x128 superblocks) — before any colour conversion, which
+  is still identity-only, so these files decode to planes but not yet to RGB.
+- `otf-pixels-codec-avif` walks a block wider or taller than 64 in 64x64
+  residual chunks, as the spec requires; libaom codes 128x128 blocks in
+  128x128 superblocks, which it uses for larger images.
 - `otf-pixels-codec-avif` decodes super-resolution frames (§7.16). Such a frame
   is coded at a reduced width (`8 / SuperresDenom` of the display width) and
   reconstructed, deblocked and CDEF-filtered at that width; between CDEF and

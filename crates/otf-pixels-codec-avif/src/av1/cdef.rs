@@ -12,10 +12,11 @@
 //!
 //! Reads are taken from the *input* frame (the deblocked reconstruction) and
 //! written to a separate output, so filtering never sees its own results; this
-//! module snapshots the planes before it starts. This is the intra 4:4:4 subset:
-//! `subsampling_x`/`subsampling_y` are zero, so the chroma planes filter on the
-//! same 8x8 grid as luma. A `cdef_idx` of -1, or an 8x8 block whose four 4x4
-//! units are all coded skip, leaves that block untouched.
+//! module snapshots the planes before it starts. Each 8x8 luma block filters
+//! the co-located chroma block — 4x4 for 4:2:0, 4x8 for 4:2:2, 8x8 for 4:4:4 —
+//! with the direction remapped for 4:2:2 (`Cdef_Uv_Dir`). A `cdef_idx` of -1,
+//! or an 8x8 block whose four 4x4 units are all coded skip, leaves that block
+//! untouched.
 //!
 //! Like the transform DSP, the direction search (§7.15.2) and the filter's tap
 //! lookups are transcribed straight from the spec, which reads the fixed-size
@@ -84,7 +85,7 @@ pub struct CdefFilter<'a> {
     pub skips: &'a [u8],
     /// Sample bit depth (8/10/12).
     pub bit_depth: u8,
-    /// Number of planes (1 monochrome, 3 for 4:4:4).
+    /// Number of planes (1 monochrome, 3 otherwise).
     pub num_planes: usize,
     /// Frame dimensions in 4x4 units.
     pub mi_rows: usize,

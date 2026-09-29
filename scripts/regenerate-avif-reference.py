@@ -15,8 +15,9 @@ a lossy decode is only required to be close, and they exercise the DCT/ADST
 paths and the post-filters as those land.
 
 Fixtures are generated procedurally from fixed content, so re-running this
-reproduces them. Requires `avifenc`/`avifdec` (libavif) and `aomenc` (libaom,
-for the super-resolution fixtures) on PATH, and Pillow.
+reproduces them. Requires `avifenc`/`avifdec` (libavif) and `aomenc`/`aomdec`
+(libaom: the super-resolution fixtures and the plane-level references) on PATH,
+and Pillow.
 """
 
 import argparse
@@ -424,6 +425,101 @@ def reference_raster(path: str) -> Image.Image:
     return rgb
 
 
+def soft(width: int, height: int) -> Image.Image:
+    """A very gentle three-channel ramp. Nearly flat content coded slowly at low
+    quality is what makes the encoder pick 128x128 blocks (with a 128x128
+    superblock), whose residual the decoder walks in 64x64 chunks."""
+    image = Image.new("RGB", (width, height))
+    pixels = image.load()
+    for y in range(height):
+        for x in range(width):
+            pixels[x, y] = (
+                100 + x * 40 // width,
+                90 + y * 30 // height,
+                120 + (x + y) * 20 // (width + height),
+            )
+    return image
+
+
+# Plane-level fixtures: the decoded Y/U/V planes, before any colour conversion,
+# checked against libaom's `aomdec --rawvideo` output of the same coded frame
+# (`tests/planes.rs`). This is exact regardless of how YUV later becomes RGB,
+# so it is where subsampled chroma is verified. name -> (image, avifenc args).
+FILTERS_OFF = [
+    "-a", "enable-cdef=0", "-a", "enable-restoration=0", "-a", "loopfilter-control=0",
+    "-a", "deltaq-mode=0", "-a", "enable-tpl-model=0",
+]
+# Every in-loop filter left at the encoder's default (on); only the per-block
+# quantizer deltas the decoder does not implement are turned off.
+FILTERS_ON = ["-a", "deltaq-mode=0", "-a", "enable-tpl-model=0"]
+PLANES = {
+    # 4:2:0 with every filter off, then with them all on (speed 4 also reaches
+    # restoration and the 4x16/16x4 shapes); the odd sizes put blocks — and a
+    # chroma-from-luma block's luma — over the frame edge.
+    "gradient_420_nofilter": (gradient(64, 48), ["-y", "420", "-q", "40", "-s", "6", *FILTERS_OFF]),
+    "gradient_odd_420_nofilter": (gradient(37, 29), ["-y", "420", "-q", "40", "-s", "6", *FILTERS_OFF]),
+    "textured_420": (textured(128, 96), ["-y", "420", "-q", "40", "-s", "4", *FILTERS_ON]),
+    "textured_odd_420": (textured(101, 37), ["-y", "420", "-q", "40", "-s", "4", *FILTERS_ON]),
+    "mixed_420": (mixed(256, 192, 3), ["-y", "420", "-q", "50", "-s", "4", *FILTERS_ON]),
+    "textured_422": (textured(99, 70), ["-y", "422", "-q", "40", "-s", "4", *FILTERS_ON]),
+    # Screen content: palettes on subsampled chroma, including blocks whose
+    # colour map overhangs the frame edge (only the on-screen part is coded).
+    "blocks_420_palette": (blocks(90, 70), ["-y", "420", "-q", "40", "-s", "6", *FILTERS_OFF]),
+    "blocks_422_palette": (blocks(51, 37), ["-y", "422", "-q", "60", "-s", "6", *FILTERS_ON]),
+    "blocks_444_palette": (
+        blocks(50, 36),
+        ["-y", "444", "-r", "full", "--cicp", "1/13/0", "-q", "60", "-s", "6", *FILTERS_ON],
+    ),
+    # 128x128 superblocks holding 128-wide blocks: the 64x64 residual chunks.
+    "soft_420_sb128": (soft(136, 72), ["-y", "420", "-q", "5", "-s", "4", "-a", "sb-size=128", *FILTERS_ON]),
+}
+
+
+def carve_primary_item(path: str) -> bytes:
+    """The `mdat` payload of an avifenc still: its one coded item's OBUs."""
+    with open(path, "rb") as f:
+        data = f.read()
+    pos = 0
+    while pos < len(data):
+        size, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        header = 8
+        if size == 1:
+            size = struct.unpack(">Q", data[pos + 8:pos + 16])[0]
+            header = 16
+        elif size == 0:
+            size = len(data) - pos
+        if kind == b"mdat":
+            return data[pos + header:pos + size]
+        pos += size
+    sys.exit(f"{path}: no mdat box")
+
+
+def write_planes(fixtures: str) -> None:
+    directory = os.path.join(fixtures, "planes")
+    os.makedirs(directory, exist_ok=True)
+    for name, (image, args) in sorted(PLANES.items()):
+        base = os.path.join(directory, name)
+        image.save(base + ".src.png", "PNG")
+        subprocess.run(
+            ["avifenc", *args, base + ".src.png", base + ".avif"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        os.remove(base + ".src.png")
+        with open(base + ".obu", "wb") as out:
+            out.write(carve_primary_item(base + ".avif"))
+        # aomdec writes the display-cropped planes, Y then U then V, 8-bit.
+        subprocess.run(
+            ["aomdec", "--rawvideo", "-o", base + ".yuv", base + ".obu"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        os.remove(base + ".obu")
+        print(f"planes/{name}: {os.path.getsize(base + '.avif')} bytes")
+
+
 # Files this decoder must *refuse*: each uses one coding tool it does not
 # implement yet, and decoding past such a tool without it yields a wrong image
 # with no error. `tests/unsupported.rs` asserts every file here decodes to
@@ -490,6 +586,7 @@ def main() -> int:
         print(f"{name}: {width}x{height}x{channels}, {os.path.getsize(path)} bytes")
 
     write_unsupported(args.fixtures)
+    write_planes(args.fixtures)
 
     with open(os.path.join(args.fixtures, "REFERENCE"), "w") as out:
         out.write("\n".join(manifest) + "\n")

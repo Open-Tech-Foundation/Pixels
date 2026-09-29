@@ -11,9 +11,10 @@
 //! This is the still-picture intra subset: every block is intra, so the
 //! `applyFilter` test reduces to "there is a transform edge here", the segment
 //! id and per-block loop-filter delta are always zero, and the mode type is
-//! always the intra type 0. 4:4:4 only, so the chroma planes share the luma
-//! mode-info grid with no subsampling shift. The `LoopfilterTxSizes` grid is
-//! filled per plane as each transform block is reconstructed.
+//! always the intra type 0. Edges are walked in luma mode-info units; a
+//! subsampled chroma plane visits every second row/column and filters at the
+//! shifted plane position. The `LoopfilterTxSizes` grid is filled per plane,
+//! in that plane's 4x4 units, as each transform block is reconstructed.
 
 use super::frame::LoopFilter;
 use super::plane::Plane;
@@ -34,8 +35,12 @@ pub struct Deblock<'a> {
     pub loop_filter: &'a LoopFilter,
     /// Sample bit depth (8/10/12).
     pub bit_depth: u8,
-    /// Number of planes (1 monochrome, 3 for 4:4:4).
+    /// Number of planes (1 monochrome, 3 otherwise).
     pub num_planes: usize,
+    /// Horizontal chroma subsampling (0 or 1).
+    pub subsampling_x: usize,
+    /// Vertical chroma subsampling (0 or 1).
+    pub subsampling_y: usize,
     /// Frame dimensions in 4x4 units.
     pub mi_rows: usize,
     pub mi_cols: usize,
@@ -43,7 +48,8 @@ pub struct Deblock<'a> {
     pub frame_width: usize,
     pub frame_height: usize,
     /// `LoopfilterTxSizes[plane][row][col]`: the transform size (a `TxSize`
-    /// index) reconstructed at each 4x4 unit, one grid per plane.
+    /// index) reconstructed at each 4x4 unit of the plane, one grid per plane,
+    /// each `mi_cols` wide.
     pub lf_tx_sizes: &'a [Vec<u8>],
 }
 
@@ -72,17 +78,27 @@ impl Deblock<'_> {
             if plane != 0 && self.level_for(plane) == 0 {
                 continue;
             }
+            let (sub_x, sub_y) = self.plane_subsampling(plane);
             for pass in 0..2 {
                 let mut row = 0;
                 while row < self.mi_rows {
                     let mut col = 0;
                     while col < self.mi_cols {
                         self.filter_edge(plane, pass, row, col);
-                        col += 1;
+                        col += 1 << sub_x;
                     }
-                    row += 1;
+                    row += 1 << sub_y;
                 }
             }
+        }
+    }
+
+    /// `(subsampling_x, subsampling_y)` for `plane`: zero for luma.
+    fn plane_subsampling(&self, plane: usize) -> (usize, usize) {
+        if plane == 0 {
+            (0, 0)
+        } else {
+            (self.subsampling_x, self.subsampling_y)
         }
     }
 
@@ -91,7 +107,8 @@ impl Deblock<'_> {
         self.loop_filter.level.get(1 + plane).copied().unwrap_or(0)
     }
 
-    /// The transform size stored for `plane` at 4x4 unit `(row, col)`.
+    /// The transform size stored for `plane` at the plane's 4x4 unit
+    /// `(row, col)`.
     fn tx_size(&self, plane: usize, row: usize, col: usize) -> TxSize {
         let idx = row * self.mi_cols + col;
         let raw = self
@@ -103,12 +120,17 @@ impl Deblock<'_> {
         TxSize::from_index(usize::from(raw))
     }
 
-    /// Edge loop filter process (§7.14.2) for one 4x4 boundary.
+    /// Edge loop filter process (§7.14.2) for the boundary at luma mode-info
+    /// unit `(row, col)`.
     fn filter_edge(&mut self, plane: usize, pass: usize, row: usize, col: usize) {
-        // 4:4:4: no subsampling, so plane coordinates equal luma coordinates.
         let (dx, dy) = if pass == 0 { (1_usize, 0) } else { (0, 1) };
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        // x/y are luma coordinates, taken before row/col move to the unit that
+        // owns the plane's samples (the odd one of a subsampled pair).
         let x = col * MI_SIZE;
         let y = row * MI_SIZE;
+        let row = row | sub_y;
+        let col = col | sub_x;
 
         // onScreen: both sides of the boundary must lie in the visible area, and
         // the frame's own top/left edge is never an interior boundary.
@@ -122,25 +144,28 @@ impl Deblock<'_> {
             return;
         }
 
-        let tx_sz = self.tx_size(plane, row, col);
+        // The boundary's position in the plane.
+        let xp = x >> sub_x;
+        let yp = y >> sub_y;
+        let tx_sz = self.tx_size(plane, row >> sub_y, col >> sub_x);
         let tx_w = tx_sz.width();
         let tx_h = tx_sz.height();
 
         // The mode-info block on the other side of the boundary.
         let (prev_row, prev_col) = if pass == 0 {
-            (row, col.wrapping_sub(1))
+            (row, col.wrapping_sub(1 << sub_x))
         } else {
-            (row.wrapping_sub(1), col)
+            (row.wrapping_sub(1 << sub_y), col)
         };
-        let prev_tx_sz = self.tx_size(plane, prev_row, prev_col);
+        let prev_tx_sz = self.tx_size(plane, prev_row >> sub_y, prev_col >> sub_x);
 
         // applyFilter (§7.14.2) is `isTxEdge && (isBlockEdge || !skip || isIntra)`.
         // Every block in this subset is intra, so the parenthesis is always true
         // and the test reduces to "this is a transform edge".
         let is_tx_edge = if pass == 0 {
-            x % tx_w == 0
+            xp % tx_w == 0
         } else {
-            y % tx_h == 0
+            yp % tx_h == 0
         };
         if !is_tx_edge {
             return;
@@ -167,8 +192,8 @@ impl Deblock<'_> {
             return;
         };
         for i in 0..MI_SIZE {
-            let fx = x + dy * i;
-            let fy = y + dx * i;
+            let fx = xp + dy * i;
+            let fy = yp + dx * i;
             sample_filter(
                 plane_buf,
                 fx,
@@ -485,6 +510,8 @@ mod tests {
             loop_filter: &lf([20, 20, 20, 20]),
             bit_depth: 8,
             num_planes: 1,
+            subsampling_x: 0,
+            subsampling_y: 0,
             mi_rows: h / MI_SIZE,
             mi_cols: w / MI_SIZE,
             frame_width: w,
@@ -518,6 +545,8 @@ mod tests {
             loop_filter: &lf([0, 0, 0, 0]),
             bit_depth: 8,
             num_planes: 1,
+            subsampling_x: 0,
+            subsampling_y: 0,
             mi_rows: h / MI_SIZE,
             mi_cols: w / MI_SIZE,
             frame_width: w,
@@ -530,6 +559,47 @@ mod tests {
 
     /// A nonzero level does smooth a hard transform-edge step: the samples
     /// either side of the boundary move toward each other.
+    #[test]
+    fn subsampled_chroma_is_filtered_on_its_own_transform_grid() {
+        // 4:2:0, 32x32 luma, so each chroma plane is 16x16 and every chroma
+        // transform is 8x8. A chroma step at x = 8 sits on a transform edge and
+        // is smoothed; one at x = 4 lies inside an 8x8 transform and is not —
+        // which only holds if edges are tested in the plane's own coordinates.
+        let (w, h) = (32, 32);
+        let step_at = |edge: usize| {
+            let mut p = Plane::new(w / 2, h / 2);
+            for y in 0..h / 2 {
+                for x in 0..w / 2 {
+                    p.set(x, y, if x < edge { 100 } else { 140 });
+                }
+            }
+            p
+        };
+        let luma = Plane::new(w, h);
+        let mut planes = [luma, step_at(8), step_at(4)];
+        // TX_8X8 everywhere, each plane's grid in its own 4x4 units.
+        let grid = vec![1_u8; (w / MI_SIZE) * (h / MI_SIZE)];
+        let grids = [grid.clone(), grid.clone(), grid];
+        Deblock {
+            planes: &mut planes,
+            loop_filter: &lf([32, 32, 32, 32]),
+            bit_depth: 8,
+            num_planes: 3,
+            subsampling_x: 1,
+            subsampling_y: 1,
+            mi_rows: h / MI_SIZE,
+            mi_cols: w / MI_SIZE,
+            frame_width: w,
+            frame_height: h,
+            lf_tx_sizes: &grids,
+        }
+        .run();
+        let u = planes[1].row(5).unwrap();
+        assert!(u[7] > 100 && u[8] < 140, "edge on the tx grid: {u:?}");
+        let v = planes[2].row(5).unwrap();
+        assert_eq!((v[3], v[4]), (100, 140), "edge inside a transform: {v:?}");
+    }
+
     #[test]
     fn a_step_edge_is_smoothed() {
         let (w, h) = (16, 16);
@@ -546,6 +616,8 @@ mod tests {
             loop_filter: &lf([32, 32, 0, 0]),
             bit_depth: 8,
             num_planes: 1,
+            subsampling_x: 0,
+            subsampling_y: 0,
             mi_rows: h / MI_SIZE,
             mi_cols: w / MI_SIZE,
             frame_width: w,

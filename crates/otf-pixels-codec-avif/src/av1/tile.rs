@@ -7,7 +7,10 @@
 //! neighbour-context arrays it threads between blocks are what make the entropy
 //! contexts match the encoder.
 //!
-//! Scope is the single-tile intra still image in YUV 4:4:4. Both `CodedLossless`
+//! Scope is the single-tile intra still image in YUV 4:4:4, 4:2:2 or 4:2:0.
+//! Subsampled chroma is decoded in its own sample grid: a block one unit wide
+//! or high shares its chroma with its neighbour, the odd one of the pair coding
+//! it (`HasChroma`). Both `CodedLossless`
 //! (every transform is 4x4 WHT) and lossy frames decode here — the lossy path
 //! runs the full DCT/ADST/identity inverse transforms at every transform size,
 //! followed by the in-loop filters: deblocking (§7.14), CDEF (§7.15) and loop
@@ -42,7 +45,7 @@ use super::superres::{SUPERRES_NUM, Superres};
 use super::symbol::SymbolDecoder;
 use super::transform::{TxSize, ac_q, add_residual, dc_q, dequantize, inverse_transform_2d};
 use super::transform_type::{IntraTxTypeCdfs, intra_dir, intra_tx_set};
-use super::tx_size::{TxDepthCdfs, TxSizeParams, max_tx_size_rect, read_tx_size};
+use super::tx_size::{BLOCK_4X4, TxDepthCdfs, TxSizeParams, max_tx_size_rect, read_tx_size};
 use otf_pixels_core::{PixelsError, Result};
 
 /// `MI_SIZE` (§3): the side of the smallest coded block, in samples.
@@ -70,7 +73,9 @@ const PARTITION_VERT_B: usize = 7;
 const PARTITION_HORZ_4: usize = 8;
 const PARTITION_VERT_4: usize = 9;
 
-/// A decoded frame's sample planes, in coded order (Y, U, V for 4:4:4).
+/// A decoded frame's sample planes, in coded order (Y, U, V). Each plane covers
+/// whole superblocks (in its own subsampled grid); only the top-left
+/// display-sized region is the picture.
 pub struct DecodedFrame {
     /// The reconstructed planes.
     pub planes: Vec<Plane>,
@@ -82,9 +87,9 @@ pub struct DecodedFrame {
 ///
 /// # Errors
 ///
-/// Returns [`PixelsError::unsupported`] for anything outside the 4:4:4 intra
-/// subset this decodes — subsampled chroma, multiple tiles, intra block copy, or
-/// a lossy frame using film grain — and [`PixelsError::malformed`] for a stream
+/// Returns [`PixelsError::unsupported`] for anything outside the intra subset
+/// this decodes — multiple tiles, intra block copy, the tools
+/// `unimplemented_tool` lists, or a lossy frame using film grain — and [`PixelsError::malformed`] for a stream
 /// that ends early or violates the syntax.
 pub fn decode_still(
     seq: &SequenceHeader,
@@ -107,11 +112,6 @@ pub fn decode_still(
         return Err(PixelsError::unsupported(format!(
             "avif: {tool} is not implemented yet"
         )));
-    }
-    if seq.color.subsampling_x != 0 || seq.color.subsampling_y != 0 {
-        return Err(PixelsError::unsupported(
-            "avif: only 4:4:4 is implemented in the lossless path",
-        ));
     }
     if frame.tile_info.count() != 1 {
         return Err(PixelsError::unsupported(
@@ -406,6 +406,10 @@ struct TileState {
     mi_high_log2: Vec<u8>,
     /// Level contexts, one per plane.
     ctx: Vec<LevelContext>,
+    /// `MaxLumaW`/`MaxLumaH`: the right and bottom edge of the latest luma
+    /// transform block, which bounds chroma-from-luma's luma reads.
+    max_luma_w: usize,
+    max_luma_h: usize,
 }
 
 impl TileState {
@@ -413,9 +417,29 @@ impl TileState {
         let mi_cols = frame.mi_cols as usize;
         let mi_rows = frame.mi_rows as usize;
         let num_planes = seq.color.num_planes as usize;
-        let width = mi_cols * MI_SIZE;
-        let height = mi_rows * MI_SIZE;
-        let planes = (0..num_planes).map(|_| Plane::new(width, height)).collect();
+        // `CurrFrame` must hold every sample a transform block writes, and a
+        // block overhanging the right or bottom edge writes its whole prediction
+        // and residual past `MiCols * MI_SIZE` — samples chroma-from-luma then
+        // reads back. So the planes cover whole superblocks; the decoded area
+        // (`frame_bounds`) is tracked separately. Each chroma plane is the luma
+        // grid shifted by its subsampling (superblocks are even, so the shift
+        // is exact).
+        let sb_size4 = if seq.use_128x128_superblock { 32 } else { 16 };
+        let padded_w = mi_cols.div_ceil(sb_size4) * sb_size4 * MI_SIZE;
+        let padded_h = mi_rows.div_ceil(sb_size4) * sb_size4 * MI_SIZE;
+        let (sub_x, sub_y) = (
+            seq.color.subsampling_x as usize,
+            seq.color.subsampling_y as usize,
+        );
+        let planes = (0..num_planes)
+            .map(|p| {
+                if p == 0 {
+                    Plane::new(padded_w, padded_h)
+                } else {
+                    Plane::new(padded_w >> sub_x, padded_h >> sub_y)
+                }
+            })
+            .collect();
         let ctx = (0..num_planes)
             .map(|_| LevelContext {
                 above_level: vec![0; mi_cols],
@@ -424,7 +448,6 @@ impl TileState {
                 left_dc: vec![0; mi_rows],
             })
             .collect();
-        let sb_size4 = if seq.use_128x128_superblock { 32 } else { 16 };
         let bd_stride = sb_size4 + 2;
         let block_decoded = (0..num_planes)
             .map(|_| vec![0; bd_stride * bd_stride])
@@ -496,6 +519,8 @@ impl TileState {
             mi_wide_log2: vec![0; mi_cols * mi_rows],
             mi_high_log2: vec![0; mi_cols * mi_rows],
             ctx,
+            max_luma_w: 0,
+            max_luma_h: 0,
         })
     }
 
@@ -557,6 +582,8 @@ impl TileState {
             loop_filter: &self.loop_filter,
             bit_depth: self.bit_depth,
             num_planes: self.num_planes,
+            subsampling_x: self.subsampling_x,
+            subsampling_y: self.subsampling_y,
             mi_rows: self.mi_rows,
             mi_cols: self.mi_cols,
             frame_width: self.frame_width,
@@ -606,13 +633,16 @@ impl TileState {
         .run();
     }
 
-    /// `clear_block_decoded_flags` (§5.11.3) for one superblock, 4:4:4.
+    /// `clear_block_decoded_flags` (§5.11.3) for one superblock, each plane in
+    /// its own (subsampled) 4x4 units.
     fn clear_block_decoded(&mut self, r: usize, c: usize) {
         let sb = self.sb_size4;
         let stride = sb + 2;
-        let sb_width4 = self.mi_cols - c;
-        let sb_height4 = self.mi_rows - r;
         for plane in 0..self.num_planes {
+            let (sub_x, sub_y) = self.plane_subsampling(plane);
+            let sb_width4 = ((self.mi_cols - c) >> sub_x) as isize;
+            let sb_height4 = ((self.mi_rows - r) >> sub_y) as isize;
+            let (sb_w, sb_h) = ((sb >> sub_x) as isize, (sb >> sub_y) as isize);
             let Some(grid) = self.block_decoded.get_mut(plane) else {
                 continue;
             };
@@ -621,21 +651,21 @@ impl TileState {
             }
             // Row above (y == -1) valid where x < sbWidth4; column left (x == -1)
             // valid where y < sbHeight4. Indices carry a +1 border.
-            for x in -1_isize..=sb as isize {
-                if x < sb_width4 as isize {
+            for x in -1_isize..=sb_w {
+                if x < sb_width4 {
                     if let Some(slot) = grid.get_mut(bd_index(stride, -1, x)) {
                         *slot = 1;
                     }
                 }
             }
-            for y in -1_isize..=sb as isize {
-                if y < sb_height4 as isize {
+            for y in -1_isize..=sb_h {
+                if y < sb_height4 {
                     if let Some(slot) = grid.get_mut(bd_index(stride, y, -1)) {
                         *slot = 1;
                     }
                 }
             }
-            if let Some(slot) = grid.get_mut(bd_index(stride, sb as isize, -1)) {
+            if let Some(slot) = grid.get_mut(bd_index(stride, sb_h, -1)) {
                 *slot = 0;
             }
         }
@@ -880,7 +910,31 @@ impl TileState {
     ) -> Result<()> {
         let avail_u = r > 0;
         let avail_l = c > 0;
-        let has_chroma = self.num_planes > 1;
+        // HasChroma (§5.11.5): with subsampling, a block one unit wide (high)
+        // at an even column (row) shares its chroma with the next block, which
+        // codes it; only that odd-positioned block carries chroma.
+        let (sub_x, sub_y) = (self.subsampling_x, self.subsampling_y);
+        let shares_chroma =
+            (bh4 == 1 && sub_y == 1 && r & 1 == 0) || (bw4 == 1 && sub_x == 1 && c & 1 == 0);
+        let has_chroma = self.num_planes > 1 && !shares_chroma;
+        // AvailUChroma/AvailLChroma: such a chroma-owning block's chroma extends
+        // one unit further up (left), so its neighbour is two units away.
+        let (avail_u_chroma, avail_l_chroma) = if has_chroma {
+            (
+                if sub_y == 1 && bh4 == 1 {
+                    r >= 2
+                } else {
+                    avail_u
+                },
+                if sub_x == 1 && bw4 == 1 {
+                    c >= 2
+                } else {
+                    avail_l
+                },
+            )
+        } else {
+            (false, false)
+        };
 
         // --- intra_frame_mode_info (lossless key-frame subset) ---
         let skip = self.read_skip(dec, r, c, avail_u, avail_l)?;
@@ -932,11 +986,11 @@ impl TileState {
         };
 
         // Record the block's mode, geometry, and palette across its 4x4 units.
-        self.record_block(r, c, bw4, bh4, y_mode, uv_mode, skip, &palette);
+        self.record_block(r, c, bw4, bh4, y_mode, uv_mode, has_chroma, skip, &palette);
 
         // palette_tokens (§5.11.49): the colour-index maps.
         if palette.size_y > 0 || palette.size_uv > 0 {
-            self.read_palette_tokens(dec, &mut palette)?;
+            self.read_palette_tokens(dec, r, c, &mut palette)?;
         }
 
         // read_block_tx_size (§5.11.16): the luma transform size for the block.
@@ -945,7 +999,7 @@ impl TileState {
         let luma_tx_size = self.read_block_tx_size(dec, r, c, bw4, bh4, skip)?;
 
         if skip {
-            self.reset_block_context(r, c, bw4, bh4);
+            self.reset_block_context(r, c, bw4, bh4, has_chroma);
         }
 
         // --- residual: every plane, every transform block ---
@@ -954,6 +1008,8 @@ impl TileState {
             c,
             avail_u,
             avail_l,
+            avail_u_chroma,
+            avail_l_chroma,
             y_mode,
             uv_mode,
             y_delta,
@@ -1173,13 +1229,14 @@ impl TileState {
         bh4: usize,
     ) -> Result<(usize, Option<(i32, i32)>)> {
         // `is_cfl_allowed` (§5.11.5). Lossless allows chroma-from-luma only when
-        // the chroma residual is 4x4, which for 4:4:4 (no subsampling) means the
-        // block itself is 4x4. Otherwise CfL is allowed for any block up to
+        // the chroma residual is 4x4 (for 4:4:4 a 4x4 block; for 4:2:0 anything
+        // up to 8x8). Otherwise CfL is allowed for any block up to
         // 32x32 (Block_Width/Height <= 32, i.e. <= 8 mode-info units). Getting
         // this wrong picks the other uv_mode CDF — one has the extra CfL symbol,
         // the other does not — which desynchronises the whole tile.
         let cfl_allowed = if self.lossless {
-            bw4 == 1 && bh4 == 1
+            let block = block_size_index(bw4, bh4);
+            plane_residual_size(block, self.subsampling_x, self.subsampling_y) == BLOCK_4X4
         } else {
             bw4 <= 8 && bh4 <= 8
         };
@@ -1375,40 +1432,68 @@ impl TileState {
     }
 
     /// `palette_tokens` (§5.11.49): decode the colour-index maps by the
-    /// wavefront traversal.
+    /// wavefront traversal. Only the on-screen part of a block that overhangs the
+    /// frame edge is coded; the rest of the map replicates its last column/row.
     fn read_palette_tokens(
         &mut self,
         dec: &mut SymbolDecoder<'_>,
+        r: usize,
+        c: usize,
         palette: &mut Palette,
     ) -> Result<()> {
         let (bw, bh) = (palette.block_w, palette.block_h);
+        let onscreen_w = bw.min((self.mi_cols - c) * MI_SIZE);
+        let onscreen_h = bh.min((self.mi_rows - r) * MI_SIZE);
         if palette.size_y > 0 {
-            palette.map_y = self.read_color_map(dec, palette.size_y, bw, bh, false)?;
+            let dims = MapDims {
+                w: bw,
+                h: bh,
+                onscreen_w,
+                onscreen_h,
+            };
+            palette.map_y = self.read_color_map(dec, palette.size_y, dims, false)?;
         }
         if palette.size_uv > 0 {
-            // 4:4:4: the chroma map is the same shape as luma.
-            palette.map_uv = self.read_color_map(dec, palette.size_uv, bw, bh, true)?;
+            // The chroma map is the subsampled block, widened by 2 where that
+            // leaves it under 4 samples (a 4xN luma block in 4:2:0).
+            let (sub_x, sub_y) = (self.subsampling_x, self.subsampling_y);
+            let mut dims = MapDims {
+                w: bw >> sub_x,
+                h: bh >> sub_y,
+                onscreen_w: onscreen_w >> sub_x,
+                onscreen_h: onscreen_h >> sub_y,
+            };
+            if dims.w < 4 {
+                dims.w += 2;
+                dims.onscreen_w += 2;
+            }
+            if dims.h < 4 {
+                dims.h += 2;
+                dims.onscreen_h += 2;
+            }
+            palette.uv_w = dims.w;
+            palette.map_uv = self.read_color_map(dec, palette.size_uv, dims, true)?;
         }
         Ok(())
     }
 
-    /// Decode one colour-index map (`ColorMapY`/`ColorMapUV`).
+    /// Decode one colour-index map (`ColorMapY`/`ColorMapUV`) of `dims`.
     fn read_color_map(
         &mut self,
         dec: &mut SymbolDecoder<'_>,
         size: usize,
-        bw: usize,
-        bh: usize,
+        dims: MapDims,
         chroma: bool,
     ) -> Result<Vec<u8>> {
-        // Whole block is on screen here (partial edges clamped by the caller's
-        // block dimensions), so onscreen == block dimensions.
-        let mut map = vec![0_u8; bw * bh];
+        let (bw, bh) = (dims.onscreen_w, dims.onscreen_h);
+        let stride = dims.w;
+        let mut map = vec![0_u8; dims.w * dims.h];
         let first = dec.read_ns(size as u32)? as u8;
         if let Some(m) = map.first_mut() {
             *m = first;
         }
-        let get = |map: &[u8], i: usize, j: usize| -> Option<u8> { map.get(i * bw + j).copied() };
+        let get =
+            |map: &[u8], i: usize, j: usize| -> Option<u8> { map.get(i * stride + j).copied() };
         for i in 1..(bh + bw - 1) {
             let j_hi = i.min(bw - 1);
             let j_lo = i.saturating_sub(bh - 1);
@@ -1435,10 +1520,28 @@ impl TileState {
                 };
                 let sym = dec.read_symbol(cdf)?;
                 let color = order.get(sym).copied().unwrap_or(0);
-                if let Some(slot) = map.get_mut(row * bw + jj) {
+                if let Some(slot) = map.get_mut(row * stride + jj) {
                     *slot = color;
                 }
                 j -= 1;
+            }
+        }
+        // Replicate the last on-screen column rightward, then the last on-screen
+        // row downward, over the part of the block past the frame edge.
+        for i in 0..bh {
+            let last = get(&map, i, bw - 1).unwrap_or(0);
+            for j in bw..dims.w {
+                if let Some(slot) = map.get_mut(i * stride + j) {
+                    *slot = last;
+                }
+            }
+        }
+        for i in bh..dims.h {
+            for j in 0..dims.w {
+                let v = get(&map, bh - 1, j).unwrap_or(0);
+                if let Some(slot) = map.get_mut(i * stride + j) {
+                    *slot = v;
+                }
             }
         }
         Ok(map)
@@ -1537,6 +1640,10 @@ impl TileState {
             .map_or(0, |&i| TxSize::from_index(usize::from(i)).height())
     }
 
+    /// `residual` (§5.11.34): every transform block of every plane the block
+    /// codes. A block wider or taller than 64 is walked in 64x64 chunks, each
+    /// chunk doing all its planes before the next; each plane steps its own
+    /// (subsampled) residual block in that plane's transform size.
     fn residual(
         &mut self,
         dec: &mut SymbolDecoder<'_>,
@@ -1547,83 +1654,159 @@ impl TileState {
         has_chroma: bool,
     ) -> Result<()> {
         let planes = if has_chroma { self.num_planes } else { 1 };
-        let base_x = modes.c * MI_SIZE;
-        let base_y = modes.r * MI_SIZE;
         let block = block_size_index(bw4, bh4);
-        for plane in 0..planes {
-            // A CfL chroma block predicts from DC and then adds the scaled luma.
-            let cfl_alpha = if plane == 1 {
-                modes.cfl.map(|(u, _)| u)
-            } else if plane == 2 {
-                modes.cfl.map(|(_, v)| v)
-            } else {
-                None
-            };
-            let mode = if plane == 0 {
-                modes.y_mode
-            } else if modes.cfl.is_some() {
-                DC_PRED
-            } else {
-                modes.uv_mode
-            };
-            let delta = if plane == 0 {
-                modes.y_delta
-            } else {
-                modes.uv_delta
-            };
-            let intra = IntraMode::from_index(mode as u8)
-                .ok_or_else(|| PixelsError::malformed("avif", "intra mode index out of range"))?;
-            let filter_type = self.filter_type(modes, plane);
-            // Palette-coded plane: luma uses ColorMapY + colors_y; chroma uses
-            // ColorMapUV + colors_u (U) or colors_v (V).
-            let palette = self.palette_view_for(&modes.palette, plane, base_x, base_y);
-            // The plane's transform size: lossless forces TX_4X4 for every plane
-            // (the WHT is 4x4 only); otherwise luma is the read block size and
-            // chroma (4:4:4) is the block's largest rectangular transform.
-            let tx_size = if self.lossless {
-                TxSize::Tx4x4
-            } else if plane == 0 {
-                modes.luma_tx_size
-            } else {
-                chroma_tx_size(block)
-            };
-            let step_x = (tx_size.width() / MI_SIZE).max(1);
-            let step_y = (tx_size.height() / MI_SIZE).max(1);
-            let mut ty = 0;
-            while ty < bh4 {
-                let mut tx = 0;
-                while tx < bw4 {
-                    let x = base_x + tx * MI_SIZE;
-                    let y = base_y + ty * MI_SIZE;
-                    let have_left = modes.avail_l || tx > 0;
-                    let have_above = modes.avail_u || ty > 0;
-                    // Filter-intra is a luma-only tool.
-                    let filter_intra = if plane == 0 { modes.filter_intra } else { None };
-                    let tb = TxBlock {
+        let width_chunks = (bw4 / 16).max(1);
+        let height_chunks = (bh4 / 16).max(1);
+        let chunk_size = if width_chunks > 1 || height_chunks > 1 {
+            BLOCK_64X64
+        } else {
+            block
+        };
+        for chunk_y in 0..height_chunks {
+            for chunk_x in 0..width_chunks {
+                for plane in 0..planes {
+                    self.residual_plane(
+                        dec,
+                        modes,
+                        block,
+                        chunk_size,
+                        (chunk_x, chunk_y),
                         plane,
-                        x,
-                        y,
-                        tx_size,
-                        mode: intra,
-                        mode_index: mode,
-                        angle_delta: delta,
-                        have_left,
-                        have_above,
-                        filter_type,
-                        filter_intra,
-                        cfl_alpha,
-                        palette,
                         skip,
-                        bw4,
-                        bh4,
-                    };
-                    self.transform_block(dec, &tb)?;
-                    tx += step_x;
+                    )?;
                 }
-                ty += step_y;
             }
         }
         Ok(())
+    }
+
+    /// One plane of one `residual` chunk (§5.11.34).
+    #[allow(clippy::too_many_arguments, reason = "mirrors the residual loop state")]
+    fn residual_plane(
+        &mut self,
+        dec: &mut SymbolDecoder<'_>,
+        modes: &BlockModes,
+        block: usize,
+        chunk_size: usize,
+        (chunk_x, chunk_y): (usize, usize),
+        plane: usize,
+        skip: bool,
+    ) -> Result<()> {
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        // A CfL chroma block predicts from DC and then adds the scaled luma.
+        let cfl_alpha = match plane {
+            1 => modes.cfl.map(|(u, _)| u),
+            2 => modes.cfl.map(|(_, v)| v),
+            _ => None,
+        };
+        let mode = if plane == 0 {
+            modes.y_mode
+        } else if modes.cfl.is_some() {
+            DC_PRED
+        } else {
+            modes.uv_mode
+        };
+        let delta = if plane == 0 {
+            modes.y_delta
+        } else {
+            modes.uv_delta
+        };
+        let intra = IntraMode::from_index(mode as u8)
+            .ok_or_else(|| PixelsError::malformed("avif", "intra mode index out of range"))?;
+        let filter_type = self.filter_type(modes, plane);
+        // The block's residual size on this plane (for the coefficient
+        // contexts), and the chunk's (for the loop bounds).
+        let plane_block = plane_residual_size(block, sub_x, sub_y);
+        if plane_block == BLOCK_INVALID {
+            return Err(PixelsError::malformed(
+                "avif",
+                "a block shape the chroma subsampling cannot represent",
+            ));
+        }
+        let (plane_bw4, plane_bh4) = block_4x4_dims(plane_block);
+        let (num_w, num_h) = block_4x4_dims(plane_residual_size(chunk_size, sub_x, sub_y));
+        // The plane's transform size: lossless forces TX_4X4 for every plane (the
+        // WHT is 4x4 only); otherwise luma is the read block size and chroma is
+        // its residual block's largest rectangular transform (`get_tx_size`).
+        let tx_size = if self.lossless {
+            TxSize::Tx4x4
+        } else if plane == 0 {
+            modes.luma_tx_size
+        } else {
+            chroma_tx_size(plane_block)
+        };
+        let step_x = (tx_size.width() / MI_SIZE).max(1);
+        let step_y = (tx_size.height() / MI_SIZE).max(1);
+        // Everything below is in this plane's sample grid.
+        let base_x = (modes.c >> sub_x) * MI_SIZE;
+        let base_y = (modes.r >> sub_y) * MI_SIZE;
+        let palette = self.palette_view_for(&modes.palette, plane, base_x, base_y);
+        let (avail_l, avail_u) = if plane == 0 {
+            (modes.avail_l, modes.avail_u)
+        } else {
+            (modes.avail_l_chroma, modes.avail_u_chroma)
+        };
+        let mut y = 0;
+        while y < num_h {
+            let mut x = 0;
+            while x < num_w {
+                // Offset of this transform block within the whole block, in the
+                // plane's 4x4 units.
+                let bx = x + ((chunk_x << 4) >> sub_x);
+                let by = y + ((chunk_y << 4) >> sub_y);
+                let tb = TxBlock {
+                    plane,
+                    x: base_x + bx * MI_SIZE,
+                    y: base_y + by * MI_SIZE,
+                    tx_size,
+                    mode: intra,
+                    mode_index: mode,
+                    angle_delta: delta,
+                    have_left: avail_l || bx > 0,
+                    have_above: avail_u || by > 0,
+                    filter_type,
+                    // Filter-intra is a luma-only tool.
+                    filter_intra: if plane == 0 { modes.filter_intra } else { None },
+                    cfl_alpha,
+                    palette,
+                    skip,
+                    plane_bw4,
+                    plane_bh4,
+                };
+                self.transform_block(dec, &tb)?;
+                x += step_x;
+            }
+            y += step_y;
+        }
+        Ok(())
+    }
+
+    /// `(maxX, maxY)` for intra edge fetches on `plane` (§7.11.2): the last
+    /// sample column and row of the decoded (mode-info) area in that plane. The
+    /// plane buffers extend further, to whole superblocks.
+    fn frame_bounds(&self, plane: usize) -> (usize, usize) {
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        (
+            ((self.mi_cols * MI_SIZE) >> sub_x) - 1,
+            ((self.mi_rows * MI_SIZE) >> sub_y) - 1,
+        )
+    }
+
+    /// `(sbMask >> subX, sbMask >> subY)`: the superblock masks in `plane`'s
+    /// 4x4 units along each axis, which index `BlockDecoded[plane]`.
+    fn plane_sb_mask_xy(&self, plane: usize) -> (isize, isize) {
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        let mask = self.sb_size4 - 1;
+        ((mask >> sub_x) as isize, (mask >> sub_y) as isize)
+    }
+
+    /// `(subsampling_x, subsampling_y)` for `plane`: zero for luma.
+    fn plane_subsampling(&self, plane: usize) -> (usize, usize) {
+        if plane == 0 {
+            (0, 0)
+        } else {
+            (self.subsampling_x, self.subsampling_y)
+        }
     }
 
     /// Build the palette view for `plane` if that plane is palette-coded.
@@ -1646,7 +1829,7 @@ impl TileState {
             Some(PaletteView {
                 map: &palette.map_uv,
                 colors: &palette.colors_u,
-                block_w: palette.block_w,
+                block_w: palette.uv_w,
                 base_x,
                 base_y,
             })
@@ -1654,7 +1837,7 @@ impl TileState {
             Some(PaletteView {
                 map: &palette.map_uv,
                 colors: &palette.colors_v,
-                block_w: palette.block_w,
+                block_w: palette.uv_w,
                 base_x,
                 base_y,
             })
@@ -1664,27 +1847,35 @@ impl TileState {
     }
 
     /// `get_filter_type` (§7.11.2.8): whether the above or left neighbour block
-    /// used a smooth mode, which softens the directional edge filter. 4:4:4.
+    /// used a smooth mode, which softens the directional edge filter. On a
+    /// subsampled chroma plane the neighbour is looked up at the unit that owns
+    /// the co-located chroma (the odd column/row of each pair).
     fn filter_type(&self, modes: &BlockModes, plane: usize) -> bool {
         let is_smooth = |mode: usize| (9..=11).contains(&mode);
-        let above = modes.avail_u
-            && modes.r.checked_sub(1).is_some_and(|ru| {
-                let m = if plane == 0 {
-                    self.y_mode_at(ru, modes.c)
-                } else {
-                    self.uv_mode_at(ru, modes.c)
-                };
-                is_smooth(m)
-            });
-        let left = modes.avail_l
-            && modes.c.checked_sub(1).is_some_and(|cl| {
-                let m = if plane == 0 {
-                    self.y_mode_at(modes.r, cl)
-                } else {
-                    self.uv_mode_at(modes.r, cl)
-                };
-                is_smooth(m)
-            });
+        let smooth_at = |r: usize, c: usize| {
+            is_smooth(if plane == 0 {
+                self.y_mode_at(r, c)
+            } else {
+                self.uv_mode_at(r, c)
+            })
+        };
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        let (r, c) = (modes.r, modes.c);
+        let (avail_u, avail_l) = if plane == 0 {
+            (modes.avail_u, modes.avail_l)
+        } else {
+            (modes.avail_u_chroma, modes.avail_l_chroma)
+        };
+        let above = avail_u && {
+            let row = r - 1 - usize::from(sub_y == 1 && r & 1 == 1);
+            let col = c + usize::from(sub_x == 1 && c & 1 == 0);
+            smooth_at(row, col)
+        };
+        let left = avail_l && {
+            let row = r + usize::from(sub_y == 1 && r & 1 == 0);
+            let col = c - 1 - usize::from(sub_x == 1 && c & 1 == 1);
+            smooth_at(row, col)
+        };
         above || left
     }
 
@@ -1695,27 +1886,35 @@ impl TileState {
         let w4 = (w / MI_SIZE).max(1);
         let h4 = (h / MI_SIZE).max(1);
 
-        // A transform block whose top-left lies outside the frame is not coded:
-        // the block may extend past the right or bottom edge, but only the tx
-        // blocks that start inside it read symbols (spec §5.11.35). For 4:4:4 the
-        // luma and chroma edges coincide. Skipping this desynchronises every
-        // symbol after the edge — for a last-region block that surfaces as wrong
-        // chroma while the luma before it stays correct.
-        let max_x = self.mi_cols * MI_SIZE;
-        let max_y = self.mi_rows * MI_SIZE;
+        // `x`/`y` are in this plane's sample grid. A transform block whose
+        // top-left lies outside the (plane's) frame is not coded: the block may
+        // extend past the right or bottom edge, but only the tx blocks that
+        // start inside it read symbols (spec §5.11.35). Skipping this
+        // desynchronises every symbol after the edge — for a last-region block
+        // that surfaces as wrong chroma while the luma before it stays correct.
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        let max_x = (self.mi_cols * MI_SIZE) >> sub_x;
+        let max_y = (self.mi_rows * MI_SIZE) >> sub_y;
         if x >= max_x || y >= max_y {
             return Ok(());
         }
 
         // Predict from the reconstructed neighbours.
         let prediction = self.predict(tb, w, h)?;
+        if plane == 0 {
+            // MaxLumaW/MaxLumaH: how far this block's luma reaches, which bounds
+            // the luma a chroma-from-luma prediction may read.
+            self.max_luma_w = x + w;
+            self.max_luma_h = y + h;
+        }
 
         let x4 = x / MI_SIZE;
         let y4 = y / MI_SIZE;
         let final_block = if skip {
             prediction
         } else {
-            let all_zero_ctx = self.all_zero_ctx(plane, x4, y4, w4, h4, tx_size, tb.bw4, tb.bh4);
+            let all_zero_ctx =
+                self.all_zero_ctx(plane, x4, y4, w4, h4, tx_size, tb.plane_bw4, tb.plane_bh4);
             let dc_sign_ctx = self.dc_sign_ctx(plane, x4, y4, w4, h4);
             let ptype = usize::from(plane > 0);
             // Resolve the block's PlaneTxType inside decode_coeffs, at the spec
@@ -1773,13 +1972,14 @@ impl TileState {
         }
 
         // Mark the tx block's 4x4 units decoded for the neighbour tests, and
-        // record its transform size per unit for the deblocking loop filter.
-        let mask = (self.sb_size4 - 1) as isize;
+        // record its transform size per unit for the deblocking loop filter —
+        // both in the plane's 4x4 units.
+        let (mask_x, mask_y) = self.plane_sb_mask_xy(plane);
         let tx_index = tx_size as u8;
         for dy in 0..h4 {
             for dx in 0..w4 {
-                let sub_row = ((y4 + dy) as isize) & mask;
-                let sub_col = ((x4 + dx) as isize) & mask;
+                let sub_row = ((y4 + dy) as isize) & mask_y;
+                let sub_col = ((x4 + dx) as isize) & mask_x;
                 self.set_block_decoded(plane, sub_row, sub_col);
                 if let Some(grid) = self.lf_tx_sizes.get_mut(plane) {
                     if let Some(cell) = grid.get_mut((y4 + dy) * self.mi_cols + (x4 + dx)) {
@@ -1846,17 +2046,31 @@ impl TileState {
         Ok(pred)
     }
 
-    /// `predict_chroma_from_luma` (§7.11.5) for a `w` by `h` 4:4:4 block: add the
-    /// alpha-scaled, DC-removed reconstructed luma to the DC chroma prediction.
+    /// `predict_chroma_from_luma` (§7.11.5) for a `w` by `h` chroma block at
+    /// chroma `(x, y)`: add the alpha-scaled, DC-removed reconstructed luma to
+    /// the DC chroma prediction. With subsampling each chroma sample averages
+    /// its 2 (4:2:2) or 4 (4:2:0) co-located luma samples, clamped to the luma
+    /// the block actually reconstructed (`MaxLumaW`/`MaxLumaH`).
     fn apply_cfl(&self, pred: &mut [u16], x: usize, y: usize, w: usize, h: usize, alpha: i32) {
         let max = (1_i32 << self.bit_depth) - 1;
         let luma = self.planes.first();
-        // L holds the co-located luma with 3 fractional bits (no subsampling).
+        let (sub_x, sub_y) = (self.subsampling_x, self.subsampling_y);
+        let luma_at =
+            |lx: usize, ly: usize| i32::from(luma.and_then(|p| p.get(lx, ly)).unwrap_or(0));
+        // L holds the (subsampled) co-located luma with 3 fractional bits.
         let mut l = vec![0_i32; w * h];
         let mut sum = 0_i32;
         for i in 0..h {
+            let luma_y = ((y + i) << sub_y).min(self.max_luma_h.saturating_sub(1 << sub_y));
             for j in 0..w {
-                let v = i32::from(luma.and_then(|p| p.get(x + j, y + i)).unwrap_or(0)) << 3;
+                let luma_x = ((x + j) << sub_x).min(self.max_luma_w.saturating_sub(1 << sub_x));
+                let mut t = 0;
+                for dy in 0..=sub_y {
+                    for dx in 0..=sub_x {
+                        t += luma_at(luma_x + dx, luma_y + dy);
+                    }
+                }
+                let v = t << (3 - sub_x - sub_y);
                 if let Some(cell) = l.get_mut(i * w + j) {
                     *cell = v;
                 }
@@ -1887,17 +2101,15 @@ impl TileState {
         let p = self.planes.get(plane);
         let at =
             |px: usize, py: usize| -> i32 { p.and_then(|pl| pl.get(px, py)).map_or(0, i32::from) };
-        let (max_x, max_y) = p.map_or((0, 0), |pl| {
-            (pl.width().saturating_sub(1), pl.height().saturating_sub(1))
-        });
+        let (max_x, max_y) = self.frame_bounds(plane);
 
         let x4 = x / MI_SIZE;
         let y4 = y / MI_SIZE;
         let w4 = (w / MI_SIZE).max(1);
         let h4 = (h / MI_SIZE).max(1);
-        let mask = (self.sb_size4 - 1) as isize;
-        let sub_row = (y4 as isize) & mask;
-        let sub_col = (x4 as isize) & mask;
+        let (mask_x, mask_y) = self.plane_sb_mask_xy(plane);
+        let sub_row = (y4 as isize) & mask_y;
+        let sub_col = (x4 as isize) & mask_x;
         let have_above_right = self.block_decoded_at(plane, sub_row - 1, sub_col + w4 as isize);
         let have_below_left = self.block_decoded_at(plane, sub_row + h4 as isize, sub_col - 1);
 
@@ -1954,9 +2166,7 @@ impl TileState {
     fn predict_directional(&self, tb: &TxBlock, p_angle: i32, w: usize, h: usize) -> Vec<u16> {
         let (x, y) = (tb.x, tb.y);
         let (mut above, mut left) = self.gather_edges(tb, w, h);
-        let (max_x, max_y) = self.planes.get(tb.plane).map_or((0, 0), |pl| {
-            (pl.width().saturating_sub(1), pl.height().saturating_sub(1))
-        });
+        let (max_x, max_y) = self.frame_bounds(tb.plane);
         let avail_above_px = (max_x as i32) - (x as i32) + 1;
         let avail_left_px = (max_y as i32) - (y as i32) + 1;
         predict_directional(
@@ -2003,8 +2213,8 @@ impl TileState {
             cfl_alpha: None,
             palette: None,
             skip: false,
-            bw4: 0,
-            bh4: 0,
+            plane_bw4: 0,
+            plane_bh4: 0,
         };
         let (above_edge, left_edge) = self.gather_edges(&tb, w, h);
         let above: Vec<i32> = (0..w as isize).map(|j| above_edge.get(j)).collect();
@@ -2015,7 +2225,8 @@ impl TileState {
     /// `all_zero` context (§8.3.2) for a `w4` by `h4` (4x4 units) transform block.
     /// A block whose coding size equals the transform is context 0 for luma;
     /// otherwise the neighbour level contexts over the block's span select it.
-    /// `bw4`/`bh4` are the coding block's size in 4x4 units.
+    /// `bw4`/`bh4` are the coding block's residual size on this plane, in the
+    /// plane's 4x4 units.
     #[allow(clippy::too_many_arguments, reason = "mirrors the §8.3.2 ctx inputs")]
     fn all_zero_ctx(
         &self,
@@ -2031,8 +2242,9 @@ impl TileState {
         let Some(ctx) = self.ctx.get(plane) else {
             return 0;
         };
-        // 4:4:4: maxX4/maxY4 are the frame's mode-info dimensions.
-        let (max_x4, max_y4) = (self.mi_cols, self.mi_rows);
+        // maxX4/maxY4: the frame's mode-info dimensions in this plane's units.
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        let (max_x4, max_y4) = (self.mi_cols >> sub_x, self.mi_rows >> sub_y);
         let w = tx_size.width();
         let h = tx_size.height();
         if plane == 0 {
@@ -2091,7 +2303,8 @@ impl TileState {
         let Some(ctx) = self.ctx.get(plane) else {
             return 0;
         };
-        let (max_x4, max_y4) = (self.mi_cols, self.mi_rows);
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        let (max_x4, max_y4) = (self.mi_cols >> sub_x, self.mi_rows >> sub_y);
         let mut dc_sign = 0_i32;
         for k in 0..w4 {
             if x4 + k < max_x4 {
@@ -2153,9 +2366,23 @@ impl TileState {
         }
     }
 
-    fn reset_block_context(&mut self, r: usize, c: usize, bw4: usize, bh4: usize) {
-        for ctx in &mut self.ctx {
-            for i in c..c + bw4 {
+    /// `reset_block_context` (§5.11.5) for a skip block: clear the level and DC
+    /// contexts it covers, on each plane it codes, in that plane's 4x4 units.
+    fn reset_block_context(
+        &mut self,
+        r: usize,
+        c: usize,
+        bw4: usize,
+        bh4: usize,
+        has_chroma: bool,
+    ) {
+        let planes = if has_chroma { self.num_planes } else { 1 };
+        for plane in 0..planes {
+            let (sub_x, sub_y) = self.plane_subsampling(plane);
+            let Some(ctx) = self.ctx.get_mut(plane) else {
+                continue;
+            };
+            for i in (c >> sub_x)..((c + bw4) >> sub_x) {
                 if let Some(v) = ctx.above_level.get_mut(i) {
                     *v = 0;
                 }
@@ -2163,7 +2390,7 @@ impl TileState {
                     *v = 0;
                 }
             }
-            for i in r..r + bh4 {
+            for i in (r >> sub_y)..((r + bh4) >> sub_y) {
                 if let Some(v) = ctx.left_level.get_mut(i) {
                     *v = 0;
                 }
@@ -2175,7 +2402,6 @@ impl TileState {
     }
 
     #[allow(clippy::too_many_arguments, reason = "records every per-block field")]
-    #[allow(clippy::too_many_arguments, reason = "records every per-block field")]
     fn record_block(
         &mut self,
         r: usize,
@@ -2184,6 +2410,7 @@ impl TileState {
         bh4: usize,
         y_mode: usize,
         uv_mode: usize,
+        has_chroma: bool,
         skip: bool,
         palette: &Palette,
     ) {
@@ -2195,8 +2422,12 @@ impl TileState {
                 if let Some(v) = self.y_modes.get_mut(idx) {
                     *v = y_mode as u8;
                 }
-                if let Some(v) = self.uv_modes.get_mut(idx) {
-                    *v = uv_mode as u8;
+                // UVModes keeps the previous value where this block codes no
+                // chroma: a later chroma block's filter type reads it.
+                if has_chroma {
+                    if let Some(v) = self.uv_modes.get_mut(idx) {
+                        *v = uv_mode as u8;
+                    }
                 }
                 if let Some(v) = self.skips.get_mut(idx) {
                     *v = u8::from(skip);
@@ -2265,6 +2496,11 @@ struct BlockModes {
     c: usize,
     avail_u: bool,
     avail_l: bool,
+    /// `AvailUChroma`/`AvailLChroma`: neighbour availability on the chroma
+    /// planes, which differs from luma for a subsampled block one unit wide or
+    /// high (§5.11.5).
+    avail_u_chroma: bool,
+    avail_l_chroma: bool,
     y_mode: usize,
     uv_mode: usize,
     y_delta: i32,
@@ -2294,11 +2530,22 @@ struct Palette {
     colors_v: [u16; PALETTE_COLORS],
     /// `ColorMapY`, `block_h * block_w` row-major.
     map_y: Vec<u8>,
-    /// `ColorMapUV`, same shape (4:4:4).
+    /// `ColorMapUV`, `uv_w` wide (the subsampled block, widened to at least 4).
     map_uv: Vec<u8>,
     /// The luma block width and height in samples.
     block_w: usize,
     block_h: usize,
+    /// The chroma colour-index map's width.
+    uv_w: usize,
+}
+
+/// A colour-index map's dimensions and the part of it on screen.
+#[derive(Clone, Copy)]
+struct MapDims {
+    w: usize,
+    h: usize,
+    onscreen_w: usize,
+    onscreen_h: usize,
 }
 
 /// One transform block's prediction inputs.
@@ -2320,8 +2567,10 @@ struct TxBlock<'a> {
     /// The plane's palette view when the block is palette-coded on this plane.
     palette: Option<PaletteView<'a>>,
     skip: bool,
-    bw4: usize,
-    bh4: usize,
+    /// The coding block's residual size on this plane, in the plane's 4x4 units
+    /// (`get_plane_residual_size(MiSize, plane)`), for the `all_zero` context.
+    plane_bw4: usize,
+    plane_bh4: usize,
 }
 
 /// A palette-coded plane's data for one transform block: the block-relative
@@ -2335,9 +2584,9 @@ struct PaletteView<'a> {
     base_y: usize,
 }
 
-/// `get_tx_size` for a chroma plane in 4:4:4 (`§5.11.16`): the block's largest
-/// rectangular transform, with any 64-sample side reduced to 32 (chroma codes
-/// no 64-wide/high transform).
+/// `get_tx_size` for a chroma plane (§5.11.37), given the block's residual size
+/// on that plane: its largest rectangular transform, with any 64-sample side
+/// reduced to 32 (chroma codes no 64-wide/high transform).
 fn chroma_tx_size(block: usize) -> TxSize {
     match max_tx_size_rect(block) {
         TxSize::Tx64x64 | TxSize::Tx32x64 | TxSize::Tx64x32 => TxSize::Tx32x32,
@@ -2387,6 +2636,86 @@ fn block_size_index(bw4: usize, bh4: usize) -> usize {
         (16, 4) => 21,
         _ => 15,
     }
+}
+
+/// `BLOCK_64X64` (§9.3): the chunk size `residual` walks larger blocks in.
+const BLOCK_64X64: usize = 12;
+
+/// `BLOCK_INVALID`: a block shape a subsampled plane cannot take.
+const BLOCK_INVALID: usize = usize::MAX;
+
+/// `Num_4x4_Blocks_Wide[BLOCK_SIZES]` / `Num_4x4_Blocks_High[BLOCK_SIZES]`
+/// (§9.3): a block size's dimensions in 4x4 units, the inverse of
+/// `block_size_index`.
+const BLOCK_4X4_DIMS: [(usize, usize); 22] = [
+    (1, 1),
+    (1, 2),
+    (2, 1),
+    (2, 2),
+    (2, 4),
+    (4, 2),
+    (4, 4),
+    (4, 8),
+    (8, 4),
+    (8, 8),
+    (8, 16),
+    (16, 8),
+    (16, 16),
+    (16, 32),
+    (32, 16),
+    (32, 32),
+    (1, 4),
+    (4, 1),
+    (2, 8),
+    (8, 2),
+    (4, 16),
+    (16, 4),
+];
+
+/// `Subsampled_Size[BLOCK_SIZES][subX][subY]` (§5.11.38): the residual block a
+/// plane with the given subsampling takes for each luma block size.
+const SUBSAMPLED_SIZE: [[[usize; 2]; 2]; 22] = {
+    const I: usize = BLOCK_INVALID;
+    [
+        [[0, 0], [0, 0]],
+        [[1, 0], [I, 0]],
+        [[2, I], [0, 0]],
+        [[3, 2], [1, 0]],
+        [[4, 3], [I, 1]],
+        [[5, I], [3, 2]],
+        [[6, 5], [4, 3]],
+        [[7, 6], [I, 4]],
+        [[8, I], [6, 5]],
+        [[9, 8], [7, 6]],
+        [[10, 9], [I, 7]],
+        [[11, I], [9, 8]],
+        [[12, 11], [10, 9]],
+        [[13, 12], [I, 10]],
+        [[14, I], [12, 11]],
+        [[15, 14], [13, 12]],
+        [[16, 1], [I, 1]],
+        [[17, I], [2, 2]],
+        [[18, 4], [I, 16]],
+        [[19, I], [5, 17]],
+        [[20, 7], [I, 18]],
+        [[21, I], [8, 19]],
+    ]
+};
+
+/// `get_plane_residual_size(block, plane)` (§5.11.38) for a plane subsampled
+/// by `(sub_x, sub_y)`; `BLOCK_INVALID` for a shape the stream may not use.
+fn plane_residual_size(block: usize, sub_x: usize, sub_y: usize) -> usize {
+    SUBSAMPLED_SIZE
+        .get(block)
+        .and_then(|row| row.get(sub_x))
+        .and_then(|col| col.get(sub_y))
+        .copied()
+        .unwrap_or(BLOCK_INVALID)
+}
+
+/// A block size's dimensions in 4x4 units, `(0, 0)` for `BLOCK_INVALID`.
+fn block_4x4_dims(block: usize) -> (usize, usize) {
+    BLOCK_4X4_DIMS.get(block).copied().unwrap_or((0, 0))
 }
 
 /// `array[i]` for a palette colour array, 0 outside range.
@@ -2481,6 +2810,33 @@ mod tests {
         assert!(at_least_block_8x8(1, 4));
         assert!(at_least_block_8x8(4, 1));
         assert!(!at_least_block_8x8(1, 2));
+    }
+
+    #[test]
+    fn subsampled_sizes_halve_each_subsampled_axis() {
+        // Every valid Subsampled_Size entry is the luma block with each
+        // subsampled axis halved (never below one 4x4 unit); 4:4:4 is the
+        // identity. Catches a mistranscribed table cell.
+        for block in 0..22 {
+            let (bw4, bh4) = block_4x4_dims(block);
+            assert_eq!(block_size_index(bw4, bh4), block);
+            assert_eq!(plane_residual_size(block, 0, 0), block);
+            for (sub_x, sub_y) in [(1, 0), (1, 1)] {
+                let sub = plane_residual_size(block, sub_x, sub_y);
+                if sub == BLOCK_INVALID {
+                    continue;
+                }
+                assert_eq!(
+                    block_4x4_dims(sub),
+                    ((bw4 >> sub_x).max(1), (bh4 >> sub_y).max(1)),
+                    "block {block} at {sub_x}x{sub_y}"
+                );
+            }
+        }
+        // 4:2:0 always has a chroma block; 4:2:2 has none for the tall shapes
+        // whose halved width would change their aspect class.
+        assert!((0..22).all(|b| plane_residual_size(b, 1, 1) != BLOCK_INVALID));
+        assert_eq!(plane_residual_size(1, 1, 0), BLOCK_INVALID);
     }
 
     #[test]
