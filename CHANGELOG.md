@@ -104,6 +104,21 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- `otf-pixels-codec-avif` decodes super-resolution frames (§7.16). Such a frame
+  is coded at a reduced width (`8 / SuperresDenom` of the display width) and
+  reconstructed, deblocked and CDEF-filtered at that width; between CDEF and
+  loop restoration both the CDEF output and the pre-CDEF frame are stretched
+  back to `UpscaledWidth` with the normative 8-tap, 64-phase upscale filter, and
+  restoration runs on the upscaled pair. `read_lr` scales a superblock's coded
+  columns by `SuperresDenom / 8` to find the restoration units it carries. The
+  source column clamps to the decoded `MiCols * 4` area, as the spec says, and
+  libaom agrees on widths that are not a multiple of 8. Lossy frames are now
+  refused only for film grain. libavif does not expose aom's superres settings,
+  so the regeneration script encodes these fixtures with `aomenc` and wraps the
+  key frame into a minimal AVIF container itself (CI installs `aom-tools`). Five
+  fixtures — denominators 9 to 16, odd widths, and the full deblock + CDEF +
+  restoration pipeline across two restoration-unit columns — decode byte-exact
+  against libavif.
 - `otf-pixels-codec-avif` applies loop restoration (§7.17), the last in-loop
   filter, after CDEF. Each restoration unit's type and coefficients are read
   during tile decode (`read_lr`/`read_lr_unit`, §5.11.57–58): a Wiener, a

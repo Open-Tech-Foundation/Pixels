@@ -111,8 +111,10 @@ jobs:
       - run: pip install pillow
       # libavif provides avifenc/avifdec, the independent AV1 reference the AVIF
       # fixtures are generated with. AVIF is owned outright (ADR-0013), so this
-      # is a genuine cross-check against libaom, not against ourselves.
-      - run: sudo apt-get update && sudo apt-get install -y libavif-bin
+      # is a genuine cross-check against libaom, not against ourselves. aom-tools
+      # provides aomenc, which encodes the super-resolution fixtures (libavif
+      # does not expose aom's superres settings).
+      - run: sudo apt-get update && sudo apt-get install -y libavif-bin aom-tools
       # Our decoder cannot validate our encoder: a shared misreading of the
       # specification round-trips perfectly and is still wrong. These check our
       # output against the reference implementations of zlib, libpng, libgif,

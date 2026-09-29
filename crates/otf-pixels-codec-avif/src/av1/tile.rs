@@ -11,9 +11,10 @@
 //! (every transform is 4x4 WHT) and lossy frames decode here — the lossy path
 //! runs the full DCT/ADST/identity inverse transforms at every transform size,
 //! followed by the in-loop filters: deblocking (§7.14), CDEF (§7.15) and loop
-//! restoration (§7.17). Super-resolution and film grain are not implemented, so
-//! a lossy frame is reproduced exactly only when it codes those off
-//! (`unimplemented_filters_off`); any other lossy frame is refused. Every intra
+//! restoration (§7.17), with the super-resolution upscale (§7.16) between CDEF
+//! and restoration. Film grain is not implemented, so a lossy frame is
+//! reproduced exactly only when it codes grain off (`unimplemented_filters_off`);
+//! any other lossy frame is refused. Every intra
 //! prediction mode is handled —
 //! DC, Paeth, the smooth family, the slanted directional modes (with their
 //! edge-filter and upsample machinery), recursive filter-intra, palette, and
@@ -37,6 +38,7 @@ use super::restoration::{
     SGRPROJ_XQD_MID, WIENER_TAPS_MID, count_units_in_frame, read_sgrproj_unit, read_wiener_unit,
 };
 use super::seq::SequenceHeader;
+use super::superres::{SUPERRES_NUM, Superres};
 use super::symbol::SymbolDecoder;
 use super::transform::{TxSize, ac_q, add_residual, dc_q, dequantize, inverse_transform_2d};
 use super::transform_type::{IntraTxTypeCdfs, intra_dir, intra_tx_set};
@@ -75,31 +77,30 @@ pub struct DecodedFrame {
 }
 
 /// Decode a single-tile intra still frame into its sample planes. Handles both
-/// lossless and lossy frames, the latter only when super-resolution and film
-/// grain are disabled (see `unimplemented_filters_off`).
+/// lossless and lossy frames, the latter only when film grain is disabled (see
+/// `unimplemented_filters_off`).
 ///
 /// # Errors
 ///
 /// Returns [`PixelsError::unsupported`] for anything outside the 4:4:4 intra
 /// subset this decodes — subsampled chroma, multiple tiles, intra block copy, or
-/// a lossy frame using super-resolution or film grain — and [`PixelsError::malformed`] for a
-/// stream that ends early or violates the syntax.
+/// a lossy frame using film grain — and [`PixelsError::malformed`] for a stream
+/// that ends early or violates the syntax.
 pub fn decode_still(
     seq: &SequenceHeader,
     frame: &FrameHeader,
     tile_data: &[u8],
 ) -> Result<DecodedFrame> {
-    // We reconstruct the residual and apply every in-loop filter — deblocking
-    // (§7.14), CDEF (§7.15) and loop restoration (§7.17) — but not
-    // super-resolution or film grain. A lossy frame is reproduced exactly only
-    // when those two are disabled; any other lossy frame would decode to a
-    // visibly wrong image, so it is refused. A coded-lossless frame turns all of these off by
-    // definition.
+    // We reconstruct the residual, apply every in-loop filter — deblocking
+    // (§7.14), CDEF (§7.15) and loop restoration (§7.17) — and the
+    // super-resolution upscale (§7.16), but not film grain. A lossy frame is
+    // reproduced exactly only when grain is disabled; any other would decode to
+    // a visibly wrong image, so it is refused. A coded-lossless frame turns the
+    // in-loop filters off by definition.
     if !frame.coded_lossless && !unimplemented_filters_off(frame) {
         return Err(PixelsError::unsupported(
-            "avif: lossy frames are decoded only with super-resolution and film \
-             grain disabled (deblocking, CDEF and loop restoration are applied); \
-             those are not implemented yet",
+            "avif: lossy frames are decoded only with film grain disabled; film \
+             grain synthesis is not implemented yet",
         ));
     }
     if seq.color.subsampling_x != 0 || seq.color.subsampling_y != 0 {
@@ -129,13 +130,10 @@ pub fn decode_still(
 
 /// Whether every post-filter this decoder does *not* implement is disabled, so
 /// the reconstruct plus the implemented in-loop filters reproduces the frame
-/// exactly. Checks super-resolution (the coded width equals the upscaled width)
-/// and film grain. Deblocking (§7.14), CDEF (§7.15) and loop restoration (§7.17)
-/// are implemented and so are not required to be off.
+/// exactly. Only film grain remains: deblocking (§7.14), CDEF (§7.15),
+/// super-resolution (§7.16) and loop restoration (§7.17) are all implemented.
 fn unimplemented_filters_off(frame: &FrameHeader) -> bool {
-    let superres_off = frame.frame_width == frame.upscaled_width;
-    let grain_off = !frame.film_grain.apply_grain;
-    superres_off && grain_off
+    !frame.film_grain.apply_grain
 }
 
 /// `MiSize >= BLOCK_8X8` for a block of `bw4 x bh4` 4x4 units. The spec compares
@@ -326,10 +324,15 @@ struct TileState {
     /// each 4x4 unit, per plane, filled as transform blocks reconstruct. The
     /// deblocking loop filter reads it to find transform edges (§7.14.2).
     lf_tx_sizes: [Vec<u8>; 3],
-    /// Visible frame dimensions in luma samples (`FrameWidth`/`FrameHeight`),
-    /// for the loop filter's on-screen test.
+    /// Coded frame dimensions in luma samples (`FrameWidth`/`FrameHeight`), for
+    /// the loop filter's on-screen test. With super-resolution `FrameWidth` is
+    /// the reduced width every tile-level step runs at.
     frame_width: usize,
     frame_height: usize,
+    /// `UpscaledWidth`: the display width, which loop restoration runs at.
+    upscaled_width: usize,
+    /// `SuperresDenom` when `use_superres`, else `None`.
+    superres_denom: Option<usize>,
     /// The frame loop-filter parameters, for deblocking after reconstruct.
     loop_filter: LoopFilter,
     /// The frame CDEF parameters, for the CDEF pass after deblocking (§7.15).
@@ -433,8 +436,14 @@ impl TileState {
                 vec![0; mi_cols * mi_rows],
                 vec![0; mi_cols * mi_rows],
             ],
-            frame_width: frame.upscaled_width as usize,
+            frame_width: frame.frame_width as usize,
             frame_height: frame.frame_height as usize,
+            upscaled_width: frame.upscaled_width as usize,
+            // `SuperresDenom` is SUPERRES_NUM exactly when use_superres is 0. (The
+            // widths are no test: a 1-sample frame codes at its full width even
+            // with super-resolution on.)
+            superres_denom: (frame.superres_denom as usize != SUPERRES_NUM)
+                .then_some(frame.superres_denom as usize),
             loop_filter: frame.loop_filter.clone(),
             cdef: frame.cdef.clone(),
             enable_cdef: seq.enable_cdef,
@@ -480,17 +489,34 @@ impl TileState {
         }
         self.deblock();
         // Loop restoration reads both the pre-CDEF (deblocked) and post-CDEF
-        // frames, so when it runs, snapshot the deblocked frame before CDEF and
-        // the CDEF output after, then restore in place. When it does not, CDEF
-        // alone finishes the frame.
-        if self.uses_lr {
-            let curr = self.planes.clone();
-            self.cdef();
+        // frames, so when it runs, snapshot the deblocked frame before CDEF. Both
+        // are then upscaled (§7.4 steps 3–4; a no-op without super-resolution)
+        // and restoration filters the upscaled CDEF output in place.
+        let curr = self.uses_lr.then(|| self.planes.clone());
+        self.cdef();
+        if let Some(superres) = self.superres() {
+            self.planes = superres.upscale(&self.planes);
+            if let Some(curr) = curr {
+                let curr = superres.upscale(&curr);
+                self.loop_restore(&curr);
+            }
+        } else if let Some(curr) = curr {
             self.loop_restore(&curr);
-        } else {
-            self.cdef();
         }
         Ok(())
+    }
+
+    /// The upscaling geometry when the frame uses super-resolution.
+    fn superres(&self) -> Option<Superres> {
+        self.superres_denom.map(|_| Superres {
+            frame_width: self.frame_width,
+            upscaled_width: self.upscaled_width,
+            frame_height: self.frame_height,
+            mi_cols: self.mi_cols,
+            subsampling_x: self.subsampling_x,
+            subsampling_y: self.subsampling_y,
+            bit_depth: self.bit_depth,
+        })
     }
 
     /// Apply the deblocking loop filter to the reconstructed planes (§7.14). A
@@ -545,7 +571,7 @@ impl TileState {
             num_planes: self.num_planes,
             subsampling_x: self.subsampling_x,
             subsampling_y: self.subsampling_y,
-            upscaled_width: self.frame_width,
+            upscaled_width: self.upscaled_width,
             frame_height: self.frame_height,
         }
         .run();
@@ -976,8 +1002,9 @@ impl TileState {
 
     /// `read_lr` (§5.11.57): read the loop-restoration units this superblock
     /// covers, once per plane that uses restoration. `allow_intrabc` is always
-    /// false in this subset, and there is no super-resolution, so the unit-column
-    /// mapping uses `MI_SIZE >> subX` directly.
+    /// false in this subset. Units are laid out over the upscaled frame, so with
+    /// super-resolution a superblock's coded columns are scaled by
+    /// `SuperresDenom / SUPERRES_NUM` to find the units it covers.
     fn read_lr(&mut self, dec: &mut SymbolDecoder<'_>, r: usize, c: usize) -> Result<()> {
         if !self.uses_lr {
             return Ok(());
@@ -1000,9 +1027,12 @@ impl TileState {
             let unit_cols = info.unit_cols;
             let unit_row_start = (r * (MI_SIZE >> sub_y)).div_ceil(unit_size);
             let unit_row_end = unit_rows.min(((r + h4) * (MI_SIZE >> sub_y)).div_ceil(unit_size));
-            let numerator = MI_SIZE >> sub_x;
-            let unit_col_start = (c * numerator).div_ceil(unit_size);
-            let unit_col_end = unit_cols.min(((c + w4) * numerator).div_ceil(unit_size));
+            let (numerator, denominator) = match self.superres_denom {
+                Some(denom) => ((MI_SIZE >> sub_x) * denom, unit_size * SUPERRES_NUM),
+                None => (MI_SIZE >> sub_x, unit_size),
+            };
+            let unit_col_start = (c * numerator).div_ceil(denominator);
+            let unit_col_end = unit_cols.min(((c + w4) * numerator).div_ceil(denominator));
             for unit_row in unit_row_start..unit_row_end {
                 for unit_col in unit_col_start..unit_col_end {
                     self.read_lr_unit(dec, plane, unit_row, unit_col)?;

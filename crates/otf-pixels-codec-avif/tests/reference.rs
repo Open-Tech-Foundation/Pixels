@@ -72,8 +72,10 @@ fn decode(bytes: &[u8]) -> otf_pixels_core::Result<(Vec<u8>, otf_pixels_core::Im
 /// but every in-loop filter off); `deblock` (lossy with the deblocking loop
 /// filter §7.14 on, CDEF/restoration off); `cdef` (lossy with CDEF §7.15 on,
 /// deblocking/restoration off, to isolate it); `restore` (loop restoration §7.17
-/// on, deblocking/CDEF off); and `restore_full` (all three in-loop filters on).
-/// All must match exactly, since the reconstruct applies every in-loop filter.
+/// on, deblocking/CDEF off); `restore_full` (all three in-loop filters on); and
+/// `superres` / `superres_full` (coded at a reduced width and upscaled, §7.16,
+/// with the in-loop filters off / on). All must match exactly, since the
+/// reconstruct applies every in-loop filter and the upscale.
 #[test]
 fn reference_fixtures_decode_exactly() {
     let mut compared = 0;
@@ -81,6 +83,7 @@ fn reference_fixtures_decode_exactly() {
     let mut deblock_compared = 0;
     let mut cdef_compared = 0;
     let mut restore_compared = 0;
+    let mut superres_compared = 0;
     for reference in references() {
         let result = decode(&read_fixture(&reference.name, "avif"));
         let (ours, descriptor) = match result {
@@ -128,6 +131,9 @@ fn reference_fixtures_decode_exactly() {
         if reference.name.contains("restore") {
             restore_compared += 1;
         }
+        if reference.name.contains("superres") {
+            superres_compared += 1;
+        }
     }
     assert!(compared >= 2, "only {compared} fixtures decoded");
     assert!(
@@ -149,5 +155,10 @@ fn reference_fixtures_decode_exactly() {
         restore_compared >= 1,
         "no restore fixture was compared — loop restoration regressed to \
          Unsupported or the manifest lost its restore entries"
+    );
+    assert!(
+        superres_compared >= 1,
+        "no superres fixture was compared — super-resolution regressed to \
+         Unsupported or the manifest lost its superres entries"
     );
 }

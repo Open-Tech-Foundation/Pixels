@@ -15,11 +15,13 @@ a lossy decode is only required to be close, and they exercise the DCT/ADST
 paths and the post-filters as those land.
 
 Fixtures are generated procedurally from fixed content, so re-running this
-reproduces them. Requires `avifenc`/`avifdec` on PATH (libavif) and Pillow.
+reproduces them. Requires `avifenc`/`avifdec` (libavif) and `aomenc` (libaom,
+for the super-resolution fixtures) on PATH, and Pillow.
 """
 
 import argparse
 import os
+import struct
 import subprocess
 import sys
 
@@ -135,6 +137,25 @@ FIXTURES = {
     # boundaries inside a stripe.
     "mixed_restore": (mixed(512, 384, 7), False, 18, "444", 0),
     "mixed_restore_full": (mixed(400, 384, 3), False, 25, "444", 0),
+    # Super-resolution (§7.16), encoded with aomenc (see `encode_superres`).
+    # The odd widths code at a width that is not a multiple of 8, where the
+    # upscale reads decoded padding past FrameWidth. "mixed_superres_full" has
+    # two restoration-unit columns, so the superres-scaled unit mapping in
+    # read_lr decides which superblock reads which unit.
+    "gradient_superres": (gradient(64, 48), False, 30, "444", 0),
+    "textured_superres": (textured(128, 96), False, 30, "444", 0),
+    "textured_odd_superres": (textured(101, 37), False, 30, "444", 0),
+    "textured_superres_full": (textured(99, 70), False, 30, "444", 0),
+    "mixed_superres_full": (mixed(420, 64, 5), False, 30, "444", 0),
+}
+
+# SuperresDenom for each "superres" fixture (SUPERRES_NUM is 8).
+SUPERRES_DENOMINATORS = {
+    "gradient_superres": 16,
+    "textured_superres": 12,
+    "textured_odd_superres": 9,
+    "textured_superres_full": 15,
+    "mixed_superres_full": 10,
 }
 
 # aom options that disable every in-loop post-filter, so a filter-free decoder
@@ -197,7 +218,163 @@ RESTORE_FULL_AOM_OPTS = [
 ]
 
 
+# "superres" fixtures code the frame at a reduced width and upscale it (§7.16).
+# libavif does not forward aom's super-resolution settings (they are encoder
+# configuration, not codec controls), so these are encoded with `aomenc` itself
+# and wrapped into an AVIF container by `mux_avif`; their "quality" is aomenc's
+# cq-level and their denominator (9..16: the frame is coded at 8/denominator of
+# its width) comes from SUPERRES_DENOMINATORS. "superres" isolates the upscale
+# with every in-loop filter off; "superres_full" runs deblock + CDEF +
+# restoration too, where restoration operates on the upscaled frame.
+SUPERRES_AOMENC_OPTS = [
+    "--enable-cdef=0",
+    "--enable-restoration=0",
+    "--loopfilter-control=0",
+    "--deltaq-mode=0",
+    "--enable-tpl-model=0",
+]
+
+SUPERRES_FULL_AOMENC_OPTS = [
+    "--enable-cdef=1",
+    "--enable-restoration=1",
+    "--deltaq-mode=0",
+    "--enable-tpl-model=0",
+]
+
+
+def box(kind: bytes, payload: bytes) -> bytes:
+    return struct.pack(">I", 8 + len(payload)) + kind + payload
+
+
+def full_box(kind: bytes, version: int, flags: int, payload: bytes) -> bytes:
+    return box(kind, struct.pack(">I", (version << 24) | flags) + payload)
+
+
+def split_obus(data: bytes) -> list:
+    """Split a low-overhead OBU stream (every OBU has obu_has_size_field set,
+    as aomenc writes them) into `(obu_type, whole_obu_bytes)` pairs."""
+    obus = []
+    pos = 0
+    while pos < len(data):
+        header = data[pos]
+        obu_type = (header >> 3) & 0xF
+        extension = (header >> 2) & 1
+        if not (header >> 1) & 1:
+            sys.exit("OBU without a size field")
+        cursor = pos + 1 + extension
+        size = 0
+        shift = 0
+        while True:
+            byte = data[cursor]
+            cursor += 1
+            size |= (byte & 0x7F) << shift
+            shift += 7
+            if not byte & 0x80:
+                break
+        end = cursor + size
+        obus.append((obu_type, data[pos:end]))
+        pos = end
+    return obus
+
+
+def sequence_level(sequence_header_obu: bytes) -> tuple:
+    """`(seq_profile, seq_level_idx[0], seq_tier[0])` from a sequence header OBU
+    with no timing info (as aomenc writes for a single frame)."""
+    header = sequence_header_obu[0]
+    cursor = 1 + ((header >> 2) & 1)
+    while sequence_header_obu[cursor] & 0x80:
+        cursor += 1
+    cursor += 1
+    bits = "".join(f"{b:08b}" for b in sequence_header_obu[cursor:cursor + 8])
+    profile = int(bits[0:3], 2)
+    reduced = bits[4] == "1"
+    if reduced:
+        return profile, int(bits[5:10], 2), 0
+    if bits[5] == "1":
+        sys.exit("sequence header with timing info is not handled")
+    # initial_display_delay_present_flag, operating_points_cnt_minus_1,
+    # operating_point_idc[0], then seq_level_idx[0] and maybe seq_tier[0].
+    at = 6 + 1 + 5 + 12
+    level = int(bits[at:at + 5], 2)
+    tier = int(bits[at + 5], 2) if level > 7 else 0
+    return profile, level, tier
+
+
+def mux_avif(obu_stream: bytes, width: int, height: int, path: str) -> None:
+    """Wrap one 8-bit 4:4:4 identity-matrix AV1 key frame into a minimal AVIF
+    still: ftyp, meta (hdlr, pitm, iloc, iinf, iprp with ispe/av1C/colr/pixi)
+    and mdat. The temporal delimiter is dropped; the sequence header is both the
+    av1C config OBU and the first OBU of the item data, as avifenc writes it."""
+    obus = [o for o in split_obus(obu_stream) if o[0] != 2]  # 2: temporal delimiter
+    sequence_header = next(o for t, o in obus if t == 1)
+    item = b"".join(o for _, o in obus)
+    profile, level, tier = sequence_level(sequence_header)
+
+    av1c = box(
+        b"av1C",
+        bytes([0x81, (profile << 5) | level, tier << 7, 0]) + sequence_header,
+    )
+    ispe = full_box(b"ispe", 0, 0, struct.pack(">II", width, height))
+    # CICP 1/13/0, full range: the identity matrix the other fixtures use.
+    colr = box(b"colr", b"nclx" + struct.pack(">HHHB", 1, 13, 0, 0x80))
+    pixi = full_box(b"pixi", 0, 0, bytes([3, 8, 8, 8]))
+    ipco = box(b"ipco", ispe + av1c + colr + pixi)
+    ipma = full_box(b"ipma", 0, 0, struct.pack(">IHB", 1, 1, 4) + bytes([1, 0x82, 3, 4]))
+    iprp = box(b"iprp", ipco + ipma)
+    hdlr = full_box(b"hdlr", 0, 0, b"\0\0\0\0pict" + b"\0" * 12 + b"\0")
+    pitm = full_box(b"pitm", 0, 0, struct.pack(">H", 1))
+    infe = full_box(b"infe", 2, 0, struct.pack(">HH", 1, 0) + b"av01" + b"\0")
+    iinf = full_box(b"iinf", 0, 0, struct.pack(">H", 1) + infe)
+    ftyp = box(b"ftyp", b"avif" + struct.pack(">I", 0) + b"avifmif1miaf")
+
+    def meta_with(offset: int) -> bytes:
+        iloc = full_box(
+            b"iloc",
+            0,
+            0,
+            bytes([0x44, 0x00])
+            + struct.pack(">HHHHII", 1, 1, 0, 1, offset, len(item)),
+        )
+        return full_box(b"meta", 0, 0, hdlr + pitm + iloc + iinf + iprp)
+
+    # The item's offset depends on the meta size, which does not depend on it.
+    offset = len(ftyp) + len(meta_with(0)) + 8
+    with open(path, "wb") as out:
+        out.write(ftyp + meta_with(offset) + box(b"mdat", item))
+
+
+def encode_superres(image: Image.Image, path: str, cq_level: int, denominator: int) -> None:
+    """Encode `image` with aomenc at a fixed super-resolution denominator and
+    mux the key frame into an AVIF (see `mux_avif`)."""
+    width, height = image.size
+    rgb = image.convert("RGB")
+    # Identity matrix: Y = G, U = B, V = R, each a full-resolution plane.
+    planes = [rgb.getchannel(c).tobytes() for c in ("G", "B", "R")]
+    y4m = path + ".src.y4m"
+    obu = path + ".obu"
+    with open(y4m, "wb") as out:
+        out.write(f"YUV4MPEG2 W{width} H{height} F1:1 Ip A1:1 C444\nFRAME\n".encode())
+        out.write(b"".join(planes))
+    opts = SUPERRES_FULL_AOMENC_OPTS if "superres_full" in path else SUPERRES_AOMENC_OPTS
+    cmd = [
+        "aomenc", y4m, "--obu", "-o", obu, "--limit=1", "--usage=2", "--profile=1",
+        "--end-usage=q", f"--cq-level={cq_level}", "--superres-mode=1",
+        f"--superres-kf-denominator={denominator}", f"--superres-denominator={denominator}",
+        "--color-primaries=bt709", "--transfer-characteristics=srgb",
+        "--matrix-coefficients=identity", *opts,
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with open(obu, "rb") as data:
+        mux_avif(data.read(), width, height, path)
+    os.remove(y4m)
+    os.remove(obu)
+
+
 def encode(image: Image.Image, path: str, lossless: bool, quality: int, yuv: str) -> None:
+    name = os.path.splitext(os.path.basename(path))[0]
+    if name in SUPERRES_DENOMINATORS:
+        encode_superres(image, path, quality, SUPERRES_DENOMINATORS[name])
+        return
     png = path + ".src.png"
     image.save(png, "PNG")
     basename = os.path.basename(path)

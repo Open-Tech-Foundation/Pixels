@@ -28,6 +28,7 @@ mod predict;
 mod restoration;
 mod seq;
 mod still;
+mod superres;
 mod symbol;
 mod tile;
 mod transform;

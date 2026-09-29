@@ -13,8 +13,9 @@
 //! and below come from the pre-CDEF (deblocked) frame instead — so this module
 //! is handed *both* frames and picks per sample in `get_source_sample` (§7.17.6).
 //! When CDEF is disabled the two frames are identical and the distinction is
-//! moot. This is the intra 4:4:4 subset (`subsampling_x`/`y` are zero) and the
-//! single-tile, no-superres path.
+//! moot. With super-resolution both frames arrive already upscaled (§7.16), so
+//! this module only ever sees `UpscaledWidth`. This is the intra 4:4:4 subset
+//! (`subsampling_x`/`y` are zero) and the single-tile path.
 //!
 //! Like the transform DSP and CDEF, the filters are transcribed straight from
 //! the spec's indexed working arrays and constant tables, so the module opts into
