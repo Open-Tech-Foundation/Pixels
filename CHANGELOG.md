@@ -7,6 +7,10 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The JPEG codec built without its `progressive` feature warned about three
+  unused stream-replay methods, which CI's `-D warnings` turned into a
+  failure of every feature combination but the defaults. They are now
+  compiled only with the feature.
 - The crates' `repository` link pointed at `github.com/opentf/pixels`, which
   is not where the code lives; it is now
   `github.com/Open-Tech-Foundation/Pixels`.

@@ -78,11 +78,13 @@ impl<S: Source> Reader<S> {
     }
 
     /// Start recording pulled bytes, so the stream can be replayed.
+    #[cfg(feature = "progressive")]
     pub fn record(&mut self) {
         self.tape = Some(Vec::new());
     }
 
     /// Stop recording and discard what was recorded.
+    #[cfg(feature = "progressive")]
     pub fn forget(&mut self) {
         self.tape = None;
     }
@@ -93,6 +95,7 @@ impl<S: Source> Reader<S> {
     /// The replay is everything pulled while recording plus everything read
     /// from the source into the buffer but not yet pulled — otherwise the
     /// buffered tail would be lost.
+    #[cfg(feature = "progressive")]
     pub fn into_replay(self) -> (Vec<u8>, S) {
         let mut replay = self.tape.unwrap_or_default();
         if let Some(pending) = self.buffer.get(self.position..self.filled) {

@@ -52,4 +52,3 @@ fn a_progressive_source_does_not_shrink_on_load() {
         .unwrap();
     assert!(stats.reduction.is_none(), "{:?}", stats.reduction);
 }
-
