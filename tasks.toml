@@ -1,0 +1,84 @@
+# tasks.toml — the workspace root anchor and config for `tsr`.
+# Docs: https://tsr.opentechf.org/docs
+#
+# Every command CI runs is a task here, so what runs on a machine and what runs
+# in a workflow cannot drift. CI installs tsr and calls `tsr <task>`; it does not
+# spell out cargo invocations of its own.
+#
+#   tsr --list            what there is
+#   tsr ci                what a pull request must pass
+#   tsr <task> --dry-run  print the command, run nothing
+
+# Warnings are failures. The lint policy lives in the workspace manifest; this
+# makes it binding rather than advisory, locally exactly as in CI.
+[env]
+RUSTFLAGS = "-D warnings"
+
+[tasks.fmt]
+run = "cargo fmt --all --check"
+
+[tasks.clippy]
+run = "cargo clippy --workspace --all-targets"
+
+[tasks.test]
+run = "cargo test --workspace --all-targets"
+
+# `--all-targets` skips doctests, and the crate-level examples are part of the
+# documented contract.
+[tasks."test:doc"]
+run = "cargo test --workspace --doc"
+
+# `missing_docs = "deny"` fails an undocumented public item; this also catches
+# broken intra-doc links.
+[tasks.doc]
+run = "cargo doc --workspace --no-deps"
+env = { RUSTDOCFLAGS = "-D warnings" }
+
+# The AV1 CDF, scan-order and quantizer-matrix tables and the VP8 tables are
+# generated from vendored spec extracts, so the checked-in files must match
+# what the generators produce today: a hand edit or a stale table would
+# otherwise slip past review.
+[tasks.tables]
+run = "python3 scripts/generate-av1-cdf-tables.py && python3 scripts/generate-av1-scan-tables.py && python3 scripts/generate-av1-qm-tables.py && python3 scripts/generate-vp8-tables.py && git diff --exit-code -- crates/otf-pixels-codec-avif/src/av1/cdf.rs crates/otf-pixels-codec-avif/src/av1/scan_tables.rs crates/otf-pixels-codec-avif/src/av1/qm_tables.rs crates/otf-pixels-codec-webp/src/vp8/tables.rs"
+
+# Each codec is a plugin behind a feature (ARCHITECTURE §Layer 2), so every
+# combination has to build — including none of them.
+[tasks.features]
+run = "cargo check --workspace --no-default-features && cargo check --workspace --no-default-features --features raw && cargo check --workspace --no-default-features --features png && cargo check --workspace --no-default-features --features gif && cargo check --workspace --no-default-features --features jpeg && cargo check --workspace --no-default-features --features jpeg-progressive && cargo check --workspace --no-default-features --features tiff && cargo check --workspace --no-default-features --features webp && cargo check --workspace --no-default-features --features avif && cargo check --workspace --all-features"
+
+# The declared `rust-version` is a promise about *consuming* the library, so it
+# is checked without dev-dependencies: the benchmarks pull in
+# fast_image_resize, which needs a newer toolchain and which no user of
+# otf-pixels ever compiles.
+[tasks.msrv]
+run = "rustup toolchain install 1.85 --profile minimal && cargo +1.85 check --workspace"
+
+# Our decoder cannot validate our encoder: a shared misreading of the
+# specification round-trips perfectly and is still wrong. These check our
+# output against zlib, libpng, libgif, libtiff, libjpeg, libwebp and libaom /
+# libavif. Needs Pillow, libavif-bin and aom-tools.
+[tasks.interop]
+run = "./scripts/check-deflate-interop.sh && ./scripts/check-png-interop.sh && ./scripts/check-gif-interop.sh && ./scripts/check-tiff-interop.sh && ./scripts/check-jpeg-interop.sh && ./scripts/check-webp-interop.sh && ./scripts/check-avif-interop.sh"
+
+# The reference manifests are generated, so they must match what the
+# generators produce today — otherwise a stale manifest could quietly start
+# agreeing with a broken decoder. Needs the same tools as `interop`.
+[tasks.references]
+run = "python3 scripts/regenerate-pngsuite-reference.py crates/otf-pixels-codec-png/tests/fixtures/pngsuite && python3 scripts/regenerate-gif-reference.py crates/otf-pixels-codec-gif/tests/fixtures && python3 scripts/regenerate-tiff-reference.py crates/otf-pixels-codec-tiff/tests/fixtures && python3 scripts/regenerate-jpeg-reference.py crates/otf-pixels-codec-jpeg/tests/fixtures && python3 scripts/regenerate-webp-reference.py crates/otf-pixels-codec-webp/tests/fixtures && python3 scripts/regenerate-avif-reference.py crates/otf-pixels-codec-avif/tests/fixtures && git diff --exit-code -- '*/REFERENCE'"
+
+# The exit-criterion benchmarks. They compare against libvips (libvips-tools)
+# when it is installed and skip that comparison cleanly when it is not.
+[tasks.bench]
+run = "cargo bench -p otf-pixels --bench thumbnail && cargo bench -p otf-pixels --bench ops"
+
+# A short run per target: a regression gate, not a discovery campaign.
+# `-max_total_time` keeps it bounded; any crash fails it. Needs cargo-fuzz.
+[tasks.fuzz]
+run = "cargo +nightly fuzz run png_decode -- -max_total_time=120 && cargo +nightly fuzz run inflate -- -max_total_time=120 && cargo +nightly fuzz run png_roundtrip -- -max_total_time=120 && cargo +nightly fuzz run jpeg_decode -- -max_total_time=120 && cargo +nightly fuzz run jpeg_roundtrip -- -max_total_time=120 && cargo +nightly fuzz run avif_decode -- -max_total_time=120"
+dir = "fuzz"
+
+# What a pull request must pass, needing nothing beyond a Rust toolchain and
+# Python. `interop`, `references`, `msrv`, `bench` and `fuzz` need extra tools
+# and run as their own CI jobs.
+[tasks.ci]
+deps = ["fmt", "clippy", "tables", "test", "test:doc", "doc", "features"]

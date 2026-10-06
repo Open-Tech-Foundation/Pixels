@@ -54,6 +54,12 @@ versioning: [SemVer](https://semver.org/).
   with it rather than failing to build.
 
 ### Changed
+- CI runs through the `tsr` task runner, as ES-Runtime does. Every command
+  CI runs is a task in `tasks.toml`, so `tsr ci` locally is what a pull request
+  must pass, and `tsr --list` shows the rest (`msrv`, `interop`,
+  `references`, `bench`, `fuzz`). `RUSTFLAGS=-D warnings` moves from the
+  workflow into the tasks, so it applies locally too. The `interop` task also
+  runs `check-avif-interop.sh`, which CI never ran before.
 - Published crates leave out their integration tests and fixtures, which
   only run from the repository, so dependents no longer download them: the
   AVIF crate drops from 3.2 MiB to 279 KiB compressed and the WebP crate

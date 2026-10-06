@@ -1,0 +1,31 @@
+name: Set up tsr
+description: >
+  Installs the tsr task runner and puts it on PATH. Every workflow here runs
+  repo tasks through `tsr <task>` rather than spelling out cargo or pnpm, so what
+  CI does and what a contributor does cannot drift.
+inputs:
+  version:
+    description: >
+      Release to install, as a tag such as `v0.7.0`. Defaults to the latest.
+    default: ""
+runs:
+  using: composite
+  steps:
+    # Two steps rather than one: `install.sh` refuses anything but Linux, macOS
+    # and FreeBSD, so a `curl | bash` alone fails a windows runner outright.
+    - name: install tsr
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        TSR_VERSION: ${{ inputs.version }}
+      run: |
+        curl -fsSL https://raw.githubusercontent.com/Open-Tech-Foundation/tsr/main/install.sh | bash
+        echo "$HOME/.tsr/bin" >> "$GITHUB_PATH"
+    - name: install tsr
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        TSR_VERSION: ${{ inputs.version }}
+      run: |
+        irm https://raw.githubusercontent.com/Open-Tech-Foundation/tsr/main/install.ps1 | iex
+        Add-Content -Path $env:GITHUB_PATH -Value "$HOME\.tsr\bin"
