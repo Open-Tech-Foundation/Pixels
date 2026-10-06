@@ -513,29 +513,68 @@ fn write_coded_image(
     } else {
         w.put(1, 0);
     }
+    // Meta prefix codes: blocks with different statistics get their own
+    // codes, when that pays for the entropy image naming them.
+    let grouping = if top_level {
+        group_blocks(&tokens, width, pixels.len(), cache_bits)
+    } else {
+        None
+    };
     if top_level {
-        w.put(1, 0); // one prefix code group everywhere
+        match &grouping {
+            None => w.put(1, 0),
+            Some(g) => {
+                w.put(1, 1);
+                w.put(3, g.bits - 2);
+                let image: Vec<u32> = g
+                    .of_block
+                    .iter()
+                    .map(|&k| 0xff00_0000 | (u32::from(k >> 8) << 16) | (u32::from(k & 0xff) << 8))
+                    .collect();
+                write_coded_image(w, &image, div_round_up(width, g.bits), false, true);
+            }
+        }
     }
-    let h = histograms(&tokens, cache_bits);
-    let codes = [
-        Code::new(&h.green),
-        Code::new(&h.red),
-        Code::new(&h.blue),
-        Code::new(&h.alpha),
-        Code::new(&h.distance),
-    ];
-    for code in &codes {
-        code.write_header(w);
+    let group_histograms = match &grouping {
+        Some(g) => g.histograms.clone(),
+        None => vec![histogram_of(&tokens, cache_bits)],
+    };
+    let groups: Vec<[Code; 5]> = group_histograms
+        .iter()
+        .map(|h| {
+            let s = h.sections();
+            [
+                Code::new(s[0]),
+                Code::new(s[1]),
+                Code::new(s[2]),
+                Code::new(s[3]),
+                Code::new(s[4]),
+            ]
+        })
+        .collect();
+    for codes in &groups {
+        for code in codes {
+            code.write_header(w);
+        }
     }
+    let mut at = 0;
     for &t in &tokens {
+        let codes = match &grouping {
+            None => &groups[0],
+            Some(g) => &groups[usize::from(g.block_of(at, width))],
+        };
         match t {
             Token::Literal(p) => {
                 codes[0].symbol(w, ((p >> 8) & 0xff) as usize);
                 codes[1].symbol(w, ((p >> 16) & 0xff) as usize);
                 codes[2].symbol(w, (p & 0xff) as usize);
                 codes[3].symbol(w, (p >> 24) as usize);
+                at += 1;
             }
-            Token::Cache(k) => codes[0].symbol(w, 256 + 24 + k as usize),
+            Token::Cache(k) => {
+                codes[0].symbol(w, 256 + 24 + k as usize);
+                at += 1;
+            }
             Token::Copy {
                 length,
                 distance_code,
@@ -546,9 +585,219 @@ fn write_coded_image(
                 let (code, bits, extra) = prefix_encode(distance_code);
                 codes[4].symbol(w, code);
                 w.put(bits, extra);
+                at += length;
             }
         }
     }
+}
+
+/// The five histograms of one prefix code group, end to end: green with
+/// lengths and cache, red, blue, alpha, distance.
+#[derive(Clone)]
+struct Histogram {
+    bins: Vec<u32>,
+    green_len: usize,
+}
+
+impl Histogram {
+    fn new(cache_bits: u32) -> Self {
+        let green_len = 256 + 24 + if cache_bits > 0 { 1 << cache_bits } else { 0 };
+        Self {
+            bins: vec![0; green_len + 3 * 256 + 40],
+            green_len,
+        }
+    }
+
+    fn sections(&self) -> [&[u32]; 5] {
+        let (green, rest) = self.bins.split_at(self.green_len);
+        let (red, rest) = rest.split_at(256);
+        let (blue, rest) = rest.split_at(256);
+        let (alpha, distance) = rest.split_at(256);
+        [green, red, blue, alpha, distance]
+    }
+
+    fn add(&mut self, t: Token) {
+        let g = self.green_len;
+        match t {
+            Token::Literal(p) => {
+                self.bins[((p >> 8) & 0xff) as usize] += 1;
+                self.bins[g + ((p >> 16) & 0xff) as usize] += 1;
+                self.bins[g + 256 + (p & 0xff) as usize] += 1;
+                self.bins[g + 512 + (p >> 24) as usize] += 1;
+            }
+            Token::Cache(k) => self.bins[256 + 24 + k as usize] += 1,
+            Token::Copy {
+                length,
+                distance_code,
+            } => {
+                self.bins[256 + prefix_encode(length).0] += 1;
+                self.bins[g + 768 + prefix_encode(distance_code).0] += 1;
+            }
+        }
+    }
+
+    fn merge(&mut self, other: &Self) {
+        for (a, b) in self.bins.iter_mut().zip(&other.bins) {
+            *a += b;
+        }
+    }
+
+    /// Estimated coded size in bits: the entropy of each section plus the
+    /// code-length header, about three bits per symbol in use.
+    fn cost(&self) -> f64 {
+        self.sections()
+            .iter()
+            .map(|s| entropy(s) + 3.0 * s.iter().filter(|&&f| f > 0).count() as f64 + 10.0)
+            .sum()
+    }
+}
+
+fn histogram_of(tokens: &[Token], cache_bits: u32) -> Histogram {
+    let mut h = Histogram::new(cache_bits);
+    for &t in tokens {
+        h.add(t);
+    }
+    h
+}
+
+/// Blocks clustered into prefix code groups.
+struct Grouping {
+    bits: u32,
+    blocks_wide: usize,
+    /// Each block's group, raster order.
+    of_block: Vec<u16>,
+    histograms: Vec<Histogram>,
+}
+
+impl Grouping {
+    fn block_of(&self, position: usize, width: usize) -> u16 {
+        let (x, y) = (position % width, position / width);
+        self.of_block[(y >> self.bits) * self.blocks_wide + (x >> self.bits)]
+    }
+}
+
+/// Most groups worth considering; each costs a full set of code headers.
+const MAX_GROUPS: usize = 32;
+/// Aim for about this many blocks, so clustering stays quick.
+const TARGET_BLOCKS: usize = 1024;
+
+/// Cluster blocks of tokens into groups with their own codes, if the
+/// estimate says it beats one group for the whole image.
+fn group_blocks(tokens: &[Token], width: usize, total: usize, cache_bits: u32) -> Option<Grouping> {
+    let height = total / width.max(1);
+    if total < 4096 {
+        return None;
+    }
+    let mut bits = 2;
+    while bits < 9 && div_round_up(width, bits) * div_round_up(height, bits) > TARGET_BLOCKS {
+        bits += 1;
+    }
+    let blocks_wide = div_round_up(width, bits);
+    let blocks = blocks_wide * div_round_up(height, bits);
+    let mut per_block = vec![Histogram::new(cache_bits); blocks];
+    let mut at = 0;
+    for &t in tokens {
+        let (x, y) = (at % width, at / width);
+        per_block[(y >> bits) * blocks_wide + (x >> bits)].add(t);
+        at += match t {
+            Token::Copy { length, .. } => length,
+            _ => 1,
+        };
+    }
+
+    // Greedy: each block joins the group it saves most by joining, or
+    // starts one while there is room.
+    let mut groups: Vec<Histogram> = Vec::new();
+    let mut costs: Vec<f64> = Vec::new();
+    let mut of_block = vec![0_u16; blocks];
+    for (b, h) in per_block.iter().enumerate() {
+        let alone = h.cost();
+        let mut best: Option<(f64, usize)> = None;
+        for (k, g) in groups.iter().enumerate() {
+            let mut joined = g.clone();
+            joined.merge(h);
+            let saving = costs[k] + alone - joined.cost();
+            if best.is_none_or(|(s, _)| saving > s) {
+                best = Some((saving, k));
+            }
+        }
+        match best {
+            Some((saving, k)) if saving > 0.0 || groups.len() >= MAX_GROUPS => {
+                groups[k].merge(h);
+                costs[k] = groups[k].cost();
+                of_block[b] = k as u16;
+            }
+            _ => {
+                of_block[b] = groups.len() as u16;
+                groups.push(h.clone());
+                costs.push(alone);
+            }
+        }
+    }
+
+    // Refine: reassign each block to the group whose distribution codes it
+    // most cheaply, then rebuild the groups, twice.
+    for _ in 0..2 {
+        let tables: Vec<Vec<f32>> = groups
+            .iter()
+            .map(|g| {
+                let mut table = Vec::with_capacity(g.bins.len());
+                for section in g.sections() {
+                    let total: f64 = section.iter().map(|&f| f64::from(f)).sum::<f64>() + 1.0;
+                    table.extend(
+                        section
+                            .iter()
+                            .map(|&f| (-((f64::from(f) + 0.1) / total).log2()) as f32),
+                    );
+                }
+                table
+            })
+            .collect();
+        for (b, h) in per_block.iter().enumerate() {
+            let cost = |k: usize| -> f32 {
+                h.bins
+                    .iter()
+                    .zip(&tables[k])
+                    .filter(|(f, _)| **f > 0)
+                    .map(|(&f, &c)| f as f32 * c)
+                    .sum()
+            };
+            of_block[b] = (0..groups.len())
+                .min_by(|&a, &b| cost(a).total_cmp(&cost(b)))
+                .unwrap_or(0) as u16;
+        }
+        let mut rebuilt = vec![Histogram::new(cache_bits); groups.len()];
+        for (b, h) in per_block.iter().enumerate() {
+            rebuilt[usize::from(of_block[b])].merge(h);
+        }
+        groups = rebuilt;
+    }
+
+    // Drop empty groups and renumber.
+    let mut renumber = vec![u16::MAX; groups.len()];
+    let mut kept = Vec::new();
+    for (k, g) in groups.into_iter().enumerate() {
+        if g.bins.iter().any(|&f| f > 0) {
+            renumber[k] = kept.len() as u16;
+            kept.push(g);
+        }
+    }
+    for k in &mut of_block {
+        *k = renumber[usize::from(*k)];
+    }
+    if kept.len() < 2 {
+        return None;
+    }
+    // Worth it if the groups plus their entropy image beat one group.
+    let single = histogram_of(tokens, cache_bits).cost();
+    let image_bits = blocks as f64 * (kept.len() as f64).log2() * 0.5 + 200.0;
+    let multi: f64 = kept.iter().map(Histogram::cost).sum::<f64>() + image_bits;
+    (multi < single).then_some(Grouping {
+        bits,
+        blocks_wide,
+        of_block,
+        histograms: kept,
+    })
 }
 
 /// Per-channel wrapping subtraction.
@@ -556,14 +805,6 @@ const fn sub_pixels(a: u32, b: u32) -> u32 {
     let alpha_green = (a | 0x00ff_00ff).wrapping_sub(b & 0xff00_ff00);
     let red_blue = (a | 0xff00_ff00).wrapping_sub(b & 0x00ff_00ff);
     (alpha_green & 0xff00_ff00) | (red_blue & 0x00ff_00ff)
-}
-
-/// The cost proxy for a residual: how far each channel is from zero.
-fn residual_cost(r: u32) -> u32 {
-    r.to_le_bytes()
-        .iter()
-        .map(|&b| u32::from((b as i8).unsigned_abs()))
-        .sum()
 }
 
 /// Write `pixels` (ARGB) as a VP8L image stream: transforms, then the coded
@@ -649,23 +890,55 @@ pub fn write_image_stream(w: &mut BitWriter, pixels: &[u32], width: usize, heigh
             )
         }
     };
+    // Each tile takes the mode whose residuals would cost least to code
+    // given the residuals already chosen — what libwebp does, and much
+    // better than their magnitude alone, which ignores that a residual
+    // value common elsewhere in the image is cheap however large it is.
     let mut modes = vec![0_u32; blocks_wide * blocks_high];
+    let mut seen = [[1_u32; 256]; 4];
+    let mut seen_total = [256_u32; 4];
+    let mut tile = [[0_u32; 256]; 4];
     for by in 0..blocks_high {
         for bx in 0..blocks_wide {
-            let mut best = (u32::MAX, 0);
+            let costs: [[f32; 256]; 4] = core::array::from_fn(|c| {
+                let total = seen_total[c] as f32;
+                core::array::from_fn(|v| -(seen[c][v] as f32 / total).log2())
+            });
+            let mut best = (f32::MAX, 0, [[0_u32; 256]; 4]);
             for mode in 0..14 {
-                let mut cost = 0;
+                for t in &mut tile {
+                    t.fill(0);
+                }
                 for y in (by << BLOCK_BITS)..((by + 1) << BLOCK_BITS).min(height) {
                     for x in (bx << BLOCK_BITS)..((bx + 1) << BLOCK_BITS).min(width) {
                         let i = y * width + x;
-                        cost += residual_cost(sub_pixels(src[i], predict_at(mode, i)));
+                        let r = sub_pixels(src[i], predict_at(mode, i));
+                        for (c, byte) in r.to_be_bytes().into_iter().enumerate() {
+                            tile[c][usize::from(byte)] += 1;
+                        }
                     }
                 }
+                let cost: f32 = (0..4)
+                    .map(|c| {
+                        tile[c]
+                            .iter()
+                            .zip(&costs[c])
+                            .filter(|(n, _)| **n > 0)
+                            .map(|(&n, &b)| n as f32 * b)
+                            .sum::<f32>()
+                    })
+                    .sum();
                 if cost < best.0 {
-                    best = (cost, mode);
+                    best = (cost, mode, tile);
                 }
             }
             modes[by * blocks_wide + bx] = best.1;
+            for ((counts, total), chosen) in seen.iter_mut().zip(&mut seen_total).zip(&best.2) {
+                for (n, &add) in counts.iter_mut().zip(chosen) {
+                    *n += add;
+                }
+                *total += chosen.iter().sum::<u32>();
+            }
         }
     }
     let residuals: Vec<u32> = (0..src.len())
@@ -680,8 +953,95 @@ pub fn write_image_stream(w: &mut BitWriter, pixels: &[u32], width: usize, heigh
     w.put(3, BLOCK_BITS - 2);
     let mode_image: Vec<u32> = modes.iter().map(|&m| 0xff00_0000 | (m << 8)).collect();
     write_coded_image(w, &mode_image, blocks_wide, false, true);
+
+    // Cross-colour (§3.5.2), on the residuals.
+    let (elements, decorrelated) = cross_color(&residuals, width, height);
+    w.put(1, 1);
+    w.put(2, 1);
+    w.put(3, COLOR_BITS - 2);
+    write_coded_image(w, &elements, div_round_up(width, COLOR_BITS), false, true);
     w.put(1, 0); // no more transforms
-    write_coded_image(w, &residuals, width, true, true);
+    write_coded_image(w, &decorrelated, width, true, true);
+}
+
+/// Cross-colour block size, as log2 of the side.
+const COLOR_BITS: u32 = 5;
+
+/// Entropy of a channel mapping over one block.
+type ChannelCost<'a> = dyn FnMut(&dyn Fn(u32) -> u8) -> f64 + 'a;
+
+/// `ColorTransformDelta` (§3.5.2): a 3.5 fixed-point coefficient times a
+/// channel, both read as signed bytes.
+fn color_delta(t: u8, c: u8) -> i32 {
+    (i32::from(t as i8) * i32::from(c as i8)) >> 5
+}
+
+/// The cross-colour transform: per block, the `green_to_red`,
+/// `green_to_blue` and `red_to_blue` coefficients that leave red and blue
+/// with the least entropy, and the image with them subtracted. Returns the
+/// coefficient image (as the decoder reads it) and the transformed pixels.
+fn cross_color(pixels: &[u32], width: usize, height: usize) -> (Vec<u32>, Vec<u32>) {
+    let blocks_wide = div_round_up(width, COLOR_BITS);
+    let blocks_high = div_round_up(height, COLOR_BITS);
+    let channels = |p: u32| ((p >> 16) as u8, (p >> 8) as u8, p as u8);
+    let mut elements = Vec::with_capacity(blocks_wide * blocks_high);
+    let mut out = pixels.to_vec();
+    let mut histogram = [0_u32; 256];
+    for by in 0..blocks_high {
+        for bx in 0..blocks_wide {
+            let block: Vec<usize> = ((by << COLOR_BITS)..((by + 1) << COLOR_BITS).min(height))
+                .flat_map(|y| {
+                    ((bx << COLOR_BITS)..((bx + 1) << COLOR_BITS).min(width))
+                        .map(move |x| y * width + x)
+                })
+                .collect();
+            let mut cost_of = |f: &dyn Fn(u32) -> u8| -> f64 {
+                histogram.fill(0);
+                for &i in &block {
+                    histogram[usize::from(f(pixels[i]))] += 1;
+                }
+                entropy(&histogram)
+            };
+            let search = |cost_of: &mut ChannelCost<'_>, f: &dyn Fn(u32, u8) -> u8| -> u8 {
+                let mut best = (cost_of(&|p| f(p, 0)), 0_u8);
+                for t in (-64_i8..=64).map(|t| t as u8) {
+                    let c = cost_of(&|p| f(p, t));
+                    if c < best.0 {
+                        best = (c, t);
+                    }
+                }
+                best.1
+            };
+            let green_to_red = search(&mut cost_of, &|p, t| {
+                let (r, g, _) = channels(p);
+                (i32::from(r) - color_delta(t, g)) as u8
+            });
+            let green_to_blue = search(&mut cost_of, &|p, t| {
+                let (_, g, b) = channels(p);
+                (i32::from(b) - color_delta(t, g)) as u8
+            });
+            let red_to_blue = search(&mut cost_of, &|p, t| {
+                let (r, g, b) = channels(p);
+                (i32::from(b) - color_delta(green_to_blue, g) - color_delta(t, r)) as u8
+            });
+            for &i in &block {
+                let p = pixels[i];
+                let (r, g, b) = channels(p);
+                let new_red = (i32::from(r) - color_delta(green_to_red, g)) as u8;
+                let new_blue = (i32::from(b)
+                    - color_delta(green_to_blue, g)
+                    - color_delta(red_to_blue, r)) as u8;
+                out[i] = (p & 0xff00_ff00) | (u32::from(new_red) << 16) | u32::from(new_blue);
+            }
+            elements.push(
+                0xff00_0000
+                    | (u32::from(red_to_blue) << 16)
+                    | (u32::from(green_to_blue) << 8)
+                    | u32::from(green_to_red),
+            );
+        }
+    }
+    (elements, out)
 }
 
 /// A complete `VP8L` chunk payload for `pixels` (ARGB, row-major).

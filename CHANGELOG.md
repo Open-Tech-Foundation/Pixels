@@ -153,9 +153,10 @@ versioning: [SemVer](https://semver.org/).
   entropy estimate, and length-limited canonical prefix codes — and also
   compresses the `ALPH` chunk of lossy files. libwebp reads back every
   lossless file with exact pixels. On the lossless test corpus the files are
-  10% larger than libwebp's at its slower settings: equal or smaller for
-  palette images, 10–30% larger for smooth photographic content, where the
-  cross-colour transform and meta prefix codes are still to come.
+  about 3% larger than libwebp's at its slower settings, with the
+  cross-colour transform, meta prefix codes (blocks clustered into groups
+  with their own codes) and predictor modes chosen by coded cost; palette
+  images come out equal or smaller.
 - Lossy WebP output. An owned VP8 encoder writes WebP at
   `EncodeOptions::quality`, mapped to the quantizer as libwebp maps it,
   choosing 16x16 or 4x4 prediction and chroma modes per macroblock by
