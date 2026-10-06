@@ -20,6 +20,7 @@ mod cdef;
 mod coeff;
 mod deblock;
 mod direction;
+pub(crate) mod encode;
 mod frame;
 mod obu;
 mod palette;

@@ -146,6 +146,11 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- AVIF encoding groundwork: the AV1 multi-symbol arithmetic encoder (libaom's
+  `od_ec_enc`, sharing the decoder's CDF adaptation, round-tripped symbol for
+  symbol through our decoder) and writers for the reduced still-picture
+  sequence header, the key-frame header and OBUs, each parsed back by our own
+  parsers in its tests.
 - `otf-pixels-codec-webp` is now owned outright and `image-webp` is gone
   (ADR-0014 complete). An owned VP8L encoder writes lossless WebP — colour
   indexing with pixel bundling for up to 256 colours, otherwise subtract-green

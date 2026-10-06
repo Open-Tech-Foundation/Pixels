@@ -166,6 +166,131 @@ impl<'a> SymbolDecoder<'a> {
     }
 }
 
+#[allow(dead_code, reason = "used by the AVIF encoder, whose driver lands next")]
+/// The multi-symbol arithmetic encoder: libaom's `od_ec_enc`, the exact
+/// inverse of [`SymbolDecoder`]. Symbols are coded against the same CDFs,
+/// adapted the same way, so a stream it writes decodes symbol for symbol.
+pub struct SymbolEncoder {
+    /// The low end of the current interval, below the bits already flushed.
+    low: u64,
+    /// The interval's size, in `[2^15, 2^16)` between symbols.
+    rng: u32,
+    /// Bits buffered in `low` beyond a whole byte, offset as libaom keeps it.
+    cnt: i32,
+    /// Output bytes before carry propagation, each with room for a carry.
+    precarry: Vec<u16>,
+    disable_cdf_update: bool,
+}
+
+#[allow(dead_code, reason = "used by the AVIF encoder, whose driver lands next")]
+impl SymbolEncoder {
+    /// A fresh encoder for one tile.
+    #[must_use]
+    pub const fn new(disable_cdf_update: bool) -> Self {
+        Self {
+            low: 0,
+            rng: 0x8000,
+            cnt: -9,
+            precarry: Vec::new(),
+            disable_cdf_update,
+        }
+    }
+
+    /// Encode `symbol` against `cdf`, adapting it as the decoder will.
+    pub fn write_symbol(&mut self, cdf: &mut [u16], symbol: usize) {
+        let n = cdf.len().saturating_sub(1).max(1);
+        let symbol = symbol.min(n - 1);
+        let r = self.rng;
+        let bound = |k: usize| -> u32 {
+            let f = (1_u32 << 15) - u32::from(cdf.get(k).copied().unwrap_or(1 << 15));
+            (((r >> 8) * (f >> EC_PROB_SHIFT)) >> (7 - EC_PROB_SHIFT))
+                + EC_MIN_PROB * (n as u32 - 1 - k as u32)
+        };
+        let v = bound(symbol);
+        let (low, rng) = if symbol > 0 {
+            let u = bound(symbol - 1);
+            (self.low + u64::from(r - u), u - v)
+        } else {
+            (self.low, r - v)
+        };
+        self.normalize(low, rng);
+        if !self.disable_cdf_update {
+            update_cdf(cdf, symbol, n);
+        }
+    }
+
+    /// One equiprobable bit (`read_bool`'s inverse).
+    pub fn write_bool(&mut self, bit: bool) {
+        let mut cdf = [1_u16 << 14, 1_u16 << 15, 0];
+        let saved = self.disable_cdf_update;
+        self.disable_cdf_update = true;
+        self.write_symbol(&mut cdf, usize::from(bit));
+        self.disable_cdf_update = saved;
+    }
+
+    /// An `n`-bit literal, most-significant bit first.
+    pub fn write_literal(&mut self, n: u32, value: u32) {
+        for i in (0..n).rev() {
+            self.write_bool((value >> i) & 1 == 1);
+        }
+    }
+
+    /// `od_ec_enc_normalize`: shift the interval back up to 16 bits, moving
+    /// whole bytes of `low` out to the pre-carry buffer.
+    fn normalize(&mut self, mut low: u64, rng: u32) {
+        let d = 15 - floor_log2(rng) as i32;
+        let mut c = self.cnt;
+        let mut s = c + d;
+        if s >= 0 {
+            c += 16;
+            let mut m = (1_u64 << c) - 1;
+            if s >= 8 {
+                self.precarry.push((low >> c) as u16);
+                low &= m;
+                c -= 8;
+                m >>= 8;
+            }
+            self.precarry.push((low >> c) as u16);
+            s = c + d - 24;
+            low &= m;
+        }
+        self.low = low << d;
+        self.rng = rng << d;
+        self.cnt = s;
+    }
+
+    /// `od_ec_enc_done`: flush the fewest bits that decode correctly whatever
+    /// follows (ending in the trailing one bit), then propagate carries.
+    #[must_use]
+    pub fn finish(mut self) -> Vec<u8> {
+        let mut c = self.cnt;
+        let mut s = 10 + c;
+        let m = 0x3fff_u64;
+        let mut e = ((self.low + m) & !m) | (m + 1);
+        if s > 0 {
+            let mut n = (1_u64 << (c + 16)) - 1;
+            loop {
+                self.precarry.push((e >> (c + 16)) as u16);
+                e &= n;
+                s -= 8;
+                c -= 8;
+                n >>= 8;
+                if s <= 0 {
+                    break;
+                }
+            }
+        }
+        let mut out = vec![0_u8; self.precarry.len()];
+        let mut carry = 0_u32;
+        for (slot, &v) in out.iter_mut().zip(&self.precarry).rev() {
+            carry += u32::from(v);
+            *slot = carry as u8;
+            carry >>= 8;
+        }
+        out
+    }
+}
+
 /// Adapt `cdf` toward `symbol` (`update_cdf`, §8.2.6). The counter at `cdf[n]`
 /// slows adaptation as a symbol is seen more often.
 fn update_cdf(cdf: &mut [u16], symbol: usize, n: usize) {
@@ -201,6 +326,60 @@ fn update_cdf(cdf: &mut [u16], symbol: usize, n: usize) {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_encoder_round_trips_through_the_decoder() {
+        // Pseudo-random symbols over CDFs of several sizes, adapted on both
+        // sides, interleaved with literals: every symbol must come back.
+        let mut state = 0x2545_f491_u32;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+        for &adapt in &[true, false] {
+            let make = |n: usize| -> Vec<u16> {
+                let mut cdf: Vec<u16> = (1..=n).map(|k| ((k * 32768) / n) as u16).collect();
+                cdf.push(0);
+                cdf
+            };
+            let sizes = [2_usize, 3, 4, 8, 13, 16];
+            let mut enc_cdfs: Vec<Vec<u16>> = sizes.iter().map(|&n| make(n)).collect();
+            let mut dec_cdfs = enc_cdfs.clone();
+            let mut plan = Vec::new();
+            let mut enc = SymbolEncoder::new(!adapt);
+            for _ in 0..5000 {
+                let which = (next() % sizes.len() as u32) as usize;
+                // Skew towards low symbols so adaptation actually moves.
+                let r = next();
+                let symbol = if r % 4 == 0 {
+                    (r as usize >> 8) % sizes[which]
+                } else {
+                    0
+                };
+                if next() % 7 == 0 {
+                    let v = next() % 64;
+                    enc.write_literal(6, v);
+                    plan.push((usize::MAX, v as usize));
+                } else {
+                    enc.write_symbol(&mut enc_cdfs[which], symbol);
+                    plan.push((which, symbol));
+                }
+            }
+            let data = enc.finish();
+            let mut dec = SymbolDecoder::new(&data, !adapt).unwrap();
+            for (i, &(which, value)) in plan.iter().enumerate() {
+                let got = if which == usize::MAX {
+                    dec.read_literal(6).unwrap() as usize
+                } else {
+                    dec.read_symbol(&mut dec_cdfs[which]).unwrap()
+                };
+                assert_eq!(got, value, "symbol {i} (adapt {adapt})");
+            }
+            assert_eq!(enc_cdfs, dec_cdfs, "adaptation diverged");
+        }
+    }
 
     /// A binary CDF: `cdf[0]` is P(symbol 0), then the mandatory `1<<15` and the
     /// adaptation counter.
