@@ -39,6 +39,8 @@ pub mod marker {
     pub const APP0: u8 = 0xE0;
     /// EXIF lives here.
     pub const APP1: u8 = 0xE1;
+    /// ICC profiles live here, split across as many segments as they need.
+    pub const APP2: u8 = 0xE2;
     /// Adobe's colour transform flag lives here.
     pub const APP14: u8 = 0xEE;
     /// Last application segment.
@@ -339,6 +341,67 @@ pub fn adobe_transform(payload: &[u8]) -> Option<AdobeTransform> {
     }
 }
 
+/// The identifier opening every ICC `APP2` segment (ICC.1 Annex B.4).
+pub const ICC_IDENTIFIER: &[u8; 12] = b"ICC_PROFILE\0";
+
+/// The largest profile chunk one `APP2` segment holds: a 16-bit length less
+/// itself, the identifier, and the sequence and count bytes.
+pub const ICC_CHUNK: usize = 65_535 - 2 - 12 - 2;
+
+/// The `APP2` segments of an ICC profile, collected in any order and joined
+/// by their sequence numbers.
+#[derive(Debug, Default)]
+pub struct IccChunks {
+    chunks: Vec<(u8, u8, Vec<u8>)>,
+}
+
+impl IccChunks {
+    /// Keep `payload` if it is an ICC `APP2` segment; ignore it otherwise.
+    pub fn push(&mut self, payload: &[u8]) {
+        if let Some([sequence, count, data @ ..]) = payload.strip_prefix(ICC_IDENTIFIER) {
+            self.chunks.push((*sequence, *count, data.to_vec()));
+        }
+    }
+
+    /// The whole profile, or `None` when there is none or its chunks do not
+    /// form one: numbered 1 to the count every chunk agrees on, each once. A
+    /// broken profile is metadata we decline to trust, like broken EXIF.
+    #[must_use]
+    pub fn assemble(mut self) -> Option<Vec<u8>> {
+        let count = self.chunks.first()?.1;
+        self.chunks.sort_by_key(|&(sequence, _, _)| sequence);
+        let well_formed = self.chunks.len() == usize::from(count)
+            && self
+                .chunks
+                .iter()
+                .enumerate()
+                .all(|(i, &(sequence, n, _))| n == count && usize::from(sequence) == i + 1);
+        well_formed.then(|| {
+            self.chunks
+                .into_iter()
+                .flat_map(|(_, _, data)| data)
+                .collect()
+        })
+    }
+}
+
+/// `profile` as the payloads of the `APP2` segments that carry it.
+#[must_use]
+pub fn icc_segments(profile: &[u8]) -> Vec<Vec<u8>> {
+    let chunks: Vec<&[u8]> = profile.chunks(ICC_CHUNK).collect();
+    let count = chunks.len() as u8;
+    chunks
+        .iter()
+        .enumerate()
+        .map(|(i, chunk)| {
+            let mut payload = ICC_IDENTIFIER.to_vec();
+            payload.extend_from_slice(&[i as u8 + 1, count]);
+            payload.extend_from_slice(chunk);
+            payload
+        })
+        .collect()
+}
+
 /// The EXIF orientation, if `payload` is an EXIF `APP1` segment that carries
 /// one.
 ///
@@ -504,6 +567,33 @@ mod tests {
         assert_eq!(adobe_transform(&payload), Some(AdobeTransform::None));
         assert_eq!(adobe_transform(b"JFIF\0\0\0\0\0\0\0\0"), None);
         assert_eq!(adobe_transform(b"Adobe"), None);
+    }
+
+    #[test]
+    fn icc_profiles_split_and_reassemble_in_any_order() {
+        let profile: Vec<u8> = (0..ICC_CHUNK * 2 + 10).map(|i| (i % 251) as u8).collect();
+        let segments = icc_segments(&profile);
+        assert_eq!(segments.len(), 3);
+        assert!(segments.iter().all(|s| s.len() <= 65_533));
+        let mut chunks = IccChunks::default();
+        for segment in segments.iter().rev() {
+            chunks.push(segment);
+        }
+        chunks.push(b"http://ns.adobe.com/xap/1.0/\0"); // XMP-like, ignored
+        assert_eq!(chunks.assemble(), Some(profile));
+        assert_eq!(IccChunks::default().assemble(), None);
+    }
+
+    #[test]
+    fn a_broken_icc_sequence_is_dropped() {
+        let segments = icc_segments(&vec![7; ICC_CHUNK + 1]);
+        let mut missing = IccChunks::default();
+        missing.push(&segments[0]);
+        assert_eq!(missing.assemble(), None);
+        let mut doubled = IccChunks::default();
+        doubled.push(&segments[0]);
+        doubled.push(&segments[0]);
+        assert_eq!(doubled.assemble(), None);
     }
 
     #[test]

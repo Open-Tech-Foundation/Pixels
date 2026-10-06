@@ -52,7 +52,11 @@ implementation detail and may change without notice.
 
 v1 supports: `Gray8`, `Gray16`, `GrayA8`, `Rgb8`, `Rgba8`, `Rgb16`,
 `Rgba16`, `RgbF32`, `RgbaF32` (f32 used internally for filter math).
-Color space handling in v1 is sRGB-assumed; ICC transforms are v2. Alpha is
+Color space: pixels without a profile are sRGB. An embedded ICC profile is
+read from PNG (`iCCP`), JPEG (`APP2`), WebP (`ICCP`), TIFF (tag 34675) and
+AVIF (`colr`), carried through the pipeline (`Image::icc_profile`), and
+written into any output format with a place for one; GIF and raw drop it.
+Alpha is
 unassociated (straight) at API boundaries; ops that require premultiplied
 alpha convert internally.
 

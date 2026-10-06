@@ -217,6 +217,16 @@ pub trait Decoder: Send + fmt::Debug {
         Orientation::Normal
     }
 
+    /// The embedded ICC colour profile, if the file carries one.
+    ///
+    /// Reported, never applied, like [`Decoder::orientation`]: samples come
+    /// out as stored, and converting them is the pipeline's decision. Known
+    /// after the header is parsed; a profile stored after the image data is
+    /// not seen.
+    fn icc_profile(&self) -> Option<&[u8]> {
+        None
+    }
+
     /// Decode the next row, top to bottom, into `out`.
     ///
     /// `out` is exactly [`ImageDescriptor::row_bytes`] long. Each call advances
@@ -287,6 +297,22 @@ pub trait Decoder: Send + fmt::Debug {
 /// destination. Encoders write incrementally as rows arrive; they must not
 /// buffer the whole image unless the format leaves no choice (ADR-0005).
 pub trait Encoder: Send {
+    /// Embed `profile` as the image's ICC colour profile, or write none.
+    ///
+    /// Called before [`Encoder::write_header`], whose header usually holds
+    /// it. The default ignores it, which is right for a format with nowhere
+    /// to put one (raw pixels, GIF): the pixels are written as given either
+    /// way.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::InvalidArgument`] if the header has already
+    /// been written.
+    fn set_icc_profile(&mut self, profile: Option<&[u8]>) -> Result<()> {
+        let _ = profile;
+        Ok(())
+    }
+
     /// Begin an image, writing any container header.
     ///
     /// Must be called exactly once, before any [`Encoder::write_row`].

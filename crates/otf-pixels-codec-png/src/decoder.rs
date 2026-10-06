@@ -46,6 +46,11 @@ const READ_CHUNK: usize = 64 * 1024;
 /// metadata declined rather than an image refused.
 const EXIF_PREFIX: usize = 64 * 1024;
 
+/// The largest ICC profile accepted, compressed or not. Real profiles run
+/// from a few hundred bytes (matrix/TRC) to a megabyte or two (LUT-based); a
+/// larger `iCCP` is declined as metadata, not refused as an image.
+const MAX_ICC: usize = 4 << 20;
+
 /// Transparency from a `tRNS` chunk (§11.3.2.1).
 #[derive(Debug, Clone)]
 enum Transparency {
@@ -57,6 +62,20 @@ enum Transparency {
     Palette(Vec<u8>),
 }
 
+/// The profile in an `iCCP` payload (§11.3.3.3): a 1-79 byte name, a NUL,
+/// compression method 0, and the zlib-compressed profile.
+fn parse_iccp(data: &[u8]) -> Option<Vec<u8>> {
+    let nul = data
+        .iter()
+        .position(|&b| b == 0)
+        .filter(|&n| (1..=79).contains(&n))?;
+    let (&method, compressed) = data.get(nul + 1..)?.split_first()?;
+    if method != 0 {
+        return None;
+    }
+    zlib_decompress(compressed, MAX_ICC).ok()
+}
+
 /// Decodes a PNG stream.
 #[derive(Debug)]
 pub struct PngDecoder<S: Source> {
@@ -65,6 +84,8 @@ pub struct PngDecoder<S: Source> {
     /// Everything read before the image data, until a decode path takes it.
     prelude: Option<Prelude<S>>,
     orientation: Orientation,
+    /// The `iCCP` profile, decompressed.
+    icc: Option<Vec<u8>>,
     /// The decoded image in output format, produced on first row read.
     ///
     /// Only used by the interlaced path; a non-interlaced image never
@@ -132,6 +153,7 @@ impl<S: Source> PngDecoder<S> {
         let mut palette: Option<Vec<[u8; 3]>> = None;
         let mut transparency: Option<Transparency> = None;
         let mut orientation = None;
+        let mut icc = None;
         loop {
             let kind = chunks.open_next()?;
             match &kind {
@@ -162,6 +184,25 @@ impl<S: Source> PngDecoder<S> {
                     chunks.close()?;
                     // The first one wins; §11.3.6.1 permits only one.
                     orientation = orientation.or_else(|| Orientation::from_exif_block(&exif));
+                }
+                b"iCCP" => {
+                    // One byte past the cap tells an oversized chunk apart.
+                    let mut data = vec![0_u8; MAX_ICC + 1];
+                    let mut filled = 0;
+                    while let Some(rest) = data.get_mut(filled..).filter(|r| !r.is_empty()) {
+                        match chunks.read_payload(rest)? {
+                            0 => break,
+                            n => filled += n,
+                        }
+                    }
+                    data.truncate(filled);
+                    chunks.skip_payload()?;
+                    chunks.close()?;
+                    // §11.3.3.3 permits one; a broken or oversized one is
+                    // dropped.
+                    if filled <= MAX_ICC {
+                        icc = icc.or_else(|| parse_iccp(&data));
+                    }
                 }
                 b"IDAT" => break,
                 b"IEND" => {
@@ -197,6 +238,7 @@ impl<S: Source> PngDecoder<S> {
                 transparency,
             }),
             orientation: orientation.unwrap_or_default(),
+            icc,
             raster: None,
             stream: None,
             row: 0,
@@ -900,6 +942,11 @@ impl<S: Source + std::fmt::Debug> Decoder for PngDecoder<S> {
     /// seen: by then the pipeline has been built, and §5.6 puts `eXIf` first.
     fn orientation(&self) -> Orientation {
         self.orientation
+    }
+
+    /// From an `iCCP` chunk before the image data.
+    fn icc_profile(&self) -> Option<&[u8]> {
+        self.icc.as_deref()
     }
 
     fn capability(&self) -> DecodeCapability {

@@ -28,6 +28,8 @@ pub struct PngEncoder {
     level: Level,
     /// Set by `write_header`; its presence means the header was written.
     state: Option<State>,
+    /// The ICC profile to write as `iCCP`, if any.
+    icc: Option<Vec<u8>>,
 }
 
 /// Everything fixed once the descriptor is known.
@@ -53,13 +55,18 @@ impl PngEncoder {
         Self {
             level: Level::DEFAULT,
             state: None,
+            icc: None,
         }
     }
 
     /// An encoder at an explicit DEFLATE level.
     #[must_use]
     pub const fn with_level(level: Level) -> Self {
-        Self { level, state: None }
+        Self {
+            level,
+            state: None,
+            icc: None,
+        }
     }
 
     /// An encoder configured from generic encode options.
@@ -155,6 +162,17 @@ fn to_big_endian_16(row: &[u8], out: &mut Vec<u8>) {
 }
 
 impl Encoder for PngEncoder {
+    fn set_icc_profile(&mut self, profile: Option<&[u8]>) -> Result<()> {
+        if self.state.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "profile",
+                "the ICC profile must be set before write_header",
+            ));
+        }
+        self.icc = profile.map(<[u8]>::to_vec);
+        Ok(())
+    }
+
     fn write_header(&mut self, desc: &ImageDescriptor, sink: &mut dyn Sink) -> Result<()> {
         if self.state.is_some() {
             return Err(PixelsError::invalid_argument(
@@ -184,6 +202,12 @@ impl Encoder for PngEncoder {
         ihdr.extend_from_slice(&[0, 0, 0]);
         let mut chunk = Vec::new();
         write_chunk(&mut chunk, b"IHDR", &ihdr);
+        if let Some(profile) = &self.icc {
+            // iCCP (§11.3.3.3): a name, NUL, method 0, the zlib stream.
+            let mut iccp = b"ICC Profile\0\0".to_vec();
+            iccp.extend(zlib_compress(profile, self.level).map_err(crate::compress_error)?);
+            write_chunk(&mut chunk, b"iCCP", &iccp);
+        }
         sink.write_all(&chunk)?;
 
         let row_bytes = desc.row_bytes();

@@ -57,6 +57,8 @@ pub struct TiffEncoder {
     layout: TiffLayout,
     deflate: Option<Level>,
     state: Option<State>,
+    /// The ICC profile to store in tag 34675, if any.
+    icc: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -83,6 +85,7 @@ impl TiffEncoder {
             layout: TiffLayout::Strips { rows: 64 },
             deflate: None,
             state: None,
+            icc: None,
         }
     }
 
@@ -235,6 +238,17 @@ impl TiffEncoder {
 type Field = (u16, u16, Vec<u32>);
 
 impl Encoder for TiffEncoder {
+    fn set_icc_profile(&mut self, profile: Option<&[u8]>) -> Result<()> {
+        if self.state.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "profile",
+                "the ICC profile must be set before write_header",
+            ));
+        }
+        self.icc = profile.map(<[u8]>::to_vec);
+        Ok(())
+    }
+
     fn write_header(&mut self, desc: &ImageDescriptor, _sink: &mut dyn Sink) -> Result<()> {
         if self.state.is_some() {
             return Err(PixelsError::invalid_argument(
@@ -340,6 +354,14 @@ impl Encoder for TiffEncoder {
                 fields.push((tag::TILE_OFFSETS, 4, vec![0; counts.len()]));
                 fields.push((tag::TILE_BYTE_COUNTS, 4, counts.clone()));
             }
+        }
+        if let Some(profile) = &self.icc {
+            // UNDEFINED (7): one byte per value.
+            fields.push((
+                tag::ICC_PROFILE,
+                7,
+                profile.iter().map(|&b| u32::from(b)).collect(),
+            ));
         }
         // Tags must appear in ascending order; readers are entitled to binary
         // search, and libtiff warns loudly about files that get this wrong.

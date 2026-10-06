@@ -90,6 +90,8 @@ pub mod tag {
     pub const STRIP_OFFSETS: u16 = 273;
     /// How the stored image must be turned to display upright.
     pub const ORIENTATION: u16 = 274;
+    /// The embedded ICC profile (`InterColorProfile`, TIFF/EP), UNDEFINED.
+    pub const ICC_PROFILE: u16 = 34_675;
     /// Channels per pixel.
     pub const SAMPLES_PER_PIXEL: u16 = 277;
     /// Rows per strip.
@@ -258,7 +260,9 @@ impl Directory {
                     break;
                 }
                 let value = match field_type {
-                    FieldType::Byte | FieldType::Ascii => {
+                    // UNDEFINED (7) is opaque bytes, which is how an ICC
+                    // profile is stored.
+                    FieldType::Byte | FieldType::Ascii | FieldType::Other(7, _) => {
                         u32::from(data.get(value_at).copied().unwrap_or(0))
                     }
                     FieldType::Short => u32::from(order.u16(data, value_at)),

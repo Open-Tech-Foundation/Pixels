@@ -59,6 +59,8 @@ pub struct AvifInfo {
     /// The primary item's `colr` colour information, if it has any. Its `nclx`
     /// matrix, when present, overrides the one in the AV1 sequence header.
     pub colour: Option<Colour>,
+    /// The primary item's ICC profile, from an ICC `colr`.
+    pub icc: Option<Vec<u8>>,
     /// The primary item's `irot`/`imir` transform. Reported through
     /// [`Decoder::orientation`], never applied to the decoded rows.
     pub orientation: Orientation,
@@ -246,6 +248,7 @@ fn parse_container(bytes: &[u8]) -> Result<AvifInfo> {
         has_alpha: meta.alpha_item(primary.id).is_some(),
         is_grid: primary.is_grid(),
         colour: meta.properties.colour(primary.id).cloned(),
+        icc: meta.properties.icc_profile(primary.id).map(<[u8]>::to_vec),
         orientation: meta.properties.orientation(primary.id),
     })
 }
@@ -497,6 +500,10 @@ impl Decoder for AvifDecoder {
 
     fn orientation(&self) -> Orientation {
         self.info.orientation
+    }
+
+    fn icc_profile(&self) -> Option<&[u8]> {
+        self.info.icc.as_deref()
     }
 
     fn capability(&self) -> DecodeCapability {
@@ -866,6 +873,7 @@ mod tests {
                 has_alpha,
                 is_grid: false,
                 colour: None,
+                icc: None,
                 orientation: Orientation::Normal,
             };
             pixel_format(&info)
@@ -889,6 +897,7 @@ mod tests {
                 has_alpha: alpha,
                 is_grid: false,
                 colour: None,
+                icc: None,
                 orientation: Orientation::Normal,
             })
         };

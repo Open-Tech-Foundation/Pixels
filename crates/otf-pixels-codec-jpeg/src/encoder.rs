@@ -23,7 +23,7 @@
 //! and not for a file a pipeline just produced.
 
 use crate::fdct;
-use crate::format::{ZIGZAG, marker};
+use crate::format::{ICC_CHUNK, ZIGZAG, icc_segments, marker};
 use crate::huffman::HuffmanEncoder;
 use crate::tables;
 use otf_pixels_core::{
@@ -66,6 +66,8 @@ pub struct JpegEncoder {
     subsampling: Subsampling,
     /// Set by `write_header`; its presence means the header was written.
     state: Option<State>,
+    /// The ICC profile to embed after the JFIF header, if any.
+    icc: Option<Vec<u8>>,
 }
 
 /// Everything fixed once the descriptor is known.
@@ -221,6 +223,7 @@ impl JpegEncoder {
             quality: EncodeOptions::DEFAULT_QUALITY,
             subsampling: Subsampling::Both,
             state: None,
+            icc: None,
         }
     }
 
@@ -249,6 +252,7 @@ impl JpegEncoder {
                 Subsampling::Both
             },
             state: None,
+            icc: None,
         })
     }
 
@@ -571,6 +575,24 @@ fn write_huffman_table(
 }
 
 impl Encoder for JpegEncoder {
+    fn set_icc_profile(&mut self, profile: Option<&[u8]>) -> Result<()> {
+        if self.state.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "profile",
+                "the ICC profile must be set before write_header",
+            ));
+        }
+        // 255 segments is the most the sequence numbers can count.
+        if let Some(profile) = profile.filter(|p| p.len() > 255 * ICC_CHUNK) {
+            return Err(PixelsError::unsupported(format!(
+                "a {}-byte ICC profile needs more than 255 JPEG segments",
+                profile.len()
+            )));
+        }
+        self.icc = profile.map(<[u8]>::to_vec);
+        Ok(())
+    }
+
     fn write_header(&mut self, desc: &ImageDescriptor, sink: &mut dyn Sink) -> Result<()> {
         if self.state.is_some() {
             return Err(PixelsError::invalid_argument(
@@ -620,6 +642,12 @@ impl Encoder for JpegEncoder {
             ],
             sink,
         )?;
+        // The profile, in as many APP2 segments as it takes.
+        if let Some(profile) = &self.icc {
+            for segment in icc_segments(profile) {
+                write_segment(marker::APP2, &segment, sink)?;
+            }
+        }
 
         let mut payload = Vec::new();
         write_quant_table(0, &luma_quant, &mut payload);

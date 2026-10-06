@@ -28,6 +28,8 @@ const MAX_DIMENSION: u32 = 65_536;
 pub struct AvifEncoder {
     state: Option<State>,
     options: EncodeOptions,
+    /// The ICC profile for a `colr` of type `prof`, if any.
+    icc: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -56,11 +58,23 @@ impl AvifEncoder {
         Self {
             state: None,
             options: *options,
+            icc: None,
         }
     }
 }
 
 impl Encoder for AvifEncoder {
+    fn set_icc_profile(&mut self, profile: Option<&[u8]>) -> Result<()> {
+        if self.state.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "profile",
+                "the ICC profile must be set before write_header",
+            ));
+        }
+        self.icc = profile.map(<[u8]>::to_vec);
+        Ok(())
+    }
+
     fn write_header(&mut self, desc: &ImageDescriptor, _sink: &mut dyn Sink) -> Result<()> {
         if self.state.is_some() {
             return Err(PixelsError::invalid_argument(
@@ -143,7 +157,7 @@ impl Encoder for AvifEncoder {
                 ),
             ));
         }
-        let bytes = encode(state, self.options.quality)?;
+        let bytes = encode(state, self.options.quality, self.icc.as_deref())?;
         sink.write_all(&bytes)?;
         sink.flush()
     }
@@ -205,7 +219,7 @@ fn to_planes(
     (vec![y, average(&u_full), average(&v_full)], alpha)
 }
 
-fn encode(state: &State, quality: u8) -> Result<Vec<u8>> {
+fn encode(state: &State, quality: u8, icc: Option<&[u8]>) -> Result<Vec<u8>> {
     let (width, height) = (state.descriptor.width, state.descriptor.height);
     let (planes, alpha) = to_planes(
         &state.pixels,
@@ -245,6 +259,7 @@ fn encode(state: &State, quality: u8) -> Result<Vec<u8>> {
         planes.len() == 1,
         &colour,
         alpha.as_ref(),
+        icc,
     ))
 }
 
@@ -285,6 +300,7 @@ fn container(
     mono: bool,
     colour: &CodedStill,
     alpha: Option<&CodedStill>,
+    icc: Option<&[u8]>,
 ) -> Vec<u8> {
     let ftyp = bx(b"ftyp", b"avif\0\0\0\0avifmif1miaf");
     let ispe = {
@@ -305,7 +321,8 @@ fn container(
         p.push(0x80); // full_range_flag
         bx(b"colr", &p)
     };
-    // ipco: 1 ispe, 2 pixi, 3 av1C, 4 colr; alpha adds 5 pixi, 6 av1C, 7 auxC.
+    // ipco: 1 ispe, 2 pixi, 3 av1C, 4 colr; alpha adds 5 pixi, 6 av1C, 7 auxC;
+    // a profile adds its colr last.
     let mut ipco = [
         ispe,
         pixi(if mono { 1 } else { 3 }),
@@ -319,6 +336,15 @@ fn container(
         urn.push(0);
         ipco.extend_from_slice(&[pixi(1), av1c(alpha, true), full(b"auxC", 0, 0, &urn)].concat());
         associations.push((2, vec![1, 5, 0x80 | 6, 7]));
+    }
+    // An ICC profile is a second `colr` on the colour item, next to the
+    // nclx, which still says how to turn the YUV into RGB.
+    if let Some(profile) = icc {
+        ipco.extend_from_slice(&bx(b"colr", &[b"prof".as_slice(), profile].concat()));
+        let index = if alpha.is_some() { 8 } else { 5 };
+        if let Some((_, props)) = associations.first_mut() {
+            props.push(index);
+        }
     }
     let ipma = {
         let mut p = (associations.len() as u32).to_be_bytes().to_vec();

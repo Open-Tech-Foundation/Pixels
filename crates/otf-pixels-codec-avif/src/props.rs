@@ -268,13 +268,32 @@ impl Properties {
             })
     }
 
-    /// The item's colour information, from its `colr`.
+    /// The item's colour information, from its `colr`. An item may carry
+    /// both an `nclx` and an ICC `colr` (libavif writes both when given a
+    /// profile); the `nclx` is preferred, since it is what governs the YUV
+    /// to RGB conversion.
     #[must_use]
     pub fn colour(&self, item_id: u32) -> Option<&Colour> {
+        let colours = || {
+            self.for_item(item_id)
+                .into_iter()
+                .filter_map(|property| match property {
+                    Property::Colour(colour) => Some(colour),
+                    _ => None,
+                })
+        };
+        colours()
+            .find(|colour| matches!(colour, Colour::Nclx { .. }))
+            .or_else(|| colours().next())
+    }
+
+    /// The item's ICC profile, from an ICC `colr`.
+    #[must_use]
+    pub fn icc_profile(&self, item_id: u32) -> Option<&[u8]> {
         self.for_item(item_id)
             .into_iter()
             .find_map(|property| match property {
-                Property::Colour(colour) => Some(colour),
+                Property::Colour(Colour::Icc(profile)) => Some(profile.as_slice()),
                 _ => None,
             })
     }

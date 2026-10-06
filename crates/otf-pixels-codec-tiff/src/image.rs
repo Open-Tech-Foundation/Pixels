@@ -137,6 +137,8 @@ pub struct TiffImage {
     /// The `Orientation` tag; [`Orientation::Normal`] when absent or out of
     /// range, which is metadata declined rather than an image refused.
     pub orientation: Orientation,
+    /// The embedded ICC profile, if the directory carries one.
+    pub icc: Option<Vec<u8>>,
 }
 
 impl TiffImage {
@@ -267,6 +269,10 @@ impl TiffImage {
                 .ok()
                 .and_then(Orientation::from_exif)
                 .unwrap_or_default(),
+            icc: directory
+                .get(tag::ICC_PROFILE)
+                .map(|entry| entry.values.iter().map(|&v| v as u8).collect::<Vec<u8>>())
+                .filter(|profile| !profile.is_empty()),
         })
     }
 
@@ -569,6 +575,7 @@ mod tests {
             color_map: Vec::new(),
             order: ByteOrder::Little,
             orientation: Orientation::Normal,
+            icc: None,
         };
         // Row of four RGB pixels, stored as differences from the left.
         let mut data = vec![
@@ -650,6 +657,7 @@ mod tests {
             color_map: Vec::new(),
             order: ByteOrder::Little,
             orientation: Orientation::Normal,
+            icc: None,
         };
         assert_eq!(image.chunks_across(), 4, "100 / 32 rounds up to 4");
         assert_eq!(image.chunks_down(), 3, "70 / 32 rounds up to 3");
@@ -683,6 +691,7 @@ mod tests {
             color_map: Vec::new(),
             order: ByteOrder::Little,
             orientation: Orientation::Normal,
+            icc: None,
         };
         assert_eq!(image.chunks_across(), 1);
         assert_eq!(image.chunks_down(), 3);

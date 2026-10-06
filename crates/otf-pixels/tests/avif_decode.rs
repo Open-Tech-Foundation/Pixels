@@ -170,7 +170,7 @@ fn an_avif_with_alpha_decodes_to_rgba_with_libavifs_alpha() {
 fn an_avif_using_an_unimplemented_tool_fails_cleanly_through_the_facade() {
     // Opening only reads the container; the refusal comes when pixels are
     // pulled, and it is a catchable Unsupported rather than a wrong image.
-    let image = Image::open(fixture("unsupported/premultiplied.avif")).unwrap();
+    let image = Image::open(fixture("unsupported/film_grain.avif")).unwrap();
     let err = image
         .output(Format::Raw, EncodeOptions::default())
         .bytes()

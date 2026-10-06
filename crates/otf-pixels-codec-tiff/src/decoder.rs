@@ -362,6 +362,10 @@ impl Decoder for TiffDecoder {
         self.image.orientation
     }
 
+    fn icc_profile(&self) -> Option<&[u8]> {
+        self.image.icc.as_deref()
+    }
+
     fn capability(&self) -> DecodeCapability {
         // Only a tiled file can answer an arbitrary region cheaply. Claiming
         // otherwise for a strip file would be a lie the scheduler acts on.

@@ -16,6 +16,8 @@ pub struct WebPEncoder {
     /// Set by `write_header`; its presence means the header was written.
     state: Option<State>,
     options: EncodeOptions,
+    /// The ICC profile to write as `ICCP`, if any.
+    icc: Option<Vec<u8>>,
 }
 
 impl Default for WebPEncoder {
@@ -48,6 +50,7 @@ impl WebPEncoder {
         Self {
             state: None,
             options: *options,
+            icc: None,
         }
     }
 }
@@ -63,6 +66,17 @@ fn check_format(format: PixelFormat) -> Result<()> {
 }
 
 impl Encoder for WebPEncoder {
+    fn set_icc_profile(&mut self, profile: Option<&[u8]>) -> Result<()> {
+        if self.state.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "profile",
+                "the ICC profile must be set before write_header",
+            ));
+        }
+        self.icc = profile.map(<[u8]>::to_vec);
+        Ok(())
+    }
+
     fn write_header(&mut self, desc: &ImageDescriptor, _sink: &mut dyn Sink) -> Result<()> {
         if self.state.is_some() {
             return Err(PixelsError::invalid_argument(
@@ -136,12 +150,16 @@ impl Encoder for WebPEncoder {
             ));
         }
 
-        let bytes = if self.options.lossless {
+        let (body, alpha) = if self.options.lossless {
             encode_lossless(state)
         } else {
             encode_lossy(state, self.options.quality)?
         };
-        sink.write_all(&bytes)?;
+        let (width, height) = (state.descriptor.width, state.descriptor.height);
+        // VP8L carries its own alpha; only a lossy ALPH chunk needs VP8X.
+        let needs_vp8x = alpha && !self.options.lossless;
+        let file = container(width, height, &body, alpha, needs_vp8x, self.icc.as_deref());
+        sink.write_all(&file)?;
         sink.flush()
     }
 }
@@ -166,9 +184,9 @@ fn riff(body: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Lossy WebP: a `VP8 ` frame, and when the image has any transparency, an
-/// extended file with an `ALPH` chunk ahead of it.
-fn encode_lossy(state: &State, quality: u8) -> Result<Vec<u8>> {
+/// The image chunks of a lossy WebP: a `VP8 ` frame, preceded by an `ALPH`
+/// chunk when the image has any transparency; and whether it does.
+fn encode_lossy(state: &State, quality: u8) -> Result<(Vec<u8>, bool)> {
     let (width, height) = (
         state.descriptor.width as usize,
         state.descriptor.height as usize,
@@ -183,18 +201,39 @@ fn encode_lossy(state: &State, quality: u8) -> Result<Vec<u8>> {
     // in fewer bytes and every reader handles it.
     let alpha = alpha.filter(|a| a.iter().any(|&v| v != 255));
     let mut body = Vec::new();
-    match alpha {
-        None => chunk(&mut body, b"VP8 ", &vp8),
-        Some(alpha) => {
-            let mut vp8x = vec![0x10, 0, 0, 0];
-            vp8x.extend_from_slice(&(width as u32 - 1).to_le_bytes()[..3]);
-            vp8x.extend_from_slice(&(height as u32 - 1).to_le_bytes()[..3]);
-            chunk(&mut body, b"VP8X", &vp8x);
-            chunk(&mut body, b"ALPH", &encode_alpha(&alpha, width, height));
-            chunk(&mut body, b"VP8 ", &vp8);
-        }
+    if let Some(alpha) = &alpha {
+        chunk(&mut body, b"ALPH", &encode_alpha(alpha, width, height));
     }
-    Ok(riff(&body))
+    chunk(&mut body, b"VP8 ", &vp8);
+    Ok((body, alpha.is_some()))
+}
+
+/// The whole file: the image chunks alone in a simple file, or behind a
+/// `VP8X` header (and an `ICCP` chunk) when the alpha needs one or there is a
+/// profile.
+fn container(
+    width: u32,
+    height: u32,
+    image: &[u8],
+    alpha: bool,
+    needs_vp8x: bool,
+    icc: Option<&[u8]>,
+) -> Vec<u8> {
+    if !needs_vp8x && icc.is_none() {
+        return riff(image);
+    }
+    // VP8X flags: ICC 0x20, alpha 0x10; then the canvas size less one.
+    let flags = if icc.is_some() { 0x20 } else { 0 } | if alpha { 0x10 } else { 0 };
+    let mut vp8x = vec![flags, 0, 0, 0];
+    vp8x.extend_from_slice(&(width - 1).to_le_bytes()[..3]);
+    vp8x.extend_from_slice(&(height - 1).to_le_bytes()[..3]);
+    let mut body = Vec::new();
+    chunk(&mut body, b"VP8X", &vp8x);
+    if let Some(profile) = icc {
+        chunk(&mut body, b"ICCP", profile);
+    }
+    body.extend_from_slice(image);
+    riff(&body)
 }
 
 /// Interleaved samples as VP8L's ARGB words, grey spread to all three
@@ -215,8 +254,9 @@ fn to_argb(pixels: &[u8], channels: usize) -> Vec<u32> {
         .collect()
 }
 
-/// Lossless WebP: one `VP8L` chunk.
-fn encode_lossless(state: &State) -> Vec<u8> {
+/// The image chunk of a lossless WebP, one `VP8L`, and whether it has
+/// transparency.
+fn encode_lossless(state: &State) -> (Vec<u8>, bool) {
     let (width, height) = (
         state.descriptor.width as usize,
         state.descriptor.height as usize,
@@ -229,7 +269,7 @@ fn encode_lossless(state: &State) -> Vec<u8> {
         b"VP8L",
         &crate::vp8l_encode::encode(&argb, width, height, has_alpha),
     );
-    riff(&body)
+    (body, has_alpha)
 }
 
 /// An `ALPH` chunk payload: no filter, lossless VP8L compression, the alpha

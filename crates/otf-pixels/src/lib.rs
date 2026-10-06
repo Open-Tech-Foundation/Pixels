@@ -133,6 +133,9 @@ impl Default for OpenOptions {
 pub struct Image {
     /// The graph so far, or the first error that occurred while building it.
     inner: std::result::Result<otf_pixels_core::Image, Arc<PixelsError>>,
+    /// The ICC profile the pixels are in, carried to the output; `None` is
+    /// sRGB, as SPEC §Pixel formats assumes.
+    icc: Option<Arc<[u8]>>,
 }
 
 impl Image {
@@ -315,7 +318,8 @@ impl Image {
     ))]
     fn decoded(decoder: Box<dyn Decoder>, format: Format, options: OpenOptions) -> Self {
         let orientation = decoder.orientation();
-        let image = Self::from_decoder(decoder, format);
+        let icc = decoder.icc_profile().map(Vec::from);
+        let image = Self::from_decoder(decoder, format).with_icc_profile(icc);
         if options.auto_orient {
             image.orient(orientation)
         } else {
@@ -338,6 +342,7 @@ impl Image {
     #[must_use]
     pub fn from_producer(producer: Arc<dyn Producer>, format: Format) -> Self {
         Self {
+            icc: None,
             inner: Ok(otf_pixels_core::Image::from_producer(producer, format)),
         }
     }
@@ -495,22 +500,50 @@ impl Image {
     /// Draw `overlay` over this image with an explicit blend mode.
     #[must_use]
     pub fn composite_with(self, overlay: Self, x: i64, y: i64, blend: Blend) -> Self {
+        // The base's profile describes the result; the overlay's pixels are
+        // composited as they are.
+        let icc = self.icc;
         let (base, over) = match (self.inner, overlay.inner) {
             (Ok(base), Ok(over)) => (base, over),
             // The first error wins, matching how a single chain behaves.
-            (Err(error), _) | (Ok(_), Err(error)) => return Self { inner: Err(error) },
+            (Err(error), _) | (Ok(_), Err(error)) => return Self::failed_shared(error),
         };
         let op: Arc<dyn Op> = Arc::new(Composite::at(x, y, blend));
         Self {
             inner: otf_pixels_core::Image::combine(&[base, over], op).map_err(Arc::new),
+            icc,
         }
     }
 
     /// A pipeline carrying an error, surfaced at the terminal.
     fn failed(error: PixelsError) -> Self {
+        Self::failed_shared(Arc::new(error))
+    }
+
+    /// [`Image::failed`] with an error already shared.
+    const fn failed_shared(error: Arc<PixelsError>) -> Self {
         Self {
-            inner: Err(Arc::new(error)),
+            inner: Err(error),
+            icc: None,
         }
+    }
+
+    /// The ICC profile this image's pixels are in, if it is not sRGB.
+    ///
+    /// A file's embedded profile, unless the pixels were converted to sRGB
+    /// on open (see [`OpenOptions`]). It is written into the output where
+    /// the format has a place for one, so colours survive the round trip.
+    #[must_use]
+    pub fn icc_profile(&self) -> Option<&[u8]> {
+        self.icc.as_deref()
+    }
+
+    /// Declare the ICC profile the pixels are in, or with `None` drop it and
+    /// call them sRGB. Only the label changes, never a pixel.
+    #[must_use]
+    pub fn with_icc_profile(mut self, profile: Option<Vec<u8>>) -> Self {
+        self.icc = profile.map(Arc::from);
+        self
     }
 
     /// Chain an arbitrary op onto this pipeline.
@@ -520,6 +553,7 @@ impl Image {
     #[must_use]
     pub fn apply(self, op: Arc<dyn Op>) -> Self {
         Self {
+            icc: self.icc,
             inner: match self.inner {
                 Ok(image) => image.apply(op).map_err(Arc::new),
                 // An earlier failure short-circuits: later ops never run.
@@ -655,6 +689,7 @@ impl Output {
         let (image, reduction) = otf_pixels_core::shrink_on_load(self.image.graph()?)?;
         let descriptor = image.descriptor();
         let mut encoder = encoder_for(self.format, self.options)?;
+        encoder.set_icc_profile(self.image.icc.as_deref())?;
         encoder.write_header(&descriptor, &mut sink)?;
 
         // The scheduler delivers tiles; an encoder wants whole rows in order.
@@ -692,6 +727,7 @@ impl Output {
         let (image, _) = otf_pixels_core::shrink_on_load(self.image.graph()?)?;
         let descriptor = image.descriptor();
         let mut encoder = encoder_for(self.format, self.options)?;
+        encoder.set_icc_profile(self.image.icc.as_deref())?;
         let mut sink = Vec::with_capacity(descriptor.byte_len().unwrap_or_default());
         encoder.write_header(&descriptor, &mut sink)?;
         otf_pixels_core::evaluate_rows(&image, |_, row| encoder.write_row(row, &mut sink))?;

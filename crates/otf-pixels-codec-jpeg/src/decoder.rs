@@ -17,7 +17,7 @@
 
 use crate::entropy::Reader;
 use crate::format::{
-    AdobeTransform, Frame, Scan, ZIGZAG, adobe_transform, exif_orientation, marker,
+    AdobeTransform, Frame, IccChunks, Scan, ZIGZAG, adobe_transform, exif_orientation, marker,
 };
 use crate::huffman::HuffmanTable;
 use crate::idct::{self, Scale};
@@ -73,6 +73,8 @@ enum Parsed<S: Source> {
         /// Carried across the handover so a progressive photograph reports its
         /// orientation like a baseline one does.
         orientation: Option<Orientation>,
+        /// Carried likewise.
+        icc: Option<Vec<u8>>,
     },
 }
 
@@ -85,6 +87,8 @@ enum Parsed<S: Source> {
 #[derive(Debug)]
 pub struct JpegDecoder<S: Source> {
     inner: Inner<S>,
+    /// The ICC profile from the `APP2` segments before the scan.
+    icc: Option<Vec<u8>>,
 }
 
 /// Which decoder is actually running.
@@ -132,21 +136,28 @@ impl<S: Source> JpegDecoder<S> {
     ///
     /// As [`JpegDecoder::new`].
     pub fn with_scale(source: S, limits: Limits, scale: Scale) -> Result<Self> {
-        let inner = match Baseline::with_scale(source, limits, scale)? {
-            Parsed::Baseline(baseline) => Inner::Baseline(baseline),
+        let (inner, icc) = match Baseline::with_scale(source, limits, scale)? {
+            Parsed::Baseline(mut baseline) => {
+                let icc = baseline.icc.take();
+                (Inner::Baseline(baseline), icc)
+            }
             #[cfg(feature = "progressive")]
             Parsed::Progressive {
                 replay,
                 source,
                 orientation,
-            } => Inner::Progressive(crate::progressive::Progressive::new(
-                replay,
-                source,
-                limits,
-                orientation,
-            )?),
+                icc,
+            } => (
+                Inner::Progressive(crate::progressive::Progressive::new(
+                    replay,
+                    source,
+                    limits,
+                    orientation,
+                )?),
+                icc,
+            ),
         };
-        Ok(Self { inner })
+        Ok(Self { inner, icc })
     }
 
     /// The resolution this decoder produces, as eighths of full size.
@@ -180,6 +191,11 @@ impl<S: Source + std::fmt::Debug> Decoder for JpegDecoder<S> {
             #[cfg(feature = "progressive")]
             Inner::Progressive(progressive) => progressive.descriptor(),
         }
+    }
+
+    /// The ICC profile, joined from its `APP2` segments.
+    fn icc_profile(&self) -> Option<&[u8]> {
+        self.icc.as_deref()
     }
 
     /// The EXIF orientation, from the first EXIF `APP1` segment.
@@ -247,6 +263,8 @@ struct Baseline<S: Source> {
     restarts_left: u32,
     /// The EXIF orientation tag, if the file carries one.
     orientation: Option<Orientation>,
+    /// The ICC profile, until [`JpegDecoder`] takes it.
+    icc: Option<Vec<u8>>,
     planes: Vec<Plane>,
     /// Per-component DC predictor, reset at every restart.
     predictors: Vec<i32>,
@@ -320,6 +338,7 @@ impl<S: Source> Baseline<S> {
         let mut ac_tables: [Option<HuffmanTable>; 4] = [None, None, None, None];
         let mut restart_interval = 0_u16;
         let mut orientation = None;
+        let mut icc = IccChunks::default();
         let mut adobe = None;
         let mut frame: Option<Frame> = None;
 
@@ -364,6 +383,7 @@ impl<S: Source> Baseline<S> {
                             replay,
                             source,
                             orientation,
+                            icc: icc.assemble(),
                         });
                     }
                     #[cfg(not(feature = "progressive"))]
@@ -401,6 +421,7 @@ impl<S: Source> Baseline<S> {
                     // The first EXIF block wins; later ones are thumbnails.
                     orientation = orientation.or_else(|| exif_orientation(&payload));
                 }
+                marker::APP2 => icc.push(&reader.read_segment()?),
                 marker::APP14 => {
                     let payload = reader.read_segment()?;
                     adobe = adobe_transform(&payload).or(adobe);
@@ -525,6 +546,7 @@ impl<S: Source> Baseline<S> {
             restart_interval,
             restarts_left: u32::from(restart_interval),
             orientation,
+            icc: icc.assemble(),
             limits,
             planes: Vec::new(),
             band: Vec::new(),

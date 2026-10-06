@@ -57,6 +57,8 @@ pub struct Container<'a> {
     pub frame: Frame,
     /// The first `EXIF` chunk's payload.
     pub exif: Option<&'a [u8]>,
+    /// The `ICCP` chunk's payload: the ICC profile.
+    pub icc: Option<&'a [u8]>,
 }
 
 /// One chunk: its FourCC and payload.
@@ -211,6 +213,7 @@ fn simple(width: u32, height: u32, has_alpha: bool, bitstream: Bitstream<'_>) ->
             height,
         },
         exif: None,
+        icc: None,
     }
 }
 
@@ -234,10 +237,12 @@ fn extended<'a>(
     let mut image: Option<(Bitstream<'a>, Frame)> = None;
     let mut alpha: Option<&'a [u8]> = None;
     let mut exif: Option<&'a [u8]> = None;
+    let mut icc: Option<&'a [u8]> = None;
     for chunk in chunks {
         let chunk = chunk?;
         match &chunk.kind {
             b"EXIF" => exif = exif.or(Some(chunk.payload)),
+            b"ICCP" => icc = icc.or(Some(chunk.payload)),
             _ if image.is_some() => {}
             b"ALPH" if !animated => alpha = alpha.or(Some(chunk.payload)),
             b"VP8 " if !animated => {
@@ -276,6 +281,7 @@ fn extended<'a>(
         bitstream,
         frame,
         exif,
+        icc,
     })
 }
 

@@ -149,6 +149,14 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- ICC profiles are preserved. Every decoder that can find one reports it
+  (`Decoder::icc_profile`): PNG `iCCP`, JPEG `APP2` (joined across
+  segments, baseline and progressive), WebP `ICCP`, TIFF tag 34675 and AVIF
+  `colr`. The facade carries it through the pipeline (`Image::icc_profile`,
+  `Image::with_icc_profile`) and hands it to the encoder
+  (`Encoder::set_icc_profile`), which writes it wherever the output format
+  has a place for one. Pillow and libavif read every written profile back
+  intact, including one large enough to span several JPEG segments.
 - AVIF decoding of YCgCo colour (matrix coefficients 8) and of
   premultiplied alpha (a `prem` reference), both previously refused as
   `Unsupported`. Premultiplied colour is returned straight, as the API

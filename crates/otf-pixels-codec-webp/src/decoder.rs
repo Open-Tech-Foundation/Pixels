@@ -27,6 +27,8 @@ pub struct WebPDecoder {
     row: u32,
     /// From the `EXIF` chunk, if there is one.
     orientation: Orientation,
+    /// The `ICCP` chunk, if there is one.
+    icc: Option<Vec<u8>>,
 }
 
 impl WebPDecoder {
@@ -112,6 +114,7 @@ impl WebPDecoder {
             pixels,
             row: 0,
             orientation,
+            icc: container.icc.map(<[u8]>::to_vec),
         })
     }
 }
@@ -167,6 +170,10 @@ impl Decoder for WebPDecoder {
 
     fn orientation(&self) -> Orientation {
         self.orientation
+    }
+
+    fn icc_profile(&self) -> Option<&[u8]> {
+        self.icc.as_deref()
     }
 
     fn capability(&self) -> DecodeCapability {
