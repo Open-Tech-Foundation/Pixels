@@ -22,10 +22,7 @@ use otf_pixels_codec_avif::AvifDecoder;
 use otf_pixels_core::{Decoder, ErrorCode, Limits};
 
 /// `(fixture, fragment the refusal must mention)`.
-const CASES: &[(&str, &str)] = &[
-    ("premultiplied", "premultiplied alpha"),
-    ("ycgco", "colour matrix 8"),
-];
+const CASES: &[(&str, &str)] = &[("film_grain", "film grain")];
 
 fn decode(bytes: &[u8]) -> otf_pixels_core::Result<()> {
     let mut decoder = AvifDecoder::new(bytes, Limits::default())?;

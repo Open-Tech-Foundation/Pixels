@@ -86,7 +86,8 @@ fn decode(bytes: &[u8]) -> otf_pixels_core::Result<(Vec<u8>, otf_pixels_core::Im
 /// on, deblocking/CDEF off); `restore_full` (all three in-loop filters on);
 /// `superres` / `superres_full` (coded at a reduced width and upscaled, §7.16,
 /// with the in-loop filters off / on); and `photo` — real YUV (4:2:0, 4:2:2,
-/// BT.601/709/2020, full and studio range) converted to RGB, where the
+/// BT.601/709/2020, YCgCo, full and studio range, straight and premultiplied
+/// alpha) converted to RGB, where the
 /// tolerance is the gap to libavif's libyuv-based conversion (see the
 /// regeneration script) and the decode underneath is pinned exactly by
 /// `tests/planes.rs`. Files that must be refused live in `tests/unsupported.rs`,
@@ -125,20 +126,45 @@ fn reference_fixtures_decode_exactly() {
             reference.name
         );
         assert_eq!(ours.len(), theirs.len(), "{}: raster size", reference.name);
-        let worst = if reference.bits == 16 {
-            ours.chunks_exact(2)
-                .zip(theirs.chunks_exact(2))
-                .map(|(a, b)| {
-                    u16::from_ne_bytes([a[0], a[1]]).abs_diff(u16::from_le_bytes([b[0], b[1]]))
-                })
-                .max()
-        } else {
-            ours.iter()
-                .zip(&theirs)
-                .map(|(a, b)| u16::from(a.abs_diff(*b)))
-                .max()
-        }
-        .unwrap_or(0);
+        let samples = |raster: &[u8], native: bool| -> Vec<u32> {
+            if reference.bits == 16 {
+                raster
+                    .chunks_exact(2)
+                    .map(|b| {
+                        u32::from(if native {
+                            u16::from_ne_bytes([b[0], b[1]])
+                        } else {
+                            u16::from_le_bytes([b[0], b[1]])
+                        })
+                    })
+                    .collect()
+            } else {
+                raster.iter().map(|&v| u32::from(v)).collect()
+            }
+        };
+        let (ours, theirs) = (samples(&ours, true), samples(&theirs, false));
+        // Premultiplied colour is compared as it was coded, premultiplied: un-
+        // premultiplying divides by alpha, so at alpha 1 a one-step coding or
+        // rounding difference becomes 255 steps in both decoders alike.
+        let max = (1_u32 << reference.bits) - 1;
+        let premultiplied = reference.name.contains("premultiplied");
+        let channels = reference.channels;
+        let worst = ours
+            .iter()
+            .zip(&theirs)
+            .enumerate()
+            .map(|(i, (&a, &b))| {
+                let diff = a.abs_diff(b);
+                let is_colour = (i % channels) + 1 < channels;
+                if premultiplied && is_colour {
+                    let alpha = theirs[i - i % channels + channels - 1];
+                    (diff * alpha).div_ceil(max)
+                } else {
+                    diff
+                }
+            })
+            .max()
+            .unwrap_or(0) as u16;
         assert!(
             worst <= reference.tolerance,
             "{}: differs from libavif's by up to {worst}, tolerance {}",

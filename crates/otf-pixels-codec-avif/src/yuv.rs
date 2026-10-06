@@ -57,7 +57,7 @@ impl Depths {
         }
     }
 
-    fn output_max(self) -> i64 {
+    pub(crate) fn output_max(self) -> i64 {
         (1_i64 << self.output) - 1
     }
 }
@@ -72,14 +72,9 @@ pub(crate) struct YuvMatrix {
     y_offset: i64,
     /// The chroma zero point, `1 << (depth - 1)`.
     c_mid: i64,
-    /// V's contribution to R.
-    v_to_r: i64,
-    /// U's (negated) contribution to G.
-    u_to_g: i64,
-    /// V's (negated) contribution to G.
-    v_to_g: i64,
-    /// U's contribution to B.
-    u_to_b: i64,
+    /// Each channel's `(U, V)` weights: R, G, B. A `Kr`/`Kb` matrix leaves
+    /// R without U and B without V; YCgCo uses all six.
+    weights: [(i64, i64); 3],
 }
 
 impl YuvMatrix {
@@ -88,21 +83,24 @@ impl YuvMatrix {
     /// # Errors
     ///
     /// [`PixelsError::Unsupported`] for a matrix that is not a `Kr`/`Kb`
-    /// weighting this module implements: identity (0) is not a YUV matrix and
-    /// has its own path (`identity_to_rgb`), and YCgCo, constant-luminance and
-    /// ICtCp matrices are not implemented.
+    /// weighting or YCgCo, which this module implements: identity (0) is not a YUV matrix and
+    /// has its own path (`identity_to_rgb`), and the reversible YCgCo-R,
+    /// constant-luminance and ICtCp matrices are not implemented.
     pub(crate) fn new(matrix_coefficients: u16, full_range: bool, depths: Depths) -> Result<Self> {
         let (kr, kb) = match matrix_coefficients {
             1 => (0.2126, 0.0722),
             // 2 is "unspecified"; like libavif, read it as BT.601.
             2 | 5 | 6 => (0.299, 0.114),
             9 => (0.2627, 0.0593),
+            // YCgCo (H.273 equations 47-50): U is Cg and V is Co.
+            8 => (0.0, 0.0),
             other => {
                 return Err(PixelsError::unsupported(format!(
                     "avif: YUV to RGB conversion for colour matrix {other} is not implemented"
                 )));
             }
         };
+        let ycgco = matrix_coefficients == 8;
         let kg = 1.0 - kr - kb;
         let step = f64::from(1_u32 << (depths.input - 8));
         let input_max = f64::from((1_u32 << depths.input) - 1);
@@ -120,10 +118,20 @@ impl YuvMatrix {
             y_scale: fixed(y_scale),
             y_offset,
             c_mid: 1 << (depths.input - 1),
-            v_to_r: fixed(2.0 * (1.0 - kr) * c_scale),
-            u_to_g: fixed(2.0 * kb * (1.0 - kb) / kg * c_scale),
-            v_to_g: fixed(2.0 * kr * (1.0 - kr) / kg * c_scale),
-            u_to_b: fixed(2.0 * (1.0 - kb) * c_scale),
+            weights: if ycgco {
+                // R = Y - Cg + Co, G = Y + Cg, B = Y - Cg - Co.
+                let c = fixed(c_scale);
+                [(-c, c), (c, 0), (-c, -c)]
+            } else {
+                [
+                    (0, fixed(2.0 * (1.0 - kr) * c_scale)),
+                    (
+                        -fixed(2.0 * kb * (1.0 - kb) / kg * c_scale),
+                        -fixed(2.0 * kr * (1.0 - kr) / kg * c_scale),
+                    ),
+                    (fixed(2.0 * (1.0 - kb) * c_scale), 0),
+                ]
+            },
         })
     }
 
@@ -139,11 +147,7 @@ impl YuvMatrix {
         // `>>` floors, so adding half first rounds to nearest (half up) for
         // negative sums too.
         let channel = |sum: i64| ((sum + HALF) >> SHIFT).clamp(0, max) as u16;
-        [
-            channel(luma + self.v_to_r * v),
-            channel(luma - self.u_to_g * u - self.v_to_g * v),
-            channel(luma + self.u_to_b * u),
-        ]
+        self.weights.map(|(wu, wv)| channel(luma + wu * u + wv * v))
     }
 }
 
@@ -345,9 +349,13 @@ mod tests {
                 (v - mid) / (224.0 * step),
             )
         };
-        let r = y + 2.0 * (1.0 - kr) * v;
-        let b = y + 2.0 * (1.0 - kb) * u;
-        let g = (y - kr * r - kb * b) / (1.0 - kr - kb);
+        let (r, g, b) = if matrix == 8 {
+            (y - u + v, y + u, y - u - v)
+        } else {
+            let r = y + 2.0 * (1.0 - kr) * v;
+            let b = y + 2.0 * (1.0 - kb) * u;
+            (r, (y - kr * r - kb * b) / (1.0 - kr - kb), b)
+        };
         let out = depths.output_max() as f64;
         [r, g, b].map(|c| (c * out).round().clamp(0.0, out) as u16)
     }
@@ -361,7 +369,7 @@ mod tests {
         // quantisation can tip it.
         for depths in DEPTHS {
             let max = (1_u16 << depths.input) - 1;
-            for matrix in [1, 6, 9] {
+            for matrix in [1, 6, 8, 9] {
                 for full_range in [true, false] {
                     let m = YuvMatrix::new(matrix, full_range, depths).unwrap();
                     let mut off_by_one = 0;
@@ -400,7 +408,7 @@ mod tests {
             let step = 1_u16 << (depths.input - 8);
             let (max_in, max_out) = ((1_u16 << depths.input) - 1, depths.output_max() as u16);
             let mid = (1_i64 << (depths.input - 1)) << CHROMA_BITS;
-            for matrix in [1, 6, 9] {
+            for matrix in [1, 6, 8, 9] {
                 let full = YuvMatrix::new(matrix, true, depths).unwrap();
                 assert_eq!(full.rgb(0, mid, mid), [0; 3]);
                 assert_eq!(full.rgb(max_in, mid, mid), [max_out; 3]);
@@ -418,7 +426,7 @@ mod tests {
 
     #[test]
     fn unimplemented_matrices_are_refused() {
-        for matrix in [0, 3, 4, 7, 8, 10, 12, 13, 14] {
+        for matrix in [0, 3, 4, 7, 10, 12, 13, 14, 16] {
             assert!(
                 YuvMatrix::new(matrix, true, DEPTHS[0]).is_err(),
                 "matrix {matrix}"

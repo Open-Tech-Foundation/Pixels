@@ -38,6 +38,11 @@ photo_alpha_10bit 96 64 4 1 16
 photo_alpha_420 96 64 4 2 8
 photo_default 160 120 3 1 8
 photo_odd_420 37 29 3 3 8
+photo_premultiplied 96 64 4 3 8
+photo_premultiplied_10bit 96 64 4 2 16
+photo_premultiplied_420 96 64 4 3 8
+photo_ycgco 96 64 3 1 8
+photo_ycgco_420 96 64 3 1 8
 textured_nofilter 128 128 3 0 8
 textured_odd_restore 100 70 3 0 8
 textured_odd_superres 101 37 3 0 8

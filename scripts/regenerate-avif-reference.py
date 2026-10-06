@@ -201,6 +201,19 @@ FIXTURES = {
     "grey_studio": (mixed(96, 64, 3), False, 0, "", 0),
     "grey_10bit": (mixed(96, 64, 3), False, 0, "", 1),
     "grey_alpha": (with_alpha(mixed(96, 64, 3)), False, 0, "", 0),
+    # YCgCo (matrix 8), which libavif converts in floating point, not libyuv,
+    # and only at full range (avifenc refuses studio-range YCgCo).
+    "photo_ycgco": (mixed(96, 64, 3), False, 0, "", 1),
+    "photo_ycgco_420": (mixed(96, 64, 3), False, 0, "", 1),
+    # Premultiplied alpha (a `prem` reference): the colour comes back
+    # straight. Where alpha is small, un-premultiplying amplifies the colour's
+    # coding error and the two decoders' rounding alike, so the colour is compared
+    # premultiplied, as coded (see tests/reference.rs). At 8 bits that is
+    # libyuv's usual gap plus one step of un-premultiply rounding.
+    "photo_premultiplied": (with_alpha(mixed(96, 64, 3)), False, 0, "", 3),
+    "photo_premultiplied_420": (with_alpha(mixed(96, 64, 3)), False, 0, "", 3),
+    # At 16 bits, the one-step float gap plus one step of rounding.
+    "photo_premultiplied_10bit": (with_alpha(mixed(96, 64, 3)), False, 0, "", 2),
 }
 
 # 8-bit fixtures whose reference is taken from avifdec's 16-bit output and
@@ -219,6 +232,9 @@ CHANNELS = {
     "grey_studio": 1,
     "grey_10bit": 1,
     "grey_alpha": 2,
+    "photo_premultiplied": 4,
+    "photo_premultiplied_420": 4,
+    "photo_premultiplied_10bit": 4,
 }
 
 # The fixtures whose references are 16 bits per sample.
@@ -229,12 +245,18 @@ WIDE = {
     "photo_444_10bit_identity",
     "photo_alpha_10bit",
     "grey_10bit",
+    "photo_premultiplied_10bit",
 }
 
 # avifenc arguments for the "photo" fixtures, used verbatim. Without --cicp
 # avifenc writes BT.601 (matrix 6) at full range.
 PHOTO_ARGS = {
     "photo_default": [],
+    "photo_ycgco": ["-y", "444", "-q", "60", "--cicp", "1/13/8"],
+    "photo_ycgco_420": ["-y", "420", "-q", "60", "--cicp", "1/13/8"],
+    "photo_premultiplied": ["-y", "444", "-q", "60", "--premultiply"],
+    "photo_premultiplied_420": ["-y", "420", "-q", "60", "--premultiply"],
+    "photo_premultiplied_10bit": ["-y", "444", "-d", "10", "-q", "60", "--premultiply"],
     "photo_420": ["-y", "420", "-q", "60"],
     "photo_odd_420": ["-y", "420", "-q", "60"],
     "photo_422": ["-y", "422", "-q", "60"],
@@ -872,8 +894,9 @@ def write_planes(fixtures: str) -> None:
 # the identity matrix unless the tool under test is the colour format itself.
 IDENTITY_444 = ["-y", "444", "-r", "full", "--cicp", "1/13/0", "-q", "60"]
 UNSUPPORTED = {
-    "premultiplied": (with_alpha(textured(32, 32)), ["-q", "60", "--premultiply"]),
-    "ycgco": (textured(32, 32), ["-y", "444", "-q", "60", "--cicp", "1/13/8"]),
+    # libaom's film-grain test vector 1: grain synthesis parameters in the
+    # frame header, applied after every in-loop filter.
+    "film_grain": (textured(32, 32), ["-y", "444", "-q", "60", "-a", "film-grain-test=1"]),
 }
 
 

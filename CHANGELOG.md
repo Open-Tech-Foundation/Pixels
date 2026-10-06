@@ -149,6 +149,11 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- AVIF decoding of YCgCo colour (matrix coefficients 8) and of
+  premultiplied alpha (a `prem` reference), both previously refused as
+  `Unsupported`. Premultiplied colour is returned straight, as the API
+  carries it, rounded as libavif rounds it. Both are checked against
+  libavif's output.
 - AVIF encoding: `Format::Avif` output through `AvifEncoder`, at
   `EncodeOptions::quality`. Colour is coded as 8-bit 4:2:0 BT.601 full-range
   YUV (monochrome for grey input), and transparency as an auxiliary alpha

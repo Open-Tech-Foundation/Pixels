@@ -33,7 +33,9 @@ implementation detail and may change without notice.
   Still images only — an AVIF still is an AV1 **key frame**, so inter-coded
   content is out of scope. Image *sequences* (the `avis` brand) are animation
   and report `Unsupported` in v1. 8/10/12-bit and 4:2:0/4:2:2/4:4:4/monochrome
-  decode into `Rgb8`/`Rgb16` (plus alpha via an auxiliary item); grid-derived
+  decode into `Rgb8`/`Rgb16` (plus alpha via an auxiliary item, un-premultiplied
+  when a `prem` reference marks it premultiplied), through the BT.601/709/2020
+  matrices or YCgCo at either range; grid-derived
   images give region random access, the payoff owning the container buys.
   This row is the v1 target; M6.5 is in progress (ROADMAP), and until it
   lands a file using a part not yet implemented is refused as `Unsupported`,

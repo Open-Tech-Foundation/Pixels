@@ -9,13 +9,14 @@
 //!
 //! The AV1 reconstruction covers the intra still, in any tiling, in 4:4:4, 4:2:2
 //! and 4:2:0 at 8, 10 and 12 bits, and the raster conversion handles the
-//! identity matrix and the BT.601/709/2020 YUV matrices at full and studio
+//! identity matrix, the BT.601/709/2020 YUV matrices and YCgCo at full and studio
 //! range (`yuv.rs`), to `Rgb8` or — for 10/12-bit — full-range `Rgb16`.
-//! Monochrome pictures decode to grey, and a straight (not premultiplied)
-//! alpha auxiliary item — a second AV1 image — becomes the alpha channel.
+//! Monochrome pictures decode to grey, and an alpha auxiliary item — a second
+//! AV1 image — becomes the alpha channel, un-premultiplying the colour when a
+//! `prem` reference says it was premultiplied.
 //! Every AV1 intra coding tool an encoder uses for stills is decoded —
 //! segmentation, delta-q/delta-lf, quantizer matrices, any tiling. Anything
-//! outside that (other matrices, premultiplied alpha, intra block copy, grids,
+//! outside that (other matrices, intra block copy, grids,
 //! film grain) is reported as [`PixelsError::Unsupported`] rather than decoded
 //! wrong.
 
@@ -333,9 +334,16 @@ fn decode_raster(
             3,
         )
     };
+    let mut colour = colour;
     let alpha = match (info.has_alpha, alpha) {
         (false, _) => None,
-        (true, Some(item)) => Some(decode_alpha(item, layout, depths)?),
+        (true, Some(item)) => {
+            let samples = decode_alpha(item, layout, depths)?;
+            if item.premultiplied {
+                unpremultiply(&mut colour, channels, &samples, depths.output_max());
+            }
+            Some(samples)
+        }
         // The container declares alpha but it could not be located (a grid's
         // alpha, say); the descriptor promises it, so this cannot continue.
         (true, None) => {
@@ -379,13 +387,6 @@ fn colour_to_rgb(
 /// its image's luma — any chroma it codes is ignored — expanded to full range
 /// if the item was coded at studio range.
 fn decode_alpha(item: &AlphaItem, layout: Layout, colour_depths: Depths) -> Result<Vec<u16>> {
-    if item.premultiplied {
-        // Samples at the API boundary are straight alpha (SPEC §Pixel
-        // formats); un-premultiplying is not implemented.
-        return Err(PixelsError::unsupported(
-            "avif: premultiplied alpha is not implemented yet",
-        ));
-    }
     let (frame, sequence) = decode_frame(&item.config_obus, &item.frame_data)?;
     let luma = frame
         .planes
@@ -406,6 +407,27 @@ fn decode_alpha(item: &AlphaItem, layout: Layout, colour_depths: Depths) -> Resu
         depths,
         sequence.color.color_range,
     ))
+}
+
+/// Turn colour premultiplied by `alpha` (a `prem` reference) back into the
+/// straight colour the API carries (SPEC §Pixel formats), as libavif does:
+/// each sample scaled by `max / alpha`, rounded and capped at `max`, and
+/// fully transparent pixels black. Precision lost to premultiplication at
+/// low alpha stays lost.
+fn unpremultiply(colour: &mut [u16], channels: usize, alpha: &[u16], max: i64) {
+    for (px, &a) in colour.chunks_exact_mut(channels.max(1)).zip(alpha) {
+        let a = i64::from(a);
+        if a >= max {
+            continue;
+        }
+        for sample in px {
+            *sample = if a == 0 {
+                0
+            } else {
+                ((i64::from(*sample) * max * 2 + a) / (2 * a)).min(max) as u16
+            };
+        }
+    }
 }
 
 /// Interleave colour samples (`channels` per pixel: 1 grey or 3 RGB) and
@@ -593,6 +615,23 @@ impl Codec for AvifCodec {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unpremultiplying_restores_straight_colour() {
+        // RGB per pixel: opaque (untouched), half (doubled, rounded, capped),
+        // transparent (black), and a 16-bit sample.
+        let mut colour = vec![10, 20, 30, 50, 64, 200, 9, 9, 9];
+        unpremultiply(&mut colour, 3, &[255, 128, 0], 255);
+        assert_eq!(colour, vec![10, 20, 30, 100, 128, 255, 0, 0, 0]);
+        let mut wide = vec![1000, 30000, 65535];
+        unpremultiply(&mut wide, 3, &[32768], 65535);
+        // 30000 * 65535 / 32768 = 59999.08.
+        assert_eq!(wide, vec![2000, 59999, 65535]);
+        // Grey with alpha: one colour channel.
+        let mut grey = vec![60, 255];
+        unpremultiply(&mut grey, 1, &[120, 255], 255);
+        assert_eq!(grey, vec![128, 255]);
+    }
     use otf_pixels_core::ErrorCode;
 
     fn boxed(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
