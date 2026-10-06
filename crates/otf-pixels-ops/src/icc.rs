@@ -179,6 +179,7 @@ fn srgb_colorants() -> Matrix {
 
 /// Why a profile is not converted.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Unconvertible {
     /// Not an ICC profile, or a damaged one.
     Malformed(&'static str),
@@ -189,6 +190,7 @@ pub enum Unconvertible {
 
 /// What [`ToSrgb::from_profile`] makes of a profile.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Conversion {
     /// The pixels need this op to become sRGB.
     Convert(ToSrgb),

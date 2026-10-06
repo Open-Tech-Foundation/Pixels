@@ -15,7 +15,10 @@
 use otf_pixels::{EncodeOptions, ErrorCode, Format, Image, Limits, OpenOptions};
 
 fn codec_fixture(codec: &str, name: &str) -> String {
-    format!("{}/../otf-pixels-codec-{codec}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
+    format!(
+        "{}/../otf-pixels-codec-{codec}/tests/fixtures/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    )
 }
 
 #[test]
@@ -28,7 +31,10 @@ fn an_animated_gif_reports_its_frames_and_processes_the_first() {
     // The pipeline runs on the first frame; the report survives the ops.
     let resized = image.resize(8, 8);
     assert_eq!(resized.animation(), Some(&animation));
-    let png = resized.output(Format::Png, EncodeOptions::default()).bytes().unwrap();
+    let png = resized
+        .output(Format::Png, EncodeOptions::default())
+        .bytes()
+        .unwrap();
     let back = Image::from_stream(std::io::Cursor::new(png)).unwrap();
     assert_eq!(back.metadata().unwrap().width, 8);
     // What was written is a still.
@@ -54,7 +60,10 @@ fn stills_report_no_animation() {
 #[test]
 fn asking_for_every_frame_is_refused_until_frames_are_supported() {
     let animated = OpenOptions::default().with_animated(true);
-    for (codec, name) in [("gif", "animation.gif"), ("webp", "animated/anim_timing.webp")] {
+    for (codec, name) in [
+        ("gif", "animation.gif"),
+        ("webp", "animated/anim_timing.webp"),
+    ] {
         let error = Image::open_with(codec_fixture(codec, name), animated).unwrap_err();
         assert_eq!(error.code(), ErrorCode::Unsupported, "{name}");
         assert!(error.to_string().contains("animated"), "{error}");

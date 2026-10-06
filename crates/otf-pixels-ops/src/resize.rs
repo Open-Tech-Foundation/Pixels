@@ -22,24 +22,37 @@
 use std::sync::OnceLock;
 
 use otf_pixels_core::{
-    AccessPattern, ImageDescriptor, Op, PixelsError, Region, Result, SampleKind, Tile, TileMut,
+    AccessPattern, ChannelLayout, ImageDescriptor, Op, PixelFormat, PixelsError, Region, Result,
+    SampleKind, Tile, TileBuf, TileMut,
 };
 
 use crate::filter::{Filter, Weights};
 use crate::resample::{column_f32, column_u8, column_u16, row_f32, row_u8, row_u16};
 
-/// How a resize reconciles the requested size with the source aspect ratio.
+/// How a resize reconciles the requested box with the source aspect ratio,
+/// with sharp's meanings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum Fit {
-    /// Stretch to exactly the requested size, ignoring aspect ratio.
+    /// Stretch to exactly the box, ignoring aspect ratio.
     #[default]
     Fill,
-    /// Scale down until the image fits inside the box, preserving aspect.
+    /// Preserve aspect, scaled so the image fits inside the box; the output
+    /// is the scaled image, at most the box.
     Inside,
+    /// Preserve aspect, scaled so the image covers the box; the output is
+    /// the scaled image, at least the box.
+    Outside,
+    /// Preserve aspect and fill the box exactly: scale to cover it, then
+    /// crop the overflow, centred.
+    Cover,
+    /// Preserve aspect and fill the box exactly: scale to fit inside it,
+    /// then pad the rest with [`ResizeOptions::background`], centred.
+    Contain,
 }
 
 /// Options for [`Resize`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct ResizeOptions {
     /// The resampling filter. Defaults to [`Filter::Lanczos3`].
@@ -48,6 +61,21 @@ pub struct ResizeOptions {
     pub fit: Fit,
     /// Never scale *up*: an image already smaller than the box is left alone.
     pub without_enlargement: bool,
+    /// The RGBA colour [`Fit::Contain`] pads with: opaque black by default,
+    /// as in sharp. Grey formats take its luma; formats without alpha
+    /// ignore its alpha.
+    pub background: [u8; 4],
+}
+
+impl Default for ResizeOptions {
+    fn default() -> Self {
+        Self {
+            filter: Filter::default(),
+            fit: Fit::default(),
+            without_enlargement: false,
+            background: [0, 0, 0, 255],
+        }
+    }
 }
 
 impl ResizeOptions {
@@ -62,6 +90,13 @@ impl ResizeOptions {
     #[must_use]
     pub const fn with_fit(mut self, fit: Fit) -> Self {
         self.fit = fit;
+        self
+    }
+
+    /// Options with an explicit padding colour for [`Fit::Contain`].
+    #[must_use]
+    pub const fn with_background(mut self, rgba: [u8; 4]) -> Self {
+        self.background = rgba;
         self
     }
 
@@ -83,8 +118,20 @@ impl ResizeOptions {
 #[derive(Debug)]
 struct Binding {
     input: ImageDescriptor,
+    /// Tables for the visible part of the scaled image only.
     horizontal: Weights,
     vertical: Weights,
+    layout: Layout,
+}
+
+/// Where the scaled image lands in the output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Layout {
+    /// The whole output.
+    output: (u32, u32),
+    /// The image's part of it, and where that part sits: everything outside
+    /// is padding ([`Fit::Contain`]).
+    placed: Region,
 }
 
 /// Resample an image to a new size.
@@ -153,25 +200,66 @@ impl Resize {
     /// and the answer depends on the input the op is eventually chained onto.
     #[must_use]
     pub fn target(&self, input: &ImageDescriptor) -> (u32, u32) {
+        self.layout(input).1.output
+    }
+
+    /// The scaled size, the crop window within it, and the output layout.
+    fn layout(&self, input: &ImageDescriptor) -> ((u32, u32), Layout, (u32, u32)) {
+        // Scale by whichever axis binds, in f64 so a 30000-pixel input does
+        // not lose precision on the ratio.
+        let by_width = f64::from(self.width) / f64::from(input.width);
+        let by_height = f64::from(self.height) / f64::from(input.height);
+        let preserving = |scale: f64| {
+            (
+                ((f64::from(input.width) * scale).round() as u32).max(1),
+                ((f64::from(input.height) * scale).round() as u32).max(1),
+            )
+        };
         let (mut width, mut height) = match self.options.fit {
             Fit::Fill => (self.width, self.height),
-            Fit::Inside => {
-                // Scale by whichever axis is the binding constraint, in f64 so
-                // a 30000-pixel input does not lose precision on the ratio.
-                let by_width = f64::from(self.width) / f64::from(input.width);
-                let by_height = f64::from(self.height) / f64::from(input.height);
-                let scale = by_width.min(by_height);
-                (
-                    ((f64::from(input.width) * scale).round() as u32).max(1),
-                    ((f64::from(input.height) * scale).round() as u32).max(1),
-                )
-            }
+            Fit::Inside | Fit::Contain => preserving(by_width.min(by_height)),
+            Fit::Outside | Fit::Cover => preserving(by_width.max(by_height)),
         };
         if self.options.without_enlargement {
             width = width.min(input.width);
             height = height.min(input.height);
         }
-        (width.max(1), height.max(1))
+        let scaled = (width.max(1), height.max(1));
+        let (sw, sh) = scaled;
+        match self.options.fit {
+            Fit::Cover => {
+                let (ow, oh) = (sw.min(self.width), sh.min(self.height));
+                let window = ((sw - ow) / 2, (sh - oh) / 2);
+                (
+                    scaled,
+                    Layout {
+                        output: (ow, oh),
+                        placed: Region::new(0, 0, ow, oh),
+                    },
+                    window,
+                )
+            }
+            Fit::Contain => {
+                let (ow, oh) = (self.width.max(sw), self.height.max(sh));
+                let placed = Region::new((ow - sw) / 2, (oh - sh) / 2, sw, sh);
+                (
+                    scaled,
+                    Layout {
+                        output: (ow, oh),
+                        placed,
+                    },
+                    (0, 0),
+                )
+            }
+            _ => (
+                scaled,
+                Layout {
+                    output: scaled,
+                    placed: Region::new(0, 0, sw, sh),
+                },
+                (0, 0),
+            ),
+        }
     }
 
     /// The weight tables for resampling `input`, resolved once and reused.
@@ -187,11 +275,15 @@ impl Resize {
         if let Some(bound) = self.bound.get() {
             return check_binding(bound, input);
         }
-        let (width, height) = self.target(input);
+        let ((width, height), layout, (wx, wy)) = self.layout(input);
+        let (visible_w, visible_h) = (layout.placed.width, layout.placed.height);
         let candidate = Binding {
             input: *input,
-            horizontal: Weights::build(self.options.filter, input.width, width)?,
-            vertical: Weights::build(self.options.filter, input.height, height)?,
+            horizontal: Weights::build(self.options.filter, input.width, width)?
+                .window(wx, visible_w),
+            vertical: Weights::build(self.options.filter, input.height, height)?
+                .window(wy, visible_h),
+            layout,
         };
         let bound = self.bound.get_or_init(|| candidate);
         check_binding(bound, input)
@@ -247,12 +339,17 @@ impl Op for Resize {
             .first()
             .ok_or_else(|| PixelsError::graph("`resize` takes one input, got none"))?;
         let bound = self.binding(input)?;
-
+        // Only the part of the tile the image covers reads anything; a tile
+        // of pure padding still names a valid (1x1) input region, as
+        // `composite` does for an overlay it misses.
+        let Some(image) = bound.image_part(output) else {
+            return Ok(vec![Region::new(0, 0, 1, 1)]);
+        };
         // The footprint of exactly the output rows and columns requested,
         // taken from the same tables the kernel will use — so what is asked
         // for and what is read cannot drift apart.
-        let (x, width) = bound.horizontal.footprint(output.x, output.width);
-        let (y, height) = bound.vertical.footprint(output.y, output.height);
+        let (x, width) = bound.horizontal.footprint(image.x, image.width);
+        let (y, height) = bound.vertical.footprint(image.y, image.height);
         Ok(vec![Region::new(x, y, width, height)])
     }
 
@@ -275,7 +372,80 @@ impl Op for Resize {
             )));
         }
         let channels = format.channels();
-        resample_tile(self.bound()?, input, output, channels)
+        let bound = self.bound()?;
+        let region = output.region();
+        if bound.layout.placed.contains(region)
+            && bound.layout.placed.x == 0
+            && bound.layout.placed.y == 0
+        {
+            return resample_tile(bound, input, output, channels);
+        }
+        // Padding: background everywhere, then the image's part resampled in
+        // the scaled image's own coordinates and copied into place.
+        let fill = background_pixel(format, self.options.background);
+        for row in output.rows_mut() {
+            for (slot, &byte) in row.iter_mut().zip(fill.iter().cycle()) {
+                *slot = byte;
+            }
+        }
+        let Some(image) = bound.image_part(region) else {
+            return Ok(());
+        };
+        let mut part = TileBuf::zeroed(image, format)?;
+        resample_tile(bound, input, &mut part.as_tile_mut()?, channels)?;
+        let (px, py) = (bound.layout.placed.x, bound.layout.placed.y);
+        let bytes = format.bytes_per_pixel();
+        let row_len = image.width as usize * bytes;
+        for (i, from) in part.bytes().chunks_exact(row_len.max(1)).enumerate() {
+            let Some(row) = output.row_mut(image.y + py + i as u32) else {
+                continue;
+            };
+            let at = (image.x + px - region.x) as usize * bytes;
+            if let Some(to) = row.get_mut(at..at + row_len) {
+                to.copy_from_slice(from);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Binding {
+    /// The part of output `region` the image covers, in the scaled image's
+    /// coordinates; `None` for a tile of pure padding.
+    fn image_part(&self, region: Region) -> Option<Region> {
+        let placed = self.layout.placed;
+        let overlap = region.intersect(placed);
+        (overlap.width > 0 && overlap.height > 0).then(|| {
+            Region::new(
+                overlap.x - placed.x,
+                overlap.y - placed.y,
+                overlap.width,
+                overlap.height,
+            )
+        })
+    }
+}
+
+/// One pixel of `rgba` in `format`'s bytes.
+fn background_pixel(format: PixelFormat, rgba: [u8; 4]) -> Vec<u8> {
+    let [r, g, b, a] = rgba;
+    let luma = ((u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114 + 500) / 1000) as u8;
+    let samples: Vec<u8> = match format.layout() {
+        ChannelLayout::Gray => vec![luma],
+        ChannelLayout::GrayAlpha => vec![luma, a],
+        ChannelLayout::Rgb => vec![r, g, b],
+        ChannelLayout::Rgba => vec![r, g, b, a],
+    };
+    match format.sample_kind() {
+        SampleKind::U8 => samples,
+        SampleKind::U16 => samples
+            .iter()
+            .flat_map(|&v| (u16::from(v) * 257).to_ne_bytes())
+            .collect(),
+        SampleKind::F32 => samples
+            .iter()
+            .flat_map(|&v| (f32::from(v) / 255.0).to_ne_bytes())
+            .collect(),
     }
 }
 
@@ -521,6 +691,172 @@ mod tests {
                 "tiling at {tile_w}x{tile_h} changed the pixels"
             );
         }
+    }
+
+    /// Run `op` over the whole output in `tile`-sized pieces, each handed
+    /// exactly the input it demands.
+    fn resize_tiled(
+        op: &Resize,
+        input: &ImageDescriptor,
+        bytes: &[u8],
+        tile: (u32, u32),
+    ) -> (ImageDescriptor, Vec<u8>) {
+        let out_desc = op.output_descriptor(std::slice::from_ref(input)).unwrap();
+        let source = TileBuf::from_vec(input.region(), input.pixel, bytes.to_vec()).unwrap();
+        let mut target = TileBuf::for_image(&out_desc).unwrap();
+        let mut y = 0;
+        while y < out_desc.height {
+            let h = tile.1.min(out_desc.height - y);
+            let mut x = 0;
+            while x < out_desc.width {
+                let w = tile.0.min(out_desc.width - x);
+                let region = Region::new(x, y, w, h);
+                let demand = op
+                    .input_regions(region, std::slice::from_ref(input))
+                    .unwrap();
+                let mut cut = TileBuf::zeroed(demand[0], input.pixel).unwrap();
+                otf_pixels_core::copy_region(
+                    &source.as_tile().unwrap(),
+                    &mut cut.as_tile_mut().unwrap(),
+                    demand[0],
+                )
+                .unwrap();
+                let mut sub = TileBuf::zeroed(region, out_desc.pixel).unwrap();
+                op.compute(&[cut.as_tile().unwrap()], &mut sub.as_tile_mut().unwrap())
+                    .unwrap();
+                otf_pixels_core::copy_region(
+                    &sub.as_tile().unwrap(),
+                    &mut target.as_tile_mut().unwrap(),
+                    region,
+                )
+                .unwrap();
+                x += w;
+            }
+            y += h;
+        }
+        (out_desc, target.into_bytes())
+    }
+
+    fn with_fit(width: u32, height: u32, fit: Fit) -> Resize {
+        Resize::new(
+            width,
+            height,
+            ResizeOptions::default()
+                .with_fit(fit)
+                .with_background([10, 20, 30, 255]),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn outside_and_inside_scale_by_the_other_axis() {
+        let (input, _) = ramp(200, 100, PixelFormat::Rgb8);
+        assert_eq!(with_fit(50, 50, Fit::Inside).target(&input), (50, 25));
+        assert_eq!(with_fit(50, 50, Fit::Outside).target(&input), (100, 50));
+        assert_eq!(with_fit(50, 50, Fit::Cover).target(&input), (50, 50));
+        assert_eq!(with_fit(50, 50, Fit::Contain).target(&input), (50, 50));
+        assert_eq!(with_fit(50, 50, Fit::Fill).target(&input), (50, 50));
+    }
+
+    #[test]
+    fn cover_is_outside_then_a_centred_crop() {
+        for (w, h, format) in [
+            (200, 100, PixelFormat::Rgb8),
+            (61, 97, PixelFormat::Rgba16),
+            (90, 90, PixelFormat::Gray8),
+        ] {
+            let (input, bytes) = ramp(w, h, format);
+            let (outside_desc, outside) = resize_tiled(
+                &with_fit(40, 30, Fit::Outside),
+                &input,
+                &bytes,
+                (1000, 1000),
+            );
+            let bpp = format.bytes_per_pixel();
+            for tile in [(1000, 1000), (7, 5), (40, 1)] {
+                let (desc, cover) =
+                    resize_tiled(&with_fit(40, 30, Fit::Cover), &input, &bytes, tile);
+                assert_eq!(
+                    (desc.width, desc.height),
+                    (40.min(outside_desc.width), 30.min(outside_desc.height))
+                );
+                let (dx, dy) = (
+                    (outside_desc.width - desc.width) / 2,
+                    (outside_desc.height - desc.height) / 2,
+                );
+                for y in 0..desc.height as usize {
+                    let from =
+                        ((y + dy as usize) * outside_desc.width as usize + dx as usize) * bpp;
+                    let row = desc.width as usize * bpp;
+                    assert_eq!(
+                        &cover[y * row..(y + 1) * row],
+                        &outside[from..from + row],
+                        "{w}x{h} {format} row {y} tile {tile:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn contain_is_inside_centred_on_the_background() {
+        for (w, h, format) in [
+            (200, 100, PixelFormat::Rgb8),
+            (61, 97, PixelFormat::Rgba8),
+            (30, 90, PixelFormat::Gray16),
+        ] {
+            let (input, bytes) = ramp(w, h, format);
+            let (inside_desc, inside) =
+                resize_tiled(&with_fit(40, 30, Fit::Inside), &input, &bytes, (1000, 1000));
+            let bpp = format.bytes_per_pixel();
+            let fill = background_pixel(format, [10, 20, 30, 255]);
+            for tile in [(1000, 1000), (7, 5), (3, 30), (40, 2)] {
+                let (desc, contain) =
+                    resize_tiled(&with_fit(40, 30, Fit::Contain), &input, &bytes, tile);
+                assert_eq!((desc.width, desc.height), (40, 30));
+                let (px, py) = ((40 - inside_desc.width) / 2, (30 - inside_desc.height) / 2);
+                for y in 0..30_u32 {
+                    for x in 0..40_u32 {
+                        let at = ((y * 40 + x) as usize) * bpp;
+                        let got = &contain[at..at + bpp];
+                        let inside_x = x.checked_sub(px).filter(|&v| v < inside_desc.width);
+                        let inside_y = y.checked_sub(py).filter(|&v| v < inside_desc.height);
+                        let want = match (inside_x, inside_y) {
+                            (Some(ix), Some(iy)) => {
+                                let from = ((iy * inside_desc.width + ix) as usize) * bpp;
+                                &inside[from..from + bpp]
+                            }
+                            _ => &fill[..],
+                        };
+                        assert_eq!(got, want, "{w}x{h} {format} at ({x}, {y}) tile {tile:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_background_follows_the_pixel_format() {
+        assert_eq!(
+            background_pixel(PixelFormat::Rgba8, [1, 2, 3, 4]),
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(
+            background_pixel(PixelFormat::Rgb8, [1, 2, 3, 4]),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            background_pixel(PixelFormat::Gray8, [255, 255, 255, 0]),
+            vec![255]
+        );
+        assert_eq!(
+            background_pixel(PixelFormat::GrayA8, [0, 0, 0, 9]),
+            vec![0, 9]
+        );
+        assert_eq!(
+            background_pixel(PixelFormat::Gray16, [255, 0, 0, 255]),
+            (76_u16 * 257).to_ne_bytes().to_vec()
+        );
     }
 
     #[test]

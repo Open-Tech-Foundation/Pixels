@@ -20,6 +20,7 @@ use otf_pixels_core::{
 
 /// How the source is combined with the backdrop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum Blend {
     /// Porter-Duff source-over: the source is drawn on top of the backdrop.
     #[default]

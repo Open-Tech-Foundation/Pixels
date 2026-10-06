@@ -42,6 +42,8 @@ versioning: [SemVer](https://semver.org/).
   with it rather than failing to build.
 
 ### Changed
+- `Fit`, `Blend`, `Filter`, `Conversion` and `Unconvertible` are
+  `#[non_exhaustive]`, so later modes can be added without breaking callers.
 - WebP output is now **lossy by default**, at `EncodeOptions::quality`
   (default 80), as with `cwebp` and sharp; set `EncodeOptions::lossless` for
   the lossless output that was previously the only kind.
@@ -149,6 +151,12 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- All five of sharp's fit modes. `Fit::Cover` (scale to cover, crop the
+  overflow centred), `Fit::Contain` (scale inside, pad centred with
+  `ResizeOptions::background`, opaque black by default) and `Fit::Outside`
+  join `Fill` and `Inside`. The crop and the padding happen inside the resize
+  op itself, so cover and contain thumbnails keep the JPEG shrink-on-load
+  path and match the reference evaluator however they are tiled.
 - Animation metadata. `Image::animation` (and `Decoder::animation`) report
   an animated GIF's or WebP's frame count, loop count and per-frame
   durations, matching Pillow and the timing libwebp wrote. The pipeline still

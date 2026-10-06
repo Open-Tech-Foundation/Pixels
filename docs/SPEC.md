@@ -74,7 +74,7 @@ alpha convert internally.
 
 | Op | Notes |
 |---|---|
-| `resize(w, h, opts)` | `fit: fill \| inside`; `without_enlargement`; filters: lanczos3 (default), lanczos2, mitchell, catmull-rom, box, bilinear, nearest |
+| `resize(w, h, opts)` | `fit: fill \| inside \| outside \| cover \| contain` (sharp's meanings; cover crops centred, contain pads centred with `background`); `without_enlargement`; filters: lanczos3 (default), lanczos2, mitchell, catmull-rom, box, bilinear, nearest |
 | `crop(x, y, w, h)` | zero-cost region remap |
 | `rotate(deg)` | multiples of 90 |
 | `flip()` / `flop()` | vertical / horizontal mirror |

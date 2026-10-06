@@ -32,6 +32,7 @@ pub const ONE: i32 = 1 << 14;
 
 /// A resampling filter kernel (SPEC §Core ops).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum Filter {
     /// Nearest neighbour. Fastest, blockiest; the only filter that preserves
     /// exact sample values, which is why it is the right default for masks
@@ -284,6 +285,23 @@ impl Weights {
             exact,
             max_len,
         })
+    }
+
+    /// The table restricted to output positions `offset..offset + len`,
+    /// renumbered from zero: the window a cropping resize keeps. The weights
+    /// are shared, so nothing is recomputed and the kept positions resample
+    /// exactly as they would in the full table.
+    #[must_use]
+    pub fn window(mut self, offset: u32, len: u32) -> Self {
+        let start = (offset as usize).min(self.runs.len());
+        let end = start.saturating_add(len as usize).min(self.runs.len());
+        self.runs = self
+            .runs
+            .get(start..end)
+            .map(<[Run]>::to_vec)
+            .unwrap_or_default();
+        self.max_len = self.runs.iter().map(|run| run.len).max().unwrap_or(0);
+        self
     }
 
     /// The runs, one per output position.
