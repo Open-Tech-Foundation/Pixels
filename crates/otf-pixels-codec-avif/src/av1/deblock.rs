@@ -18,7 +18,7 @@
 
 use super::frame::LoopFilter;
 use super::plane::Plane;
-use super::tile::FRAME_LF_COUNT;
+use super::tile::{FRAME_LF_COUNT, MAX_SEGMENTS};
 use super::transform::TxSize;
 
 /// `MI_SIZE` (§3): the side of the smallest coded block, in samples.
@@ -57,6 +57,11 @@ pub struct Deblock<'a> {
     pub delta_lfs: &'a [[i8; FRAME_LF_COUNT]],
     /// `delta_lf_multi`: one delta per filter level rather than one shared.
     pub delta_lf_multi: bool,
+    /// `SegmentIds[row][col]`; empty when segmentation is off.
+    pub segment_ids: &'a [u8],
+    /// `FeatureData[segment][SEG_LVL_ALT_LF_Y_V + i]` for active features, 0
+    /// otherwise, in `loop_filter_level` order.
+    pub segment_lf: [[i32; FRAME_LF_COUNT]; MAX_SEGMENTS],
 }
 
 // A full inter-capable filter would also read `Skips`, `MiSizes` (for the block
@@ -242,6 +247,20 @@ impl Deblock<'_> {
             deltas.first().copied().unwrap_or(0)
         };
         let mut lvl = (i32::from(base) + i32::from(delta)).clamp(0, MAX_LOOP_FILTER);
+        // The segment's offset (step 3); an inactive feature contributes 0,
+        // and a clamp of an already clamped level changes nothing.
+        let segment = row
+            .checked_mul(self.mi_cols)
+            .and_then(|at| at.checked_add(col))
+            .and_then(|at| self.segment_ids.get(at))
+            .map_or(0, |&s| usize::from(s));
+        let offset = self
+            .segment_lf
+            .get(segment)
+            .and_then(|lf| lf.get(i))
+            .copied()
+            .unwrap_or(0);
+        lvl = (lvl + offset).clamp(0, MAX_LOOP_FILTER);
         if self.loop_filter.delta_enabled {
             // ref == INTRA_FRAME (0) for every block; the mode delta applies only
             // to inter modes, so it never contributes here.
@@ -537,6 +556,8 @@ mod tests {
             lf_tx_sizes: std::slice::from_ref(&grid),
             delta_lfs: &[],
             delta_lf_multi: false,
+            segment_ids: &[],
+            segment_lf: [[0; FRAME_LF_COUNT]; MAX_SEGMENTS],
         }
         .run();
         assert_eq!(planes[0].row(0), before.row(0));
@@ -574,6 +595,8 @@ mod tests {
             lf_tx_sizes: std::slice::from_ref(&grid),
             delta_lfs: &[],
             delta_lf_multi: false,
+            segment_ids: &[],
+            segment_lf: [[0; FRAME_LF_COUNT]; MAX_SEGMENTS],
         }
         .run();
         assert_eq!(planes[0].row(0), before.row(0));
@@ -616,6 +639,8 @@ mod tests {
             lf_tx_sizes: &grids,
             delta_lfs: &[],
             delta_lf_multi: false,
+            segment_ids: &[],
+            segment_lf: [[0; FRAME_LF_COUNT]; MAX_SEGMENTS],
         }
         .run();
         let u = planes[1].row(5).unwrap();
@@ -627,6 +652,16 @@ mod tests {
     /// Filter a vertical step edge at x = 8 with every 4x4 unit carrying
     /// `deltas`, and report whether the edge moved.
     fn step_edge_filtered(deltas: [i8; FRAME_LF_COUNT], multi: bool) -> bool {
+        step_edge_filtered_in_segment(deltas, multi, [0; FRAME_LF_COUNT])
+    }
+
+    /// As [`step_edge_filtered`], with every unit in segment 1, whose
+    /// loop-filter offsets are `segment_lf`.
+    fn step_edge_filtered_in_segment(
+        deltas: [i8; FRAME_LF_COUNT],
+        multi: bool,
+        segment_lf: [i32; FRAME_LF_COUNT],
+    ) -> bool {
         let (w, h) = (16, 16);
         let mut plane = Plane::new(w, h);
         for y in 0..h {
@@ -636,6 +671,9 @@ mod tests {
         }
         let grid = vec![1_u8; (w / MI_SIZE) * (h / MI_SIZE)];
         let delta_lfs = vec![deltas; (w / MI_SIZE) * (h / MI_SIZE)];
+        let segment_ids = vec![1_u8; (w / MI_SIZE) * (h / MI_SIZE)];
+        let mut offsets = [[0; FRAME_LF_COUNT]; MAX_SEGMENTS];
+        offsets[1] = segment_lf;
         // No reference delta, so a level the block delta zeroes stays zero.
         let loop_filter = LoopFilter {
             delta_enabled: false,
@@ -656,6 +694,8 @@ mod tests {
             lf_tx_sizes: std::slice::from_ref(&grid),
             delta_lfs: &delta_lfs,
             delta_lf_multi: multi,
+            segment_ids: &segment_ids,
+            segment_lf: offsets,
         }
         .run();
         let row = planes[0].row(4).unwrap();
@@ -669,6 +709,28 @@ mod tests {
         assert!(!step_edge_filtered([-32, 0, 0, 0], false));
         // A positive delta past the maximum is clipped, not wrapped.
         assert!(step_edge_filtered([63, 0, 0, 0], false));
+    }
+
+    #[test]
+    fn a_segment_offset_moves_the_filter_level_for_its_direction() {
+        // SEG_LVL_ALT_LF_Y_V (index 0 here) reaches the vertical edge.
+        assert!(!step_edge_filtered_in_segment(
+            [0; FRAME_LF_COUNT],
+            false,
+            [-32, 0, 0, 0]
+        ));
+        // SEG_LVL_ALT_LF_Y_H does not.
+        assert!(step_edge_filtered_in_segment(
+            [0; FRAME_LF_COUNT],
+            false,
+            [0, -32, 0, 0]
+        ));
+        // The block delta and the segment offset add: +16 then -48 is zero.
+        assert!(!step_edge_filtered_in_segment(
+            [16, 0, 0, 0],
+            false,
+            [-48, 0, 0, 0]
+        ));
     }
 
     #[test]
@@ -706,6 +768,8 @@ mod tests {
             lf_tx_sizes: std::slice::from_ref(&grid),
             delta_lfs: &[],
             delta_lf_multi: false,
+            segment_ids: &[],
+            segment_lf: [[0; FRAME_LF_COUNT]; MAX_SEGMENTS],
         }
         .run();
         // The last "left" sample rose and the first "right" sample fell.

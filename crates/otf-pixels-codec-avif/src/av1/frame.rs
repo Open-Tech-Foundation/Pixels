@@ -36,6 +36,7 @@ const MAX_TILE_ROWS: u32 = 64;
 
 const MAX_SEGMENTS: usize = 8;
 const SEG_LVL_ALT_Q: usize = 0;
+const SEG_LVL_REF_FRAME: usize = 5;
 const SEG_LVL_MAX: usize = 8;
 const MAX_LOOP_FILTER: i32 = 63;
 
@@ -139,7 +140,9 @@ impl Segmentation {
         }
     }
 
-    fn feature_active(&self, segment: usize, feature: usize) -> bool {
+    /// `seg_feature_active_idx(segment, feature)` (§5.11.14).
+    #[must_use]
+    pub fn feature_active(&self, segment: usize, feature: usize) -> bool {
         self.enabled
             && self
                 .feature_enabled
@@ -147,6 +150,37 @@ impl Segmentation {
                 .and_then(|f| f.get(feature))
                 .copied()
                 .unwrap_or(false)
+    }
+
+    /// `FeatureData[segment][feature]` when that feature is active, else 0.
+    #[must_use]
+    pub fn feature_value(&self, segment: usize, feature: usize) -> i32 {
+        if self.feature_active(segment, feature) {
+            self.feature_data
+                .get(segment)
+                .and_then(|f| f.get(feature))
+                .copied()
+                .unwrap_or(0)
+        } else {
+            0
+        }
+    }
+
+    /// `LastActiveSegId` (§5.9.14): the highest segment with any feature on.
+    #[must_use]
+    pub fn last_active_segment(&self) -> usize {
+        (0..MAX_SEGMENTS)
+            .rev()
+            .find(|&s| (0..SEG_LVL_MAX).any(|f| self.feature_active(s, f)))
+            .unwrap_or(0)
+    }
+
+    /// `SegIdPreSkip` (§5.9.14): whether any segment enables a feature from
+    /// `SEG_LVL_REF_FRAME` on, which moves `segment_id` ahead of `skip`.
+    #[must_use]
+    pub fn pre_skip(&self) -> bool {
+        (0..MAX_SEGMENTS)
+            .any(|s| (SEG_LVL_REF_FRAME..SEG_LVL_MAX).any(|f| self.feature_active(s, f)))
     }
 }
 
@@ -1089,6 +1123,27 @@ fn parse_film_grain(
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn segmentation_derives_pre_skip_and_the_last_active_segment() {
+        let mut seg = Segmentation::disabled();
+        seg.feature_enabled[2][SEG_LVL_ALT_Q] = true;
+        seg.feature_data[2][SEG_LVL_ALT_Q] = -7;
+        // Disabled, nothing is active whatever the arrays hold.
+        assert_eq!(seg.feature_value(2, SEG_LVL_ALT_Q), 0);
+        assert_eq!(seg.last_active_segment(), 0);
+
+        seg.enabled = true;
+        assert_eq!(seg.feature_value(2, SEG_LVL_ALT_Q), -7);
+        assert_eq!(seg.last_active_segment(), 2);
+        assert!(!seg.pre_skip(), "a quantizer offset is read after skip");
+
+        // SEG_LVL_SKIP (6) is at or past SEG_LVL_REF_FRAME, so segment_id
+        // moves ahead of skip.
+        seg.feature_enabled[5][6] = true;
+        assert!(seg.pre_skip());
+        assert_eq!(seg.last_active_segment(), 5);
+    }
 
     /// Bit-level builder mirroring the syntax, shared shape with seq.rs tests.
     struct Bldr {

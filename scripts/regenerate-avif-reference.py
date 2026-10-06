@@ -182,6 +182,8 @@ FIXTURES = {
     "photo_420_tiles": (mixed(256, 192, 3), False, 0, "", 2),
     # Quantizer matrices, end to end.
     "photo_420_qm": (mixed(256, 192, 3), False, 0, "", 2),
+    # rav1e, which segments the frame by quantizer, end to end.
+    "photo_420_rav1e": (mixed(256, 192, 3), False, 0, "", 2),
     # 10- and 12-bit: decoded to 16-bit RGB over the full 0..=65535 range.
     # Here libavif converts in floating point rather than through libyuv, and
     # we agree on 99% of samples and within one 16-bit step on the rest — the
@@ -241,6 +243,7 @@ PHOTO_ARGS = {
     "photo_420_bt2020": ["-y", "420", "-q", "60", "--cicp", "9/16/9"],
     "photo_420_tiles": ["-y", "420", "-q", "60", "--tilecolslog2", "1", "--tilerowslog2", "1"],
     "photo_420_qm": ["-y", "420", "-q", "60", "-a", "enable-qm=1"],
+    "photo_420_rav1e": ["-c", "rav1e", "-y", "420", "-q", "60", "-s", "4"],
     "photo_420_deltaq": [
         "-y", "420", "-q", "60",
         "-a", "deltaq-mode=3", "-a", "enable-tpl-model=0", "-a", "delta-lf-mode=1",
@@ -767,6 +770,22 @@ PLANES = {
         ["-y", "420", "-q", "40", "-s", "4", "-a", "enable-qm=1", "-a", "qm-min=2", "-a", "qm-max=12",
          *FILTERS_ON],
     ),
+    # Segmentation, from rav1e (the encoder behind ravif and the Rust image
+    # crate), which varies the quantizer per segment (SEG_LVL_ALT_Q). No
+    # encoder here emits the loop-filter or skip segment features; those are
+    # unit-tested. Tiled, the segment prediction stops at tile edges. And one
+    # file from SVT-AV1, the third encoder avifenc offers.
+    "mixed_420_rav1e_seg": (mixed(256, 192, 3), ["-c", "rav1e", "-y", "420", "-q", "50", "-s", "4"]),
+    "textured_420_rav1e_seg": (textured(256, 192), ["-c", "rav1e", "-y", "420", "-q", "50", "-s", "1"]),
+    "textured_444_10bit_rav1e_seg": (
+        textured(160, 96),
+        ["-c", "rav1e", "-d", "10", "-y", "444", "-q", "50", "-s", "4"],
+    ),
+    "mixed_420_rav1e_seg_tiles": (
+        mixed(256, 192, 3),
+        ["-c", "rav1e", "-y", "420", "-q", "50", "-s", "6", "--tilecolslog2", "1", "--tilerowslog2", "1"],
+    ),
+    "mixed_420_svt": (mixed(256, 192, 3), ["-c", "svt", "-y", "420", "-q", "50", "-s", "6"]),
     "blocks_444_palette_tiles": (
         blocks(130, 70),
         ["-y", "444", "-r", "full", "--cicp", "1/13/0", "-q", "60", "-s", "6",

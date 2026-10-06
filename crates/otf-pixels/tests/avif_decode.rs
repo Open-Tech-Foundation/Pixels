@@ -51,6 +51,22 @@ fn a_420_avif_opens_and_crops_to_libavifs_pixels() {
 }
 
 #[test]
+fn a_rav1e_avif_with_segments_matches_libavif() {
+    // photo_420_rav1e: rav1e — the encoder behind ravif and the Rust image
+    // crate — splits the frame into segments with their own quantizers.
+    let image = Image::open(fixture("photo_420_rav1e.avif")).unwrap();
+    let ours = image
+        .output(Format::Raw, EncodeOptions::default())
+        .bytes()
+        .unwrap();
+    let theirs = std::fs::read(fixture("photo_420_rav1e.raw")).unwrap();
+    assert_eq!(ours.len(), theirs.len());
+    for (index, (a, b)) in ours.iter().zip(&theirs).enumerate() {
+        assert!(a.abs_diff(*b) <= 2, "byte {index}: {a} vs {b}");
+    }
+}
+
+#[test]
 fn an_avif_with_quantizer_matrices_matches_libavif() {
     // photo_420_qm: libaom's default matrix levels, weighting each
     // coefficient's quantizer by its frequency.

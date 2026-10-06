@@ -59,6 +59,21 @@ const CASES: &[(&str, (u8, u8))] = &[
     ("textured_444_10bit_qm", (0, 0)),
     ("blocks_420_qm", (1, 1)),
     ("textured_420_qm_range", (1, 1)),
+    // Segmentation (rav1e), and one SVT-AV1 file.
+    ("mixed_420_rav1e_seg", (1, 1)),
+    ("textured_420_rav1e_seg", (1, 1)),
+    ("textured_444_10bit_rav1e_seg", (0, 0)),
+    ("mixed_420_rav1e_seg_tiles", (1, 1)),
+    ("mixed_420_svt", (1, 1)),
+];
+
+/// Fixtures that exist to exercise segmentation, with the `LastActiveSegId`
+/// each must actually carry.
+const SEGMENTED: &[(&str, usize)] = &[
+    ("mixed_420_rav1e_seg", 3),
+    ("textured_420_rav1e_seg", 2),
+    ("textured_444_10bit_rav1e_seg", 2),
+    ("mixed_420_rav1e_seg_tiles", 3),
 ];
 
 /// Fixtures that exist to exercise quantizer matrices, with the `(qm_y, qm_u,
@@ -205,6 +220,18 @@ fn matrix_fixtures_carry_the_levels_they_test() {
         let q = &still.frame.quantization;
         assert!(q.using_qmatrix, "{name}");
         assert_eq!((q.qm_y, q.qm_u, q.qm_v), levels, "{name}");
+    }
+}
+
+#[test]
+fn segmented_fixtures_carry_their_segments() {
+    for &(name, last) in SEGMENTED {
+        let file = std::fs::read(format!("{}/{name}.avif", fixture_dir())).unwrap();
+        let (frame_data, config_obus) = primary_frame(&file);
+        let still = StillPicture::parse(&config_obus, &frame_data).unwrap();
+        let seg = &still.frame.segmentation;
+        assert!(seg.enabled, "{name}");
+        assert_eq!(seg.last_active_segment(), last, "{name}");
     }
 }
 

@@ -143,6 +143,17 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- AVIF segmentation, which rav1e (the encoder behind `ravif` and the Rust
+  `image` crate) uses to give parts of the frame their own quantizer. Those
+  files were refused as `Unsupported`. Each block's `segment_id` is read,
+  predicted from its neighbours within the tile, and drives that block's
+  quantizer (`SEG_LVL_ALT_Q`), lossless flag, quantizer-matrix level and
+  transform-type coding; the forced-skip feature (`SEG_LVL_SKIP`) and the
+  per-segment loop-filter offsets (`SEG_LVL_ALT_LF_*`) are applied too.
+  Four rav1e plane fixtures (two speeds, 10-bit 4:4:4, tiled) and an SVT-AV1
+  file match libaom exactly, and a rav1e photo matches libavif's RGB through
+  the facade. No available encoder writes the skip or loop-filter segment
+  features, so those are covered by unit tests only.
 - AVIF quantizer matrices (`using_qmatrix`), which libaom's `enable-qm`
   turns on. Those files were refused as `Unsupported`. Each 2D transform's
   coefficients are now dequantised with their position's matrix weight, and

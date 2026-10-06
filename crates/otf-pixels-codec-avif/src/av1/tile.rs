@@ -36,7 +36,7 @@ use super::deblock::Deblock;
 use super::direction::{
     ANGLE_STEP, Edge, mode_base_angle, predict_directional, predict_filter_intra,
 };
-use super::frame::{Cdef, FrameHeader, LoopFilter, TileInfo, TxMode};
+use super::frame::{Cdef, FrameHeader, LoopFilter, Segmentation, TileInfo, TxMode};
 use super::palette::{PALETTE_COLORS, color_context, palette_cache};
 use super::plane::Plane;
 use super::predict::{IntraMode, PredBlock, predict_intra_block};
@@ -64,6 +64,15 @@ pub const FRAME_LF_COUNT: usize = 4;
 const DELTA_SMALL: i32 = 3;
 /// `MAX_LOOP_FILTER` (§3).
 const MAX_LOOP_FILTER: i32 = 63;
+/// `MAX_SEGMENTS` (§3).
+pub const MAX_SEGMENTS: usize = 8;
+/// `SEG_LVL_ALT_Q` (§3): the per-segment quantizer offset.
+const SEG_LVL_ALT_Q: usize = 0;
+/// `SEG_LVL_ALT_LF_Y_V` (§3): the first of the four per-segment loop-filter
+/// offsets, in `loop_filter_level` order.
+const SEG_LVL_ALT_LF_Y_V: usize = 1;
+/// `SEG_LVL_SKIP` (§3): every block of the segment is skipped.
+const SEG_LVL_SKIP: usize = 6;
 /// `DC_PRED` mode index.
 const DC_PRED: usize = 0;
 /// `UV_CFL_PRED`: the chroma-from-luma UV mode, one past the intra modes.
@@ -102,8 +111,7 @@ pub struct DecodedFrame {
 /// # Errors
 ///
 /// Returns [`PixelsError::unsupported`] for anything outside the intra subset
-/// this decodes — intra block copy, the tools `unimplemented_tool` lists, or a
-/// lossy frame using film grain — and [`PixelsError::malformed`] for a stream
+/// this decodes — intra block copy, or a lossy frame using film grain — and [`PixelsError::malformed`] for a stream
 /// that ends early, violates the syntax, or does not code every tile exactly
 /// once.
 pub fn decode_still(
@@ -122,11 +130,6 @@ pub fn decode_still(
             "avif: lossy frames are decoded only with film grain disabled; film \
              grain synthesis is not implemented yet",
         ));
-    }
-    if let Some(tool) = unimplemented_tool(frame) {
-        return Err(PixelsError::unsupported(format!(
-            "avif: {tool} is not implemented yet"
-        )));
     }
     if frame.allow_intrabc {
         // Intra block copy is not implemented; decoding its blocks would
@@ -260,14 +263,6 @@ fn unimplemented_filters_off(frame: &FrameHeader) -> bool {
     !frame.film_grain.apply_grain
 }
 
-/// The first coding tool `frame` switches on that the tile decoder does not
-/// implement, if any. Segmentation changes what is *coded* — an extra
-/// `segment_id` symbol per block, and per-segment quantizers — so decoding
-/// past it without it produces a wrong image with no error.
-fn unimplemented_tool(frame: &FrameHeader) -> Option<&'static str> {
-    frame.segmentation.enabled.then_some("segmentation")
-}
-
 /// `MiSize >= BLOCK_8X8` for a block of `bw4 x bh4` 4x4 units. The spec compares
 /// block-size *enum* values, and 4x16/16x4 sort after 8x8, so this excludes only
 /// 4x4, 4x8 and 8x4 — an area of at least four units — rather than requiring
@@ -340,6 +335,7 @@ struct FrameCdfs {
     use_sgrproj: [u16; 3],
     delta_q: [u16; 5],
     delta_lf: [u16; 5],
+    segment_id: [[u16; 9]; 3],
     /// `DeltaLFMultiCdf[i]`, one per loop-filter level when `delta_lf_multi`.
     delta_lf_multi: [[u16; 5]; FRAME_LF_COUNT],
 }
@@ -417,6 +413,7 @@ impl FrameCdfs {
             use_sgrproj: cdf::DEFAULT_USE_SGRPROJ_CDF,
             delta_q: cdf::DEFAULT_DELTA_Q_CDF,
             delta_lf: cdf::DEFAULT_DELTA_LF_CDF,
+            segment_id: cdf::DEFAULT_SEGMENT_ID_CDF,
             delta_lf_multi: [cdf::DEFAULT_DELTA_LF_CDF; FRAME_LF_COUNT],
         }
     }
@@ -444,12 +441,27 @@ struct TileState {
     allow_screen_content: bool,
     /// `reduced_tx_set` (frame header): shrinks the intra transform set.
     reduced_tx_set: bool,
-    /// Whether `base_q_idx > 0`. `false` is the lossless path, where every block
-    /// is `DCT_DCT` and no `intra_tx_type` symbol is read.
-    qindex_positive: bool,
-    /// Whether the frame is coded losslessly (drives the inverse transform's
-    /// `Lossless` flag).
+    /// `CodedLossless`: every segment is lossless. Gates `cdef_idx`.
+    coded_lossless: bool,
+    /// The current block's `Lossless` (`LosslessArray[segment_id]`): a 4x4
+    /// WHT, no transform-type choice, and no quantizer matrix.
     lossless: bool,
+    /// `LosslessArray[segment]`.
+    lossless_array: [bool; MAX_SEGMENTS],
+    /// The frame's segmentation parameters; disabled means one segment, 0.
+    segmentation: Segmentation,
+    /// `SegIdPreSkip`: `segment_id` is read before `skip`.
+    seg_pre_skip: bool,
+    /// `LastActiveSegId`: the coded `segment_id` range is `0..=` this.
+    last_active_segment: usize,
+    /// The current block's `segment_id`.
+    segment_id: usize,
+    /// `SegmentIds[r][c]`, which predicts the next block's `segment_id` and
+    /// selects the deblocking strength's segment offsets.
+    segment_ids: Vec<u8>,
+    /// `using_qmatrix` and `qm_y`/`qm_u`/`qm_v`, for `SegQMLevel`.
+    using_qmatrix: bool,
+    qm: [u8; 3],
     /// The frame transform mode (`ONLY_4X4` / `LARGEST` / `SELECT`).
     tx_mode: TxMode,
     /// Per-plane DC quantiser offset from the block's qindex (`DeltaQYDc`,
@@ -463,10 +475,6 @@ struct TileState {
     current_qindex: i32,
     /// `base_q_idx`, which `CurrentQIndex` restarts from in every tile.
     base_q: i32,
-    /// `SegQMLevel[plane][0]` (§5.9.12): the quantizer-matrix level per plane,
-    /// 15 (no matrix) unless `using_qmatrix` and the frame is not lossless.
-    /// Segmentation is refused, so segment 0 is the only one.
-    qm_level: [u8; 3],
     /// The coefficient-CDF quantiser context, for each tile's fresh CDFs.
     qctx: usize,
     /// The tile being decoded. Neighbours outside it are unavailable
@@ -613,18 +621,21 @@ impl TileState {
             enable_edge_filter: seq.enable_intra_edge_filter,
             allow_screen_content: frame.allow_screen_content_tools,
             reduced_tx_set: frame.reduced_tx_set,
-            qindex_positive: frame.quantization.base_q_idx > 0,
+            coded_lossless: frame.coded_lossless,
             lossless: frame.coded_lossless,
+            lossless_array: frame.lossless,
+            segmentation: frame.segmentation.clone(),
+            seg_pre_skip: frame.segmentation.pre_skip(),
+            last_active_segment: frame.segmentation.last_active_segment(),
+            segment_id: 0,
+            segment_ids: vec![0; mi_cols * mi_rows],
+            using_qmatrix: q.using_qmatrix,
+            qm: [q.qm_y, q.qm_u, q.qm_v],
             tx_mode: frame.tx_mode,
             q_dc: [q.delta_q_y_dc, q.delta_q_u_dc, q.delta_q_v_dc],
             q_ac: [0, q.delta_q_u_ac, q.delta_q_v_ac],
             current_qindex: base_q,
             base_q,
-            qm_level: if q.using_qmatrix && !frame.coded_lossless {
-                [q.qm_y, q.qm_u, q.qm_v]
-            } else {
-                [15; 3]
-            },
             qctx,
             tile: TileBounds {
                 row_start: 0,
@@ -767,6 +778,13 @@ impl TileState {
             lf_tx_sizes: &self.lf_tx_sizes,
             delta_lfs: &self.delta_lfs,
             delta_lf_multi: self.delta_lf_multi,
+            segment_ids: &self.segment_ids,
+            segment_lf: core::array::from_fn(|segment| {
+                core::array::from_fn(|i| {
+                    self.segmentation
+                        .feature_value(segment, SEG_LVL_ALT_LF_Y_V + i)
+                })
+            }),
         }
         .run();
     }
@@ -1124,12 +1142,41 @@ impl TileState {
             (false, false)
         };
 
-        // --- intra_frame_mode_info (lossless key-frame subset) ---
-        let skip = self.read_skip(dec, r, c, avail_u, avail_l)?;
+        // --- intra_frame_mode_info (§5.11.7) ---
+        // segment_id comes before skip when a segment forces skipping, and
+        // after it (where a skipped block inherits its prediction) otherwise.
+        self.segment_id = 0;
+        if self.seg_pre_skip {
+            self.read_segment_id(dec, r, c, avail_u, avail_l, false)?;
+        }
+        let skip = if self.seg_pre_skip
+            && self
+                .segmentation
+                .feature_active(self.segment_id, SEG_LVL_SKIP)
+        {
+            true
+        } else {
+            self.read_skip(dec, r, c, avail_u, avail_l)?
+        };
+        if !self.seg_pre_skip {
+            self.read_segment_id(dec, r, c, avail_u, avail_l, skip)?;
+        }
+        self.lossless = self
+            .lossless_array
+            .get(self.segment_id)
+            .copied()
+            .unwrap_or(false);
+        let segment = self.segment_id as u8;
+        for row in r..(r + bh4).min(self.mi_rows) {
+            for col in c..(c + bw4).min(self.mi_cols) {
+                if let Some(slot) = self.segment_ids.get_mut(row * self.mi_cols + col) {
+                    *slot = segment;
+                }
+            }
+        }
 
-        // read_cdef (§5.11.56) sits right after read_skip, then the
-        // superblock's quantizer and loop-filter deltas; segment id is absent
-        // in this subset.
+        // read_cdef (§5.11.56) sits right after the segment id, then the
+        // superblock's quantizer and loop-filter deltas.
         self.read_cdef(dec, r, c, bw4, bh4, skip)?;
         self.read_delta_qindex(dec, bw4, bh4, skip)?;
         self.read_delta_lf(dec, bw4, bh4, skip)?;
@@ -1255,7 +1302,7 @@ impl TileState {
         bh4: usize,
         skip: bool,
     ) -> Result<()> {
-        if skip || self.lossless || !self.enable_cdef {
+        if skip || self.coded_lossless || !self.enable_cdef {
             return Ok(());
         }
         // CDEF parameters are stored per 64x64 luma block (16 units).
@@ -1281,6 +1328,93 @@ impl TileState {
             i += cdef_size4;
         }
         Ok(())
+    }
+
+    /// `intra_segment_id` / `read_segment_id` (§5.11.8, §5.11.9): predict the
+    /// block's segment from its neighbours, then — unless it is skipped, when
+    /// the prediction stands — read the difference from it.
+    fn read_segment_id(
+        &mut self,
+        dec: &mut SymbolDecoder<'_>,
+        r: usize,
+        c: usize,
+        avail_u: bool,
+        avail_l: bool,
+        skip: bool,
+    ) -> Result<()> {
+        if !self.segmentation.enabled {
+            self.segment_id = 0;
+            return Ok(());
+        }
+        let at = |row: usize, col: usize| -> i32 {
+            self.segment_ids
+                .get(row * self.mi_cols + col)
+                .map_or(-1, |&s| i32::from(s))
+        };
+        let prev_ul = if avail_u && avail_l {
+            at(r - 1, c - 1)
+        } else {
+            -1
+        };
+        let prev_u = if avail_u { at(r - 1, c) } else { -1 };
+        let prev_l = if avail_l { at(r, c - 1) } else { -1 };
+        let pred = if prev_u == -1 {
+            prev_l.max(0)
+        } else if prev_l == -1 || prev_ul == prev_u {
+            prev_u
+        } else {
+            prev_l
+        };
+        let segment = if skip {
+            pred
+        } else {
+            let ctx = if prev_ul < 0 {
+                0
+            } else if prev_ul == prev_u && prev_ul == prev_l {
+                2
+            } else if prev_ul == prev_u || prev_ul == prev_l || prev_u == prev_l {
+                1
+            } else {
+                0
+            };
+            let diff = dec.read_symbol(get_mut(&mut self.cdfs.segment_id, ctx)?)? as i32;
+            neg_deinterleave(diff, pred, self.last_active_segment as i32 + 1)
+        };
+        // A conformant stream stays within 0..=LastActiveSegId.
+        self.segment_id = usize::try_from(segment)
+            .ok()
+            .filter(|&s| s <= self.last_active_segment)
+            .ok_or_else(|| {
+                PixelsError::malformed(
+                    "avif",
+                    format!(
+                        "segment_id {segment} is outside 0..={}",
+                        self.last_active_segment
+                    ),
+                )
+            })?;
+        Ok(())
+    }
+
+    /// `get_qindex(ignoreDeltaQ, segment_id)` (§7.12.2) for the current block.
+    fn segment_qindex(&self, ignore_delta_q: bool) -> i32 {
+        let base = if !ignore_delta_q && self.delta_q_present {
+            self.current_qindex
+        } else {
+            self.base_q
+        };
+        if self
+            .segmentation
+            .feature_active(self.segment_id, SEG_LVL_ALT_Q)
+        {
+            (base
+                + self
+                    .segmentation
+                    .feature_value(self.segment_id, SEG_LVL_ALT_Q))
+            .clamp(0, 255)
+        } else {
+            base
+        }
     }
 
     /// `read_delta_qindex` (§5.11.12): the first block of a superblock may move
@@ -2189,13 +2323,16 @@ impl TileState {
             } else {
                 0
             };
-            let qindex_positive = self.qindex_positive;
+            // transform_type (§5.11.47) gates the luma symbol on the segment's
+            // quantizer before any delta_q.
+            let qindex_positive = self.segment_qindex(true) > 0;
             let tx_ctx = TxTypeCtx {
                 set: tx_set,
                 intra_cdfs: &mut self.cdfs.intra_tx_type,
                 intra_dir: dir,
                 uv_mode: tb.mode_index,
                 qindex_positive,
+                lossless: self.lossless,
             };
             let block = decode_coeffs(
                 dec,
@@ -2208,10 +2345,9 @@ impl TileState {
             )?;
             self.update_level_context(plane, x4, y4, w4, h4, block.cul_level, block.dc_category);
             if block.eob > 0 {
-                // get_dc_quant / get_ac_quant (§7.12.2) over get_qidx, which is
-                // CurrentQIndex whenever delta_q is present and base_q_idx
-                // otherwise — the two never differ when it is absent.
-                let qindex = self.current_qindex;
+                // get_dc_quant / get_ac_quant (§7.12.2) over get_qindex(0, ..):
+                // the segment's offset from CurrentQIndex or base_q_idx.
+                let qindex = self.segment_qindex(false);
                 let dc = dc_q(
                     self.bit_depth,
                     qindex + self.q_dc.get(plane).copied().unwrap_or(0),
@@ -2222,7 +2358,12 @@ impl TileState {
                 );
                 // §7.12.3 step 1b: a matrix weights only the 2D transforms
                 // (types before IDTX), and level 15 means none.
-                let level = self.qm_level.get(plane).copied().unwrap_or(15);
+                // SegQMLevel (§5.9.12): 15, meaning none, for a lossless segment.
+                let level = if self.using_qmatrix && !self.lossless {
+                    self.qm.get(plane).copied().unwrap_or(15)
+                } else {
+                    15
+                };
                 let matrix = ((block.tx_type as usize) < TxType::Idtx as usize)
                     .then(|| quantizer_matrix(level, plane > 0, tx_size))
                     .flatten();
@@ -2866,6 +3007,36 @@ struct PaletteView<'a> {
 /// `get_tx_size` for a chroma plane (§5.11.37), given the block's residual size
 /// on that plane: its largest rectangular transform, with any 64-sample side
 /// reduced to 32 (chroma codes no 64-wide/high transform).
+/// `neg_deinterleave` (§5.11.9): undo the coding of a `segment_id` as its
+/// distance from the predicted one, alternating either side of it.
+fn neg_deinterleave(diff: i32, reference: i32, max: i32) -> i32 {
+    if reference == 0 {
+        return diff;
+    }
+    if reference >= max - 1 {
+        return max - diff - 1;
+    }
+    if 2 * reference < max {
+        if diff <= 2 * reference {
+            return if diff & 1 == 1 {
+                reference + ((diff + 1) >> 1)
+            } else {
+                reference - (diff >> 1)
+            };
+        }
+        return diff;
+    }
+    if diff <= 2 * (max - reference - 1) {
+        if diff & 1 == 1 {
+            reference + ((diff + 1) >> 1)
+        } else {
+            reference - (diff >> 1)
+        }
+    } else {
+        max - (diff + 1)
+    }
+}
+
 /// The magnitude-and-sign coding shared by `delta_qindex` and `delta_lf`: a
 /// symbol up to `DELTA_Q_SMALL` (= `DELTA_LF_SMALL` = 3), escaping to a
 /// literal-length literal, then a sign bit when nonzero.
@@ -3119,6 +3290,29 @@ mod tests {
         assert_eq!(error.code(), otf_pixels_core::ErrorCode::Malformed);
         // Empty input.
         assert!(split_tile_group(&[], &info).is_err());
+    }
+
+    #[test]
+    fn neg_deinterleave_maps_each_difference_to_a_distinct_segment() {
+        // For every prediction and segment count, the coded differences
+        // 0..max reach every segment exactly once, nearest first.
+        for max in 1..=8 {
+            for reference in 0..max {
+                let mut seen: Vec<i32> = (0..max)
+                    .map(|diff| neg_deinterleave(diff, reference, max))
+                    .collect();
+                assert_eq!(seen[0], reference, "difference 0 is the prediction");
+                seen.sort_unstable();
+                assert_eq!(
+                    seen,
+                    (0..max).collect::<Vec<_>>(),
+                    "max {max} ref {reference}"
+                );
+            }
+        }
+        // The alternation around a middle prediction: 3, 4, 2, 5, 1, ...
+        let order: Vec<i32> = (0..8).map(|d| neg_deinterleave(d, 3, 8)).collect();
+        assert_eq!(order, [3, 4, 2, 5, 1, 6, 0, 7]);
     }
 
     #[test]

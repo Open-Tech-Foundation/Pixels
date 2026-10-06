@@ -13,9 +13,11 @@
 //! range (`yuv.rs`), to `Rgb8` or — for 10/12-bit — full-range `Rgb16`.
 //! Monochrome pictures decode to grey, and a straight (not premultiplied)
 //! alpha auxiliary item — a second AV1 image — becomes the alpha channel.
-//! Anything outside that (other matrices, premultiplied alpha, intra block copy,
-//! grids, film grain, the tools `decode_still` refuses) is
-//! reported as [`PixelsError::Unsupported`] rather than decoded wrong.
+//! Every AV1 intra coding tool an encoder uses for stills is decoded —
+//! segmentation, delta-q/delta-lf, quantizer matrices, any tiling. Anything
+//! outside that (other matrices, premultiplied alpha, intra block copy, grids,
+//! film grain) is reported as [`PixelsError::Unsupported`] rather than decoded
+//! wrong.
 
 use crate::boxes::{FourCc, Reader};
 use crate::meta::Meta;

@@ -223,9 +223,11 @@ pub struct TxTypeCtx<'a> {
     pub intra_dir: usize,
     /// `UVMode` for the chroma (plane > 0) derivation.
     pub uv_mode: usize,
-    /// Whether the quantiser index is non-zero; `false` is the lossless path,
-    /// which is always `DCT_DCT`.
+    /// Whether the segment's quantiser index (`get_qindex(1, segment_id)`) is
+    /// non-zero; only then is a luma `intra_tx_type` symbol coded.
     pub qindex_positive: bool,
+    /// The block's `Lossless`: every plane is then `DCT_DCT` (the WHT path).
+    pub lossless: bool,
 }
 
 /// The scan order (`get_scan`, §5.11.41) for a transform size and type.
@@ -348,7 +350,7 @@ pub fn decode_coeffs(
             tx.intra_dir,
             tx.qindex_positive,
         )?
-    } else if tx.qindex_positive {
+    } else if !tx.lossless {
         chroma_tx_type(tx.uv_mode, tx.set)
     } else {
         TxType::DctDct
@@ -711,6 +713,7 @@ mod tests {
             intra_dir: 0,
             uv_mode: 0,
             qindex_positive: false,
+            lossless: true,
         };
         let block = decode_coeffs(&mut dec, &mut cdfs, TxSize::Tx4x4, tx, 0, 0, 0).unwrap();
         assert_eq!(block.tx_type, TxType::DctDct);
