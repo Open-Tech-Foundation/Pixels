@@ -143,6 +143,19 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- ADR-0014: own WebP, lossy and lossless, decode and encode, and remove
+  `image-webp`. The wrapped encoder can only write lossless WebP, and lossy
+  WebP output with quality control is one of the things an image API is
+  called for most.
+- `otf-pixels-codec-webp`: an owned RIFF container parser and VP8L
+  (lossless) decoder, which lossless stills now decode through. All four
+  transforms, colour indexing at every pixel-bundling width, the colour
+  cache, LZ77 with the short-distance neighbourhood map, and meta prefix
+  codes; prefix-code tables are built only for groups the image uses, so a
+  hostile file cannot make memory outgrow its own size. A 20-file corpus
+  written by libwebp at settings chosen to reach each of those tools decodes
+  exactly as libwebp does. Lossy and animated images still go through
+  `image-webp` for now.
 - AVIF segmentation, which rav1e (the encoder behind `ravif` and the Rust
   `image` crate) uses to give parts of the frame their own quantizer. Those
   files were refused as `Unsupported`. Each block's `segment_id` is read,

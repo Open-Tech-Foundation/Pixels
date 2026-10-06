@@ -1,13 +1,15 @@
-//! WebP codec for `otf-pixels`, wrapping [`image-webp`].
+//! WebP codec for `otf-pixels`, being moved from [`image-webp`] to an owned
+//! implementation (ADR-0014).
 //!
 //! [`image-webp`]: https://docs.rs/image-webp
 //!
-//! # Why this one is wrapped
+//! # Ownership, layer by layer
 //!
-//! ADR-0004 ranks WebP as hard to own: the container holds *two* unrelated
-//! codecs — VP8 intra frames for lossy, and a separate dictionary-and-
-//! transform format for lossless — so owning WebP means writing two codecs,
-//! not one. The trait boundary means a later rewrite is a drop-in.
+//! The RIFF container (`riff`) and the VP8L lossless decoder ([`vp8l`]) are
+//! owned, and lossless stills decode through them. Lossy (VP8) and animated
+//! images still decode through `image-webp`, and encoding still uses its
+//! lossless encoder, until the owned VP8 decoder and the owned encoders land;
+//! the dependency goes when the last of them does.
 //!
 //! # Memory
 //!
@@ -28,6 +30,8 @@
 
 mod decoder;
 mod encoder;
+mod riff;
+pub mod vp8l;
 
 pub use decoder::{WebPCodec, WebPDecoder, probe};
 pub use encoder::WebPEncoder;

@@ -1,4 +1,8 @@
-//! The WebP decoder, wrapping `image-webp`.
+//! The WebP decoder.
+//!
+//! The container is parsed here (`riff`) and lossless stills decode through
+//! the owned VP8L decoder (`vp8l`). Lossy and animated images still go
+//! through `image-webp` until their owned layers land (ADR-0014).
 
 use otf_pixels_core::{
     Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, Orientation, PixelFormat,
@@ -59,6 +63,18 @@ impl WebPDecoder {
             }
         }
 
+        let container = crate::riff::parse(&bytes)?;
+        // An unreadable EXIF block is metadata lost, not an image refused.
+        let orientation = container
+            .exif
+            .and_then(Orientation::from_exif_block)
+            .unwrap_or_default();
+        if let (crate::riff::Bitstream::Lossless(stream), false) =
+            (container.bitstream, container.animated)
+        {
+            return Self::lossless(stream, &container, orientation, &limits);
+        }
+
         let mut decoder =
             image_webp::WebPDecoder::new(std::io::Cursor::new(bytes)).map_err(decode_error)?;
         let (width, height) = decoder.dimensions();
@@ -89,15 +105,39 @@ impl WebPDecoder {
         let mut pixels = vec![0_u8; wanted];
         decoder.read_image(&mut pixels).map_err(decode_error)?;
 
-        // A chunk that fails to read is metadata lost, not an image refused:
-        // the pixels above decoded fine.
-        let orientation = decoder
-            .exif_metadata()
-            .ok()
-            .flatten()
-            .and_then(|exif| Orientation::from_exif_block(&exif))
-            .unwrap_or_default();
+        Ok(Self {
+            descriptor,
+            pixels,
+            row: 0,
+            orientation,
+        })
+    }
+}
 
+impl WebPDecoder {
+    /// A lossless still, through the owned VP8L decoder.
+    fn lossless(
+        stream: &[u8],
+        container: &crate::riff::Container<'_>,
+        orientation: Orientation,
+        limits: &Limits,
+    ) -> Result<Self> {
+        let pixel = if container.has_alpha {
+            PixelFormat::Rgba8
+        } else {
+            PixelFormat::Rgb8
+        };
+        // Enforced before any pixel buffer exists (SPEC §Safety).
+        let descriptor =
+            ImageDescriptor::with_limits(container.width, container.height, pixel, limits)?;
+        let argb =
+            crate::vp8l::decode(stream, container.width as usize, container.height as usize)?;
+        let channels = if container.has_alpha { 4 } else { 3 };
+        let mut pixels = Vec::with_capacity(argb.len() * channels);
+        for p in argb {
+            let [blue, green, red, alpha] = p.to_le_bytes();
+            pixels.extend_from_slice([red, green, blue, alpha].get(..channels).unwrap_or(&[]));
+        }
         Ok(Self {
             descriptor,
             pixels,
