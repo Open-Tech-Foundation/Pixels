@@ -146,6 +146,15 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- An AV1 key-frame encoder for AVIF stills (8-bit, 4:2:0 or monochrome),
+  built as the tile decoder driven by decisions: every symbol site asks a
+  `TileCoder`, which either reads the stream or decides and writes it, so the
+  encoder predicts, reconstructs and adapts its probabilities with the very
+  code that decodes. Variance-driven partitioning down to 8x8, the closest of
+  the 13 intra modes per block, forward transforms derived from the normative
+  inverses, dead-zone quantization, deblocking and CDEF. libaom decodes every
+  test stream to exactly what ours does. The AVIF container and the
+  `Format::Avif` encoder that use it follow.
 - AVIF encoding groundwork: the AV1 multi-symbol arithmetic encoder (libaom's
   `od_ec_enc`, sharing the decoder's CDF adaptation, round-tripped symbol for
   symbol through our decoder) and writers for the reduced still-picture

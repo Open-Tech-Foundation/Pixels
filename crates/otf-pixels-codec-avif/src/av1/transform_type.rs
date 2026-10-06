@@ -15,7 +15,7 @@
 //! reconstruction; the helpers here take the resolved inputs directly.
 
 use super::cdf;
-use super::symbol::SymbolDecoder;
+use super::symbol::{SymbolDecoder, SymbolEncoder};
 use super::transform::{TxSize, TxType};
 use otf_pixels_core::{PixelsError, Result};
 
@@ -209,6 +209,40 @@ pub fn read_transform_type(
         _ => &TX_TYPE_INTRA_INV_SET2,
     };
     Ok(inv.get(symbol).copied().unwrap_or(TxType::DctDct))
+}
+
+/// Write `tx_type` where [`read_transform_type`] would read it: nothing for a
+/// `DCT_DCT`-only set or a zero quantizer, else its index in the set.
+///
+/// # Errors
+///
+/// Rejects an out-of-range context.
+pub(crate) fn write_transform_type(
+    enc: &mut SymbolEncoder,
+    cdfs: &mut IntraTxTypeCdfs,
+    set: IntraTxSet,
+    tx_size: TxSize,
+    intra_dir: usize,
+    qindex_positive: bool,
+    tx_type: TxType,
+) -> Result<()> {
+    if set == IntraTxSet::DctOnly || !qindex_positive {
+        return Ok(());
+    }
+    let sqr = tx_size.sqr_idx() as usize;
+    let (inv, cdf): (&[TxType], &mut [u16]) = match set {
+        IntraTxSet::Set1 => (
+            &TX_TYPE_INTRA_INV_SET1,
+            row_mut(row_mut(&mut cdfs.set1, sqr)?, intra_dir)?,
+        ),
+        _ => (
+            &TX_TYPE_INTRA_INV_SET2,
+            row_mut(row_mut(&mut cdfs.set2, sqr)?, intra_dir)?,
+        ),
+    };
+    let index = inv.iter().position(|&t| t == tx_type).unwrap_or(0);
+    enc.write_symbol(cdf, index);
+    Ok(())
 }
 
 /// `Mode_To_Txfm[uvMode]` (§5.11.40).

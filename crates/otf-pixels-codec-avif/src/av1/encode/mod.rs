@@ -6,4 +6,6 @@
               uses every piece here"
 )]
 
+pub(crate) mod frame;
 pub(crate) mod headers;
+pub(crate) mod tile;

@@ -17,9 +17,11 @@
 //! and flows through the same entry point.
 
 use super::cdf;
-use super::symbol::SymbolDecoder;
+use super::symbol::{SymbolDecoder, SymbolEncoder};
 use super::transform::{TxSize, TxType};
-use super::transform_type::{IntraTxSet, IntraTxTypeCdfs, chroma_tx_type, read_transform_type};
+use super::transform_type::{
+    IntraTxSet, IntraTxTypeCdfs, chroma_tx_type, read_transform_type, write_transform_type,
+};
 use otf_pixels_core::{PixelsError, Result};
 
 include!("scan_tables.rs");
@@ -472,6 +474,192 @@ pub fn decode_coeffs(
     })
 }
 
+/// Write one transform block's coefficients where [`decode_coeffs`] would
+/// read them, and return the block exactly as the decoder will see it.
+///
+/// `levels` are the signed quantized levels in the block's raster order (the
+/// layout of [`CoeffBlock::quant`]); `tx_type` is what the encoder transformed
+/// with, which must be the type the decoder will resolve.
+///
+/// # Errors
+///
+/// Rejects an out-of-range context.
+#[allow(clippy::too_many_arguments, reason = "the coefficient syntax's inputs")]
+pub(crate) fn encode_coeffs(
+    enc: &mut SymbolEncoder,
+    cdfs: &mut CoeffCdfs,
+    tx_size: TxSize,
+    tx: TxTypeCtx<'_>,
+    tx_type: TxType,
+    ptype: usize,
+    all_zero_ctx: usize,
+    dc_sign_ctx: usize,
+    levels: &[i32],
+) -> Result<CoeffBlock> {
+    let pt = ptype.min(1);
+    let tx_ctx = tx_size.tx_size_ctx();
+    let cls = tx_class(tx_type);
+    let scan = get_scan(tx_size, tx_type);
+    let level_at = |c: usize| {
+        levels
+            .get(scan.get(c).map_or(0, |&p| usize::from(p)))
+            .copied()
+            .unwrap_or(0)
+    };
+    let eob = (0..scan.len())
+        .rev()
+        .find(|&c| level_at(c) != 0)
+        .map_or(0, |c| c + 1);
+
+    let skip_cdf = cdf_row(cdf_row(&mut cdfs.txb_skip, tx_ctx)?, all_zero_ctx)?;
+    enc.write_symbol(skip_cdf, usize::from(eob == 0));
+    let mut quant = [0_i32; MAX_COEFFS];
+    if eob == 0 {
+        return Ok(CoeffBlock {
+            quant,
+            eob: 0,
+            cul_level: 0,
+            dc_category: 0,
+            tx_type: TxType::DctDct,
+        });
+    }
+    if ptype == 0 {
+        write_transform_type(
+            enc,
+            tx.intra_cdfs,
+            tx.set,
+            tx_size,
+            tx.intra_dir,
+            tx.qindex_positive,
+            tx_type,
+        )?;
+    }
+
+    // eob_pt and its refinement bits.
+    let eob_pt = if eob <= 2 {
+        eob
+    } else {
+        2 + (usize::BITS - 1 - (eob - 1).leading_zeros()) as usize
+    };
+    let eob_ctx = usize::from(cls != 0);
+    let symbol = eob_pt - 1;
+    match tx_size.eob_multisize() {
+        0 => enc.write_symbol(cdf_row(cdf_row(&mut cdfs.eob_pt_16, pt)?, eob_ctx)?, symbol),
+        1 => enc.write_symbol(cdf_row(cdf_row(&mut cdfs.eob_pt_32, pt)?, eob_ctx)?, symbol),
+        2 => enc.write_symbol(cdf_row(cdf_row(&mut cdfs.eob_pt_64, pt)?, eob_ctx)?, symbol),
+        3 => enc.write_symbol(
+            cdf_row(cdf_row(&mut cdfs.eob_pt_128, pt)?, eob_ctx)?,
+            symbol,
+        ),
+        4 => enc.write_symbol(
+            cdf_row(cdf_row(&mut cdfs.eob_pt_256, pt)?, eob_ctx)?,
+            symbol,
+        ),
+        5 => enc.write_symbol(cdf_row(&mut cdfs.eob_pt_512, pt)?, symbol),
+        _ => enc.write_symbol(cdf_row(&mut cdfs.eob_pt_1024, pt)?, symbol),
+    }
+    if eob_pt >= 3 {
+        let offset = eob - ((1 << (eob_pt - 2)) + 1);
+        let extra_cdf = cdf_row(
+            cdf_row(cdf_row(&mut cdfs.eob_extra, tx_ctx)?, pt)?,
+            eob_pt - 3,
+        )?;
+        enc.write_symbol(extra_cdf, (offset >> (eob_pt - 3)) & 1);
+        for i in 1..eob_pt - 2 {
+            let shift = eob_pt - 2 - 1 - i;
+            enc.write_bool((offset >> shift) & 1 == 1);
+        }
+    }
+
+    // Base levels and ranges, backwards, filling `quant` as the decoder does.
+    let cap = NUM_BASE_LEVELS + COEFF_BASE_RANGE + 1;
+    for c in (0..eob).rev() {
+        let pos = scan.get(c).map_or(0, |&p| usize::from(p));
+        let magnitude = level_at(c).abs().min(cap);
+        if c == eob - 1 {
+            let ctx = coeff_base_ctx(tx_size, cls, &quant, pos, c, true) + SIG_COEF_CONTEXTS_EOB
+                - SIG_COEF_CONTEXTS;
+            let cdf_ref = cdf_row(
+                cdf_row(cdf_row(&mut cdfs.coeff_base_eob, tx_ctx)?, pt)?,
+                ctx,
+            )?;
+            enc.write_symbol(cdf_ref, (magnitude.min(3) - 1) as usize);
+        } else {
+            let ctx = coeff_base_ctx(tx_size, cls, &quant, pos, c, false);
+            let cdf_ref = cdf_row(cdf_row(cdf_row(&mut cdfs.coeff_base, tx_ctx)?, pt)?, ctx)?;
+            enc.write_symbol(cdf_ref, magnitude.min(3) as usize);
+        }
+        if magnitude > NUM_BASE_LEVELS {
+            let br_ctx = coeff_br_ctx(tx_size, cls, &quant, pos);
+            let br_bucket = tx_ctx.min(3);
+            let mut remaining = magnitude - NUM_BASE_LEVELS - 1;
+            for _ in 0..(COEFF_BASE_RANGE / (BR_CDF_SIZE - 1)) {
+                let k = remaining.min(BR_CDF_SIZE - 1);
+                let cdf_ref = cdf_row(
+                    cdf_row(cdf_row(&mut cdfs.coeff_br, br_bucket)?, pt)?,
+                    br_ctx,
+                )?;
+                enc.write_symbol(cdf_ref, k as usize);
+                remaining -= k;
+                if k < BR_CDF_SIZE - 1 {
+                    break;
+                }
+            }
+        }
+        if let Some(slot) = quant.get_mut(pos) {
+            *slot = magnitude;
+        }
+    }
+
+    // Signs and Golomb tails, forwards.
+    let mut cul_level = 0_i32;
+    let mut dc_category = 0_u8;
+    for c in 0..eob {
+        let pos = scan.get(c).map_or(0, |&p| usize::from(p));
+        let value = level_at(c);
+        let magnitude = value.abs();
+        if magnitude != 0 {
+            if c == 0 {
+                let cdf_ref = cdf_row(cdf_row(&mut cdfs.dc_sign, pt)?, dc_sign_ctx)?;
+                enc.write_symbol(cdf_ref, usize::from(value < 0));
+            } else {
+                enc.write_bool(value < 0);
+            }
+        }
+        if magnitude > NUM_BASE_LEVELS + COEFF_BASE_RANGE {
+            write_golomb(enc, (magnitude - NUM_BASE_LEVELS - COEFF_BASE_RANGE) as u32);
+        }
+        if pos == 0 && magnitude > 0 {
+            dc_category = if value < 0 { 1 } else { 2 };
+        }
+        let magnitude = magnitude & 0xF_FFFF;
+        cul_level += magnitude;
+        if let Some(slot) = quant.get_mut(pos) {
+            *slot = if value < 0 { -magnitude } else { magnitude };
+        }
+    }
+    Ok(CoeffBlock {
+        quant,
+        eob,
+        cul_level: cul_level.min(63) as u8,
+        dc_category,
+        tx_type,
+    })
+}
+
+/// The inverse of `read_golomb`: `x >= 1` as its bit length in zeros, then
+/// its bits from the top.
+fn write_golomb(enc: &mut SymbolEncoder, x: u32) {
+    let length = 32 - x.leading_zeros();
+    for _ in 1..length {
+        enc.write_bool(false);
+    }
+    enc.write_bool(true);
+    for i in (0..length - 1).rev() {
+        enc.write_bool((x >> i) & 1 == 1);
+    }
+}
+
 /// `get_coeff_base_ctx` (§8.3.3). `is_eob` selects the four end-of-block
 /// contexts; otherwise the magnitude of already-decoded scan neighbours and the
 /// coefficient position pick the context.
@@ -624,6 +812,106 @@ fn read_golomb(dec: &mut SymbolDecoder<'_>) -> Result<i32> {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn written_coefficients_decode_to_the_same_block() {
+        use super::super::transform_type::intra_tx_set;
+        let mut state = 0x9e37_79b9_u32;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+        let sizes = [
+            TxSize::Tx4x4,
+            TxSize::Tx8x8,
+            TxSize::Tx16x16,
+            TxSize::Tx32x32,
+            TxSize::Tx8x16,
+            TxSize::Tx16x4,
+        ];
+        for round in 0..60 {
+            let size = sizes[round % sizes.len()];
+            let ptype = usize::from(round % 3 == 2);
+            let set = intra_tx_set(size, false);
+            let uv_mode = 1; // V_PRED: chroma derives ADST_DCT where the set allows
+            let tx_type = if ptype == 0 {
+                TxType::DctDct
+            } else {
+                chroma_tx_type(uv_mode, set)
+            };
+            let (w, h) = (size.adjusted_width(), size.adjusted_height());
+            // Sparse levels, a few of them huge (Golomb tails), sometimes none.
+            let density = next() % 4;
+            let levels: Vec<i32> = (0..w * h)
+                .map(|_| {
+                    let r = next();
+                    if density == 0 || r % (2 + density * 3) != 0 {
+                        0
+                    } else {
+                        let m = match r % 7 {
+                            0 => 40 + (r >> 20) as i32 % 3000,
+                            1 => 3 + (r >> 8) as i32 % 12,
+                            _ => 1 + (r >> 8) as i32 % 2,
+                        };
+                        if r & 1 == 0 { m } else { -m }
+                    }
+                })
+                .collect();
+            let (az, ds) = ((next() % 13) as usize, (next() % 3) as usize);
+            let mut enc = SymbolEncoder::new(false);
+            let mut cdfs = CoeffCdfs::new(2);
+            let mut tt = IntraTxTypeCdfs::new();
+            let written = encode_coeffs(
+                &mut enc,
+                &mut cdfs,
+                size,
+                TxTypeCtx {
+                    set,
+                    intra_cdfs: &mut tt,
+                    intra_dir: 0,
+                    uv_mode,
+                    qindex_positive: true,
+                    lossless: false,
+                },
+                tx_type,
+                ptype,
+                az,
+                ds,
+                &levels,
+            )
+            .unwrap();
+            let data = enc.finish();
+            let mut dec = SymbolDecoder::new(&data, false).unwrap();
+            let mut cdfs = CoeffCdfs::new(2);
+            let mut tt = IntraTxTypeCdfs::new();
+            let read = decode_coeffs(
+                &mut dec,
+                &mut cdfs,
+                size,
+                TxTypeCtx {
+                    set,
+                    intra_cdfs: &mut tt,
+                    intra_dir: 0,
+                    uv_mode,
+                    qindex_positive: true,
+                    lossless: false,
+                },
+                ptype,
+                az,
+                ds,
+            )
+            .unwrap();
+            assert_eq!(read.eob, written.eob, "round {round}");
+            assert_eq!(read.quant[..w * h], written.quant[..w * h], "round {round}");
+            assert_eq!(read.quant[..w * h], levels[..], "round {round}: levels");
+            assert_eq!(
+                (read.cul_level, read.dc_category, read.tx_type),
+                (written.cul_level, written.dc_category, written.tx_type)
+            );
+        }
+    }
 
     #[test]
     fn base_eob_contexts_match_the_spec_buckets() {

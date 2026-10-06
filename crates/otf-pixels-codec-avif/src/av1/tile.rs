@@ -158,21 +158,8 @@ pub fn decode_still(
                 ));
             }
             next_tile += 1;
-            let (row, col) = (tile.number / info.cols, tile.number % info.cols);
-            let start = |starts: &[u32], i: u32, limit: usize| {
-                starts
-                    .get(i as usize)
-                    .map_or(limit, |&sb| ((sb as usize) << sb_shift).min(limit))
-            };
-            state.decode_tile(
-                tile.data,
-                TileBounds {
-                    row_start: start(&info.row_starts_sb, row, state.mi_rows),
-                    row_end: start(&info.row_starts_sb, row + 1, state.mi_rows),
-                    col_start: start(&info.col_starts_sb, col, state.mi_cols),
-                    col_end: start(&info.col_starts_sb, col + 1, state.mi_cols),
-                },
-            )?;
+            let bounds = tile_bounds(info, sb_shift, state.mi_rows, state.mi_cols, tile.number);
+            state.decode_tile(tile.data, bounds)?;
         }
     }
     if next_tile != info.count() {
@@ -244,6 +231,28 @@ fn tile_overrun(number: u32) -> PixelsError {
         "avif",
         format!("tile {number} claims more bytes than its tile group holds"),
     )
+}
+
+/// Tile `number`'s extent in 4x4 units, from the frame's tile layout.
+pub(crate) fn tile_bounds(
+    info: &TileInfo,
+    sb_shift: u32,
+    mi_rows: usize,
+    mi_cols: usize,
+    number: u32,
+) -> TileBounds {
+    let (row, col) = (number / info.cols.max(1), number % info.cols.max(1));
+    let start = |starts: &[u32], i: u32, limit: usize| {
+        starts
+            .get(i as usize)
+            .map_or(limit, |&sb| ((sb as usize) << sb_shift).min(limit))
+    };
+    TileBounds {
+        row_start: start(&info.row_starts_sb, row, mi_rows),
+        row_end: start(&info.row_starts_sb, row + 1, mi_rows),
+        col_start: start(&info.col_starts_sb, col, mi_cols),
+        col_end: start(&info.col_starts_sb, col + 1, mi_cols),
+    }
 }
 
 /// One tile's extent in 4x4 units (`MiRowStart`..`MiRowEnd`,
@@ -431,7 +440,7 @@ struct LevelContext {
 
 /// The whole mutable state of a tile decode.
 pub(crate) struct TileState {
-    planes: Vec<Plane>,
+    pub(crate) planes: Vec<Plane>,
     cdfs: FrameCdfs,
     bit_depth: u8,
     num_planes: usize,
@@ -735,7 +744,7 @@ impl TileState {
 
     /// The in-loop filters and upscale, over the whole frame once every tile
     /// is reconstructed: they cross tile boundaries (§5.11.52).
-    fn post_filter(&mut self) {
+    pub(crate) fn post_filter(&mut self) {
         self.deblock();
         // Loop restoration reads both the pre-CDEF (deblocked) and post-CDEF
         // frames, so when it runs, snapshot the deblocked frame before CDEF. Both
@@ -2257,6 +2266,79 @@ impl TileState {
     /// used a smooth mode, which softens the directional edge filter. On a
     /// subsampled chroma plane the neighbour is looked up at the unit that owns
     /// the co-located chroma (the odd column/row of each pair).
+    /// What intra `mode` would predict for the whole of plane `plane` of the
+    /// block at `(r, c)`, as the decoder will predict its first transform
+    /// block — exact for an encoder that codes every block of 8x8 or more
+    /// with one transform. `None` for a mode or shape this cannot preview.
+    pub(crate) fn preview_prediction(
+        &self,
+        r: usize,
+        c: usize,
+        bw4: usize,
+        bh4: usize,
+        plane: usize,
+        mode: usize,
+    ) -> Option<Vec<u16>> {
+        let (avail_u, avail_l) = (self.avail_u(r), self.avail_l(c));
+        let modes = BlockModes {
+            r,
+            c,
+            avail_u,
+            avail_l,
+            avail_u_chroma: avail_u,
+            avail_l_chroma: avail_l,
+            y_mode: mode,
+            uv_mode: mode,
+            y_delta: 0,
+            uv_delta: 0,
+            filter_intra: None,
+            cfl: None,
+            palette: Palette::default(),
+            luma_tx_size: TxSize::Tx4x4,
+        };
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        let block = block_size_index(bw4, bh4);
+        let plane_block = plane_residual_size(block, sub_x, sub_y);
+        if plane_block == BLOCK_INVALID {
+            return None;
+        }
+        let (plane_bw4, plane_bh4) = block_4x4_dims(plane_block);
+        let tx_size = if plane == 0 {
+            max_tx_size_rect(block)
+        } else {
+            chroma_tx_size(plane_block)
+        };
+        let tb = TxBlock {
+            plane,
+            x: (c >> sub_x) * MI_SIZE,
+            y: (r >> sub_y) * MI_SIZE,
+            tx_size,
+            mode: IntraMode::from_index(mode as u8)?,
+            mode_index: mode,
+            angle_delta: 0,
+            have_left: avail_l,
+            have_above: avail_u,
+            filter_type: self.filter_type(&modes, plane),
+            filter_intra: None,
+            cfl_alpha: None,
+            palette: None,
+            skip: false,
+            plane_bw4,
+            plane_bh4,
+        };
+        self.predict(&tb, tx_size.width(), tx_size.height()).ok()
+    }
+
+    /// The decoder state for `seq` and `frame`, ready to code tiles into.
+    pub(crate) fn for_frame(seq: &SequenceHeader, frame: &FrameHeader) -> Result<Self> {
+        Self::new(seq, frame)
+    }
+
+    /// `MiRows` and `MiCols`.
+    pub(crate) const fn mi_dims(&self) -> (usize, usize) {
+        (self.mi_rows, self.mi_cols)
+    }
+
     fn filter_type(&self, modes: &BlockModes, plane: usize) -> bool {
         let is_smooth = |mode: usize| (9..=11).contains(&mode);
         let smooth_at = |r: usize, c: usize| {

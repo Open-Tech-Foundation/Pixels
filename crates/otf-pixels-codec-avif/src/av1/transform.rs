@@ -88,7 +88,7 @@ pub use dsp::{
 /// `.get()` would obscure the correspondence with the spec, so the module opts
 /// into `indexing_slicing`: every index is a spec constant bounded below the
 /// array length (`T` is 64 long, the largest transform).
-mod dsp {
+pub(crate) mod dsp {
     #![allow(
         clippy::indexing_slicing,
         clippy::needless_range_loop,
@@ -879,6 +879,115 @@ mod dsp {
         }
     }
 
+    /// The forward transform the encoder needs, derived from the inverse one
+    /// above rather than transcribed: AV1's inverse transform is separable
+    /// (rows, a shift, columns, a shift), so probing each 1D inverse with
+    /// impulses gives its synthesis matrix, and the forward transform is the
+    /// projection onto those near-orthogonal bases. Scaling then matches the
+    /// decoder by construction, and only the inverse is normative.
+    #[derive(Debug, Clone)]
+    pub(crate) struct ForwardBasis {
+        w: usize,
+        h: usize,
+        /// `row[x * w + j]`: output sample `x` of the row inverse of impulse `j`.
+        row: Vec<f64>,
+        /// `col[y * h + i]`: the column inverse, likewise.
+        col: Vec<f64>,
+        /// Squared norm of each basis vector.
+        row_norm: Vec<f64>,
+        col_norm: Vec<f64>,
+        /// The shifts and rectangular scaling between the two passes.
+        gain: f64,
+        flip_ud: bool,
+        flip_lr: bool,
+    }
+
+    fn basis_1d(kind: Kind, log2n: u32) -> (Vec<f64>, Vec<f64>) {
+        const IMPULSE: i64 = 1 << 12;
+        let n = 1usize << log2n;
+        let mut m = vec![0.0; n * n];
+        for j in 0..n {
+            let mut t = [0_i64; 64];
+            t[j] = IMPULSE;
+            apply_1d(&mut t, kind, log2n, 40);
+            for x in 0..n {
+                m[x * n + j] = t[x] as f64 / IMPULSE as f64;
+            }
+        }
+        let norm = (0..n)
+            .map(|j| (0..n).map(|x| m[x * n + j] * m[x * n + j]).sum())
+            .collect();
+        (m, norm)
+    }
+
+    impl ForwardBasis {
+        /// The basis for a lossy (non-WHT) transform of `tx_size` and `tx_type`.
+        pub(crate) fn new(tx_size: TxSize, tx_type: TxType) -> Self {
+            let (log2w, log2h) = (tx_size.log2_width(), tx_size.log2_height());
+            let (row, row_norm) = basis_1d(tx_type.row_kind(), log2w);
+            let (col, col_norm) = basis_1d(tx_type.col_kind(), log2h);
+            let rect = if log2w.abs_diff(log2h) == 1 {
+                2896.0 / 4096.0
+            } else {
+                1.0
+            };
+            let gain = rect / f64::from(1_u32 << (tx_size.row_shift() + 4));
+            Self {
+                w: 1 << log2w,
+                h: 1 << log2h,
+                row,
+                col,
+                row_norm,
+                col_norm,
+                gain,
+                flip_ud: tx_type.flip_ud(),
+                flip_lr: tx_type.flip_lr(),
+            }
+        }
+
+        /// Coefficients (in the dequantised domain the inverse takes, raster
+        /// order) whose inverse transform is `residual` (`w * h`, row-major).
+        pub(crate) fn forward(&self, residual: &[i32]) -> Vec<f64> {
+            let (w, h) = (self.w, self.h);
+            let at = |y: usize, x: usize| {
+                let y = if self.flip_ud { h - 1 - y } else { y };
+                let x = if self.flip_lr { w - 1 - x } else { x };
+                f64::from(residual[y * w + x])
+            };
+            // Rows: project each residual row onto the row basis.
+            let mut tmp = vec![0.0; w * h];
+            for y in 0..h {
+                for j in 0..w {
+                    let mut acc = 0.0;
+                    for x in 0..w {
+                        acc += at(y, x) * self.row[x * w + j];
+                    }
+                    tmp[y * w + j] = acc / self.row_norm[j];
+                }
+            }
+            // Columns.
+            let mut out = vec![0.0; w * h];
+            for i in 0..h {
+                for j in 0..w {
+                    let mut acc = 0.0;
+                    for y in 0..h {
+                        acc += tmp[y * w + j] * self.col[y * h + i];
+                    }
+                    out[i * w + j] = acc / self.col_norm[i] / self.gain;
+                }
+            }
+            out
+        }
+    }
+
+    /// The level the dequantiser turns into (about) `coefficient`, with a
+    /// dead zone: `bias` is the rounding point as a fraction of a step.
+    pub(crate) fn quantize(coefficient: f64, q: i64, tx_size: TxSize, bias: f64) -> i32 {
+        let scaled = coefficient.abs() * tx_size.dq_denom() as f64 / q as f64;
+        let level = (scaled + bias).floor().min(f64::from(1 << 20)) as i32;
+        if coefficient < 0.0 { -level } else { level }
+    }
+
     /// The dequantised coefficient block `Dequant[i][j]`, raster order over the
     /// populated `tw` by `th` region (`tw = min(32,w)`, `th = min(32,h)`).
     pub struct Dequant {
@@ -990,6 +1099,65 @@ mod dsp {
     )]
     mod dsp_tests {
         use super::*;
+
+        #[test]
+        fn the_derived_forward_transform_inverts_the_decoders() {
+            // Random residuals through forward, a fine quantizer, and the real
+            // inverse come back within rounding, for every size and type the
+            // encoder uses.
+            let mut state = 0x1234_5678_u32;
+            let types = [
+                TxType::DctDct,
+                TxType::AdstDct,
+                TxType::DctAdst,
+                TxType::AdstAdst,
+                TxType::FlipadstDct,
+            ];
+            for size in [
+                TxSize::Tx4x4,
+                TxSize::Tx8x8,
+                TxSize::Tx16x16,
+                TxSize::Tx32x32,
+                TxSize::Tx8x16,
+                TxSize::Tx16x8,
+                TxSize::Tx4x16,
+            ] {
+                for tx_type in types {
+                    if size.sqr_up_idx() >= 3 && tx_type != TxType::DctDct {
+                        continue;
+                    }
+                    let (w, h) = (size.width(), size.height());
+                    let residual: Vec<i32> = (0..w * h)
+                        .map(|_| {
+                            state ^= state << 13;
+                            state ^= state >> 17;
+                            state ^= state << 5;
+                            (state % 201) as i32 - 100
+                        })
+                        .collect();
+                    let basis = ForwardBasis::new(size, tx_type);
+                    let coeffs = basis.forward(&residual);
+                    let denom = size.dq_denom();
+                    let levels: Vec<i32> = coeffs
+                        .iter()
+                        .map(|&c| quantize(c, denom, size, 0.5))
+                        .collect();
+                    let dq = dequantize_with_matrix(&levels, size, denom, denom, None, 8);
+                    let back = inverse_transform_2d(&dq, size, tx_type, false, 8);
+                    let mut worst = 0;
+                    for y in 0..h {
+                        for x in 0..w {
+                            let (yy, xx) = (
+                                if tx_type.flip_ud() { h - 1 - y } else { y },
+                                if tx_type.flip_lr() { w - 1 - x } else { x },
+                            );
+                            worst = worst.max((back.at(y, x) - residual[yy * w + xx]).abs());
+                        }
+                    }
+                    assert!(worst <= 2, "{size:?} {tx_type:?}: off by {worst}");
+                }
+            }
+        }
 
         #[test]
         fn quantizer_matrix_lookup_follows_the_spec_table() {
