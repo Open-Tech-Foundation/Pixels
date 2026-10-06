@@ -78,7 +78,9 @@ Ordered by expected value, each gated on its own ADR before work starts:
 
 1. **GPU backend** — wgpu compute, opt-in per pipeline (ADR-0007).
 2. **Op fusion** — merge adjacent pointwise ops into one kernel pass.
-3. **ICC color management** — real color pipeline beyond sRGB-assumed.
+3. **ICC color management** — profiles are preserved and matrix/TRC ones
+   converted to sRGB (ADR-0015); LUT-based and CMYK profiles, other
+   rendering intents and non-sRGB targets remain.
 4. **Progressive JPEG encode; WebP from scratch** (if still desired once
    v1 ships; the trait boundary makes it a drop-in).
 5. **Animation pipelines** — multi-frame GIF/WebP/AVIF encode.

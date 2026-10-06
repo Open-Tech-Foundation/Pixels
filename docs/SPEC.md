@@ -56,6 +56,10 @@ Color space: pixels without a profile are sRGB. An embedded ICC profile is
 read from PNG (`iCCP`), JPEG (`APP2`), WebP (`ICCP`), TIFF (tag 34675) and
 AVIF (`colr`), carried through the pipeline (`Image::icc_profile`), and
 written into any output format with a place for one; GIF and raw drop it.
+Opening converts matrix/TRC RGB and grey profiles to sRGB (relative
+colorimetric, clipped, within one step of lcms2) and drops the profile
+(`OpenOptions::to_srgb`, default on; ADR-0015). Other profiles are kept
+unconverted.
 Alpha is
 unassociated (straight) at API boundaries; ops that require premultiplied
 alpha convert internally.

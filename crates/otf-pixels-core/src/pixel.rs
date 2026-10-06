@@ -190,9 +190,10 @@ impl fmt::Display for PixelFormat {
 
 /// The color model a descriptor's samples are interpreted in.
 ///
-/// v1 is sRGB-assumed (SPEC §Pixel formats); ICC transforms are v2. The enum
-/// exists so that the v2 color pipeline is an added variant rather than a
-/// breaking descriptor change.
+/// Samples are sRGB once opened: an embedded ICC profile is converted on
+/// open or carried beside the pixels (SPEC §Pixel formats, ADR-0015). The
+/// enum exists so that other working spaces are an added variant rather than
+/// a breaking descriptor change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum ColorModel {

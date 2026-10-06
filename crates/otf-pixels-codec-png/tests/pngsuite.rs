@@ -31,8 +31,8 @@
 //!
 //! Deliberately **excluded**, because v1 does not implement the feature and a
 //! passing test would be meaningless: gamma correction (`g*`) and background
-//! compositing (`bg*`). SPEC §Pixel formats is sRGB-assumed and ICC is v2, so
-//! those chunks are ancillary data we correctly skip rather than honour.
+//! compositing (`bg*`). `gAMA` and `bKGD` are ancillary chunks we skip rather
+//! than honour; only `iCCP` carries colour information here (ADR-0015).
 
 #![allow(
     clippy::unwrap_used,

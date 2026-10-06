@@ -21,7 +21,7 @@
     reason = "tests operate on known-good values and assert shapes directly"
 )]
 
-use otf_pixels::{EncodeOptions, Format, Image, ImageDescriptor, PixelFormat};
+use otf_pixels::{EncodeOptions, Format, Image, ImageDescriptor, OpenOptions, PixelFormat};
 
 fn fixture(name: &str) -> String {
     format!("{}/tests/fixtures/icc/{name}", env!("CARGO_MANIFEST_DIR"))
@@ -31,12 +31,113 @@ fn p3() -> Vec<u8> {
     std::fs::read(fixture("display_p3.icc")).unwrap()
 }
 
+/// Opened as stored: no conversion, so the profile is still the file's.
 fn open(name: &str) -> Image {
-    Image::open(fixture(name)).unwrap()
+    Image::open_with(fixture(name), as_stored()).unwrap()
 }
 
 fn reopen(bytes: Vec<u8>) -> Image {
-    Image::from_stream(std::io::Cursor::new(bytes)).unwrap()
+    Image::from_stream_with(std::io::Cursor::new(bytes), as_stored()).unwrap()
+}
+
+fn as_stored() -> OpenOptions {
+    OpenOptions::default().with_to_srgb(false)
+}
+
+fn raw(image: Image) -> Vec<u8> {
+    image
+        .output(Format::Raw, EncodeOptions::default())
+        .bytes()
+        .unwrap()
+}
+
+/// Our sRGB conversion of a fixture against lcms2's: the worst difference.
+fn worst_against_lcms(name: &str, image: Image) -> u8 {
+    let theirs = std::fs::read(fixture(&format!("{name}.srgb.raw"))).unwrap();
+    let ours = raw(image);
+    assert_eq!(ours.len(), theirs.len(), "{name}");
+    ours.iter()
+        .zip(&theirs)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap()
+}
+
+#[test]
+fn opening_converts_to_srgb_as_lcms2_does() {
+    for name in [
+        "display_p3",
+        "adobe_rgb",
+        "prophoto",
+        "rec2020",
+        "grey_gamma22",
+        "display_p3_alpha",
+    ] {
+        let image = Image::open(fixture(&format!("{name}.png"))).unwrap();
+        // Converted pixels are sRGB, so the profile is gone.
+        assert_eq!(image.icc_profile(), None, "{name}");
+        let worst = worst_against_lcms(name, image);
+        assert!(worst <= 1, "{name}: differs from lcms2 by up to {worst}");
+    }
+}
+
+#[test]
+fn conversion_can_be_deferred_and_applied_later() {
+    let stored = open("display_p3.png");
+    let as_stored = raw(open("display_p3.png"));
+    assert_ne!(
+        as_stored,
+        std::fs::read(fixture("display_p3.srgb.raw")).unwrap()
+    );
+    assert!(worst_against_lcms("display_p3", stored.to_srgb()) <= 1);
+    // A crop first, then the conversion: it is pointwise, so order is free.
+    let cropped = open("display_p3.png").crop(10, 5, 20, 10).to_srgb();
+    let whole = raw(Image::open(fixture("display_p3.png"))
+        .unwrap()
+        .crop(10, 5, 20, 10));
+    assert_eq!(raw(cropped), whole);
+}
+
+#[test]
+fn sixteen_bit_pixels_convert_like_eight_bit_ones() {
+    // The 8-bit card widened to 16 bits converts to the same colours.
+    let card = raw(open("display_p3.png"));
+    let wide: Vec<u8> = card
+        .iter()
+        .flat_map(|&v| (u16::from(v) * 257).to_ne_bytes())
+        .collect();
+    let descriptor = ImageDescriptor::new(96, 64, PixelFormat::Rgb16).unwrap();
+    let converted = raw(Image::from_raw(descriptor, wide)
+        .unwrap()
+        .with_icc_profile(Some(p3()))
+        .to_srgb());
+    let theirs = std::fs::read(fixture("display_p3.srgb.raw")).unwrap();
+    for (pair, &expected) in converted.chunks_exact(2).zip(&theirs) {
+        let v = u16::from_ne_bytes([pair[0], pair[1]]);
+        assert!(
+            (f64::from(v) / 257.0 - f64::from(expected)).abs() <= 1.0,
+            "{v} vs {expected}"
+        );
+    }
+}
+
+#[test]
+fn a_profile_that_cannot_be_converted_stays_with_the_pixels() {
+    // An RGB profile on grey pixels describes nothing they hold.
+    let grey = ImageDescriptor::new(4, 4, PixelFormat::Gray8).unwrap();
+    let image = Image::from_raw(grey, vec![100; 16])
+        .unwrap()
+        .with_icc_profile(Some(p3()))
+        .to_srgb();
+    assert_eq!(image.icc_profile(), Some(p3().as_slice()));
+    assert_eq!(raw(image), vec![100; 16]);
+    // Something that is not a profile at all.
+    let rgb = ImageDescriptor::new(2, 2, PixelFormat::Rgb8).unwrap();
+    let junk = Image::from_raw(rgb, vec![7; 12])
+        .unwrap()
+        .with_icc_profile(Some(b"junk".to_vec()))
+        .to_srgb();
+    assert_eq!(junk.icc_profile(), Some(&b"junk"[..]));
 }
 
 #[test]

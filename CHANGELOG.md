@@ -149,6 +149,14 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- ICC colour conversion to sRGB (ADR-0015). Opening an image converts
+  matrix/TRC RGB and grey profiles (Display P3, Adobe RGB, ProPhoto,
+  BT.2020, gamma, `curv` tables, every `para` curve) to sRGB and drops the
+  profile. `OpenOptions::with_to_srgb(false)` keeps pixels as stored, and
+  `Image::to_srgb` converts later. Profiles it cannot convert (LUT-based,
+  CMYK, Lab PCS) stay with the pixels. Results are within one step of
+  lcms2's on generated fixtures and on every RGB and grey profile colord and
+  Ghostscript ship. `ToSrgb` is also usable as an op.
 - ICC profiles are preserved. Every decoder that can find one reports it
   (`Decoder::icc_profile`): PNG `iCCP`, JPEG `APP2` (joined across
   segments, baseline and progressive), WebP `ICCP`, TIFF tag 34675 and AVIF

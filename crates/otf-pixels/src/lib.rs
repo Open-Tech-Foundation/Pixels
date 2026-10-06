@@ -68,8 +68,8 @@ pub use otf_pixels_core::{
     evaluate as evaluate_reference,
 };
 pub use otf_pixels_ops::{
-    Blend, Composite, Convolve, Crop, ExtractChannel, Filter, Fit, Flatten, Flip, Flop, Kernel,
-    Modulate, Quarter, Resize, ResizeOptions, Rotate,
+    Blend, Composite, Conversion, Convolve, Crop, ExtractChannel, Filter, Fit, Flatten, Flip, Flop,
+    Kernel, Modulate, Quarter, Resize, ResizeOptions, Rotate, ToSrgb, Unconvertible,
 };
 
 #[cfg(feature = "raw")]
@@ -105,6 +105,15 @@ pub struct OpenOptions {
     /// pixels arrive as stored, and [`Image::orient`] applies an orientation
     /// read some other way.
     pub auto_orient: bool,
+    /// Convert pixels in an embedded ICC profile's colour space to sRGB,
+    /// the space every op and most consumers assume (SPEC §Pixel formats).
+    ///
+    /// On by default, so a Display P3 phone photo or an Adobe RGB export
+    /// does not come out dull or garish. Off, pixels arrive as stored with
+    /// the profile attached ([`Image::icc_profile`]) and written into the
+    /// output, and [`Image::to_srgb`] converts later. A profile this cannot
+    /// convert is kept either way.
+    pub to_srgb: bool,
 }
 
 impl OpenOptions {
@@ -117,11 +126,21 @@ impl OpenOptions {
         self.auto_orient = auto_orient;
         self
     }
+
+    /// The defaults with `to_srgb` replaced.
+    #[must_use]
+    pub const fn with_to_srgb(mut self, to_srgb: bool) -> Self {
+        self.to_srgb = to_srgb;
+        self
+    }
 }
 
 impl Default for OpenOptions {
     fn default() -> Self {
-        Self { auto_orient: true }
+        Self {
+            auto_orient: true,
+            to_srgb: true,
+        }
     }
 }
 
@@ -319,7 +338,10 @@ impl Image {
     fn decoded(decoder: Box<dyn Decoder>, format: Format, options: OpenOptions) -> Self {
         let orientation = decoder.orientation();
         let icc = decoder.icc_profile().map(Vec::from);
-        let image = Self::from_decoder(decoder, format).with_icc_profile(icc);
+        let mut image = Self::from_decoder(decoder, format).with_icc_profile(icc);
+        if options.to_srgb {
+            image = image.to_srgb();
+        }
         if options.auto_orient {
             image.orient(orientation)
         } else {
@@ -536,6 +558,32 @@ impl Image {
     #[must_use]
     pub fn icc_profile(&self) -> Option<&[u8]> {
         self.icc.as_deref()
+    }
+
+    /// Convert the pixels from their ICC profile's colour space to sRGB, and
+    /// drop the profile.
+    ///
+    /// [`Image::open`] already does this unless told not to
+    /// ([`OpenOptions::to_srgb`]). Matrix/TRC RGB and grey profiles convert,
+    /// relative colorimetric with out-of-gamut colours clipped, as lcms2
+    /// does; a profile that is sRGB in all but name is just dropped. Any
+    /// other profile (LUT-based, CMYK, one that does not match the pixels)
+    /// is kept, unconverted, so the output still carries it.
+    #[must_use]
+    pub fn to_srgb(self) -> Self {
+        let Some(profile) = self.icc.clone() else {
+            return self;
+        };
+        let Ok(descriptor) = self.descriptor() else {
+            return self;
+        };
+        match ToSrgb::from_profile(&profile) {
+            Conversion::Convert(op) if op.applies_to(descriptor.pixel) => {
+                self.apply(Arc::new(op)).with_icc_profile(None)
+            }
+            Conversion::AlreadySrgb => self.with_icc_profile(None),
+            _ => self,
+        }
     }
 
     /// Declare the ICC profile the pixels are in, or with `None` drop it and
