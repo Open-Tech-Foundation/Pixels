@@ -91,20 +91,6 @@ jobs:
       - run: tsr interop
       - run: tsr references
 
-  benchmark:
-    name: exit-criterion benchmark
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # libvips is a system library, not a cargo dependency. The M5 benchmark
-      # skips cleanly without it; installing it here is what makes the
-      # published comparison a real measurement rather than a quoted figure.
-      - run: sudo apt-get update && sudo apt-get install -y libvips-tools
-      - uses: ./.github/actions/setup-tsr
-      - run: tsr bench
-
   fuzz:
     name: fuzz
     runs-on: ubuntu-latest

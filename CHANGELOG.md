@@ -57,6 +57,9 @@ versioning: [SemVer](https://semver.org/).
   with it rather than failing to build.
 
 ### Changed
+- `tsr test` (and CI's test job) runs `cargo test` without the benchmark
+  targets, which `--all-targets` used to run in full in a debug build. The
+  benchmarks are a local task, `tsr bench`, and no longer a CI job.
 - CI runs through the `tsr` task runner, as ES-Runtime does. Every command
   CI runs is a task in `tasks.toml`, so `tsr ci` locally is what a pull request
   must pass, and `tsr --list` shows the rest (`msrv`, `interop`,

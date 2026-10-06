@@ -20,8 +20,11 @@ run = "cargo fmt --all --check"
 [tasks.clippy]
 run = "cargo clippy --workspace --all-targets"
 
+# Every target but the benchmarks: they are `harness = false`, so under
+# `cargo test` they would run in full, in a debug build. They still compile
+# under `clippy --all-targets`.
 [tasks.test]
-run = "cargo test --workspace --all-targets"
+run = "cargo test --workspace --lib --bins --tests --examples"
 
 # `--all-targets` skips doctests, and the crate-level examples are part of the
 # documented contract.
@@ -66,8 +69,9 @@ run = "./scripts/check-deflate-interop.sh && ./scripts/check-png-interop.sh && .
 [tasks.references]
 run = "python3 scripts/regenerate-pngsuite-reference.py crates/otf-pixels-codec-png/tests/fixtures/pngsuite && python3 scripts/regenerate-gif-reference.py crates/otf-pixels-codec-gif/tests/fixtures && python3 scripts/regenerate-tiff-reference.py crates/otf-pixels-codec-tiff/tests/fixtures && python3 scripts/regenerate-jpeg-reference.py crates/otf-pixels-codec-jpeg/tests/fixtures && python3 scripts/regenerate-webp-reference.py crates/otf-pixels-codec-webp/tests/fixtures && python3 scripts/regenerate-avif-reference.py crates/otf-pixels-codec-avif/tests/fixtures && git diff --exit-code -- '*/REFERENCE'"
 
-# The exit-criterion benchmarks. They compare against libvips (libvips-tools)
-# when it is installed and skip that comparison cleanly when it is not.
+# The benchmarks: a local task, not run in CI, where shared runners make the
+# numbers noise. They compare against libvips (libvips-tools) when it is
+# installed and skip that comparison cleanly when it is not.
 [tasks.bench]
 run = "cargo bench -p otf-pixels --bench thumbnail && cargo bench -p otf-pixels --bench ops"
 
@@ -78,7 +82,7 @@ run = "cargo +nightly fuzz run png_decode -- -max_total_time=120 && cargo +night
 dir = "fuzz"
 
 # What a pull request must pass, needing nothing beyond a Rust toolchain and
-# Python. `interop`, `references`, `msrv`, `bench` and `fuzz` need extra tools
-# and run as their own CI jobs.
+# Python. `interop`, `references`, `msrv` and `fuzz` need extra tools and run as
+# their own CI jobs; `bench` is local only.
 [tasks.ci]
 deps = ["fmt", "clippy", "tables", "test", "test:doc", "doc", "features"]
