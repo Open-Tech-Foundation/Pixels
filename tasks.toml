@@ -65,7 +65,10 @@ run = "./scripts/check-deflate-interop.sh && ./scripts/check-png-interop.sh && .
 
 # The reference manifests are generated, so they must match what the
 # generators produce today — otherwise a stale manifest could quietly start
-# agreeing with a broken decoder. Needs the same tools as `interop`.
+# agreeing with a broken decoder. Local only: it re-encodes every fixture with
+# whatever avifenc/libaom/Pillow is installed, so in CI a distribution update
+# would fail it with no change here. Run it after regenerating fixtures. Needs
+# the same tools as `interop`.
 [tasks.references]
 run = "python3 scripts/regenerate-pngsuite-reference.py crates/otf-pixels-codec-png/tests/fixtures/pngsuite && python3 scripts/regenerate-gif-reference.py crates/otf-pixels-codec-gif/tests/fixtures && python3 scripts/regenerate-tiff-reference.py crates/otf-pixels-codec-tiff/tests/fixtures && python3 scripts/regenerate-jpeg-reference.py crates/otf-pixels-codec-jpeg/tests/fixtures && python3 scripts/regenerate-webp-reference.py crates/otf-pixels-codec-webp/tests/fixtures && python3 scripts/regenerate-avif-reference.py crates/otf-pixels-codec-avif/tests/fixtures && git diff --exit-code -- '*/REFERENCE'"
 
@@ -82,7 +85,7 @@ run = "cargo +nightly fuzz run png_decode -- -max_total_time=120 && cargo +night
 dir = "fuzz"
 
 # What a pull request must pass, needing nothing beyond a Rust toolchain and
-# Python. `interop`, `references`, `msrv` and `fuzz` need extra tools and run as
-# their own CI jobs; `bench` is local only.
+# Python. `interop`, `msrv` and `fuzz` need extra tools and run as their own CI
+# jobs; `references` and `bench` are local only.
 [tasks.ci]
 deps = ["fmt", "clippy", "tables", "test", "test:doc", "doc", "features"]

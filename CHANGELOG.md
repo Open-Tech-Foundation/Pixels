@@ -57,6 +57,10 @@ versioning: [SemVer](https://semver.org/).
   with it rather than failing to build.
 
 ### Changed
+- The reference-manifest check (`tsr references`) is a local task, run after
+  regenerating fixtures, and no longer a CI step. It re-encodes every
+  fixture with whatever encoders the runner's distribution ships, so it could
+  fail CI with no change in this repository. `tsr interop` stays in CI.
 - `tsr test` (and CI's test job) runs `cargo test` without the benchmark
   targets, which `--all-targets` used to run in full in a debug build. The
   benchmarks are a local task, `tsr bench`, and no longer a CI job.
