@@ -7,6 +7,9 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The crates' `repository` link pointed at `github.com/opentf/pixels`, which
+  is not where the code lives; it is now
+  `github.com/Open-Tech-Foundation/Pixels`.
 - Output no longer refuses a pixel format its encoder cannot hold. A
   16-bit PNG, TIFF or 10/12-bit AVIF written as JPEG, WebP, AVIF or GIF
   failed with `Unsupported`, and float pixels could not be written at all.
