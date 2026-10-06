@@ -146,6 +146,16 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- `otf-pixels-codec-webp` is now owned outright and `image-webp` is gone
+  (ADR-0014 complete). An owned VP8L encoder writes lossless WebP — colour
+  indexing with pixel bundling for up to 256 colours, otherwise subtract-green
+  and a per-block predictor transform, then LZ77, a colour cache sized by an
+  entropy estimate, and length-limited canonical prefix codes — and also
+  compresses the `ALPH` chunk of lossy files. libwebp reads back every
+  lossless file with exact pixels. On the lossless test corpus the files are
+  10% larger than libwebp's at its slower settings: equal or smaller for
+  palette images, 10–30% larger for smooth photographic content, where the
+  cross-colour transform and meta prefix codes are still to come.
 - Lossy WebP output. An owned VP8 encoder writes WebP at
   `EncodeOptions::quality`, mapped to the quantizer as libwebp maps it,
   choosing 16x16 or 4x4 prediction and chroma modes per macroblock by

@@ -1,10 +1,10 @@
 //! The WebP encoder.
 //!
 //! Lossy by default, through the owned VP8 encoder at
-//! [`EncodeOptions::quality`]; [`EncodeOptions::lossless`] selects lossless,
-//! which still goes through `image-webp` until the owned VP8L encoder lands
-//! (ADR-0014). Either way the whole image is gathered first: both bitstreams
-//! make decisions over the whole picture before the first byte is final.
+//! [`EncodeOptions::quality`]; [`EncodeOptions::lossless`] selects the owned
+//! VP8L encoder. Either way the whole image is gathered first: both
+//! bitstreams make decisions over the whole picture before the first byte is
+//! final.
 
 use otf_pixels_core::{
     EncodeOptions, Encoder, ImageDescriptor, PixelFormat, PixelsError, Result, Sink,
@@ -28,7 +28,6 @@ impl Default for WebPEncoder {
 #[derive(Debug)]
 struct State {
     descriptor: ImageDescriptor,
-    colour: image_webp::ColorType,
     /// The whole image, accumulated: the lossless encoder builds a dictionary
     /// over all of it and cannot emit a row at a time.
     pixels: Vec<u8>,
@@ -53,13 +52,10 @@ impl WebPEncoder {
     }
 }
 
-/// The wrapped encoder's colour type for a pixel format.
-fn colour_of(format: PixelFormat) -> Result<image_webp::ColorType> {
+/// Refuse pixel formats WebP cannot carry: it is 8 bits per channel.
+fn check_format(format: PixelFormat) -> Result<()> {
     match format {
-        PixelFormat::Gray8 => Ok(image_webp::ColorType::L8),
-        PixelFormat::GrayA8 => Ok(image_webp::ColorType::La8),
-        PixelFormat::Rgb8 => Ok(image_webp::ColorType::Rgb8),
-        PixelFormat::Rgba8 => Ok(image_webp::ColorType::Rgba8),
+        PixelFormat::Gray8 | PixelFormat::GrayA8 | PixelFormat::Rgb8 | PixelFormat::Rgba8 => Ok(()),
         other => Err(PixelsError::unsupported(format!(
             "WebP encoding needs an 8-bit format; got {other}. Convert first."
         ))),
@@ -74,7 +70,7 @@ impl Encoder for WebPEncoder {
                 "write_header called more than once",
             ));
         }
-        let colour = colour_of(desc.pixel)?;
+        check_format(desc.pixel)?;
         // WebP dimensions are 14-bit in the lossless bitstream; a larger image
         // cannot be represented at all, so this is a format limit.
         const MAX: u32 = 16_383;
@@ -92,7 +88,6 @@ impl Encoder for WebPEncoder {
         // compressed body exists.
         self.state = Some(State {
             descriptor: *desc,
-            colour,
             pixels: Vec::with_capacity(capacity),
             rows_written: 0,
         });
@@ -142,16 +137,7 @@ impl Encoder for WebPEncoder {
         }
 
         let bytes = if self.options.lossless {
-            let mut bytes = Vec::new();
-            image_webp::WebPEncoder::new(&mut bytes)
-                .encode(
-                    &state.pixels,
-                    state.descriptor.width,
-                    state.descriptor.height,
-                    state.colour,
-                )
-                .map_err(encode_error)?;
-            bytes
+            encode_lossless(state)
         } else {
             encode_lossy(state, self.options.quality)?
         };
@@ -204,26 +190,60 @@ fn encode_lossy(state: &State, quality: u8) -> Result<Vec<u8>> {
             vp8x.extend_from_slice(&(width as u32 - 1).to_le_bytes()[..3]);
             vp8x.extend_from_slice(&(height as u32 - 1).to_le_bytes()[..3]);
             chunk(&mut body, b"VP8X", &vp8x);
-            // Raw alpha, unfiltered; the owned lossless encoder will compress
-            // it once it lands.
-            let mut alph = Vec::with_capacity(alpha.len() + 1);
-            alph.push(0);
-            alph.extend_from_slice(&alpha);
-            chunk(&mut body, b"ALPH", &alph);
+            chunk(&mut body, b"ALPH", &encode_alpha(&alpha, width, height));
             chunk(&mut body, b"VP8 ", &vp8);
         }
     }
     Ok(riff(&body))
 }
 
-/// Translate the wrapped encoder's failure into this crate's error type.
-fn encode_error(error: image_webp::EncodingError) -> PixelsError {
-    match error {
-        image_webp::EncodingError::IoError(error) => {
-            PixelsError::io("encoding a WebP image", error)
-        }
-        other => PixelsError::invalid_argument("image", other.to_string()),
-    }
+/// Interleaved samples as VP8L's ARGB words, grey spread to all three
+/// colour channels.
+fn to_argb(pixels: &[u8], channels: usize) -> Vec<u32> {
+    pixels
+        .chunks_exact(channels)
+        .map(|p| {
+            let (rgb, alpha) = match *p {
+                [g] => ([g, g, g], 255),
+                [g, a] => ([g, g, g], a),
+                [r, g, b] => ([r, g, b], 255),
+                [r, g, b, a, ..] => ([r, g, b], a),
+                _ => ([0; 3], 255),
+            };
+            u32::from_be_bytes([alpha, rgb[0], rgb[1], rgb[2]])
+        })
+        .collect()
+}
+
+/// Lossless WebP: one `VP8L` chunk.
+fn encode_lossless(state: &State) -> Vec<u8> {
+    let (width, height) = (
+        state.descriptor.width as usize,
+        state.descriptor.height as usize,
+    );
+    let argb = to_argb(&state.pixels, state.descriptor.pixel.channels());
+    let has_alpha = argb.iter().any(|&p| p >> 24 != 0xff);
+    let mut body = Vec::new();
+    chunk(
+        &mut body,
+        b"VP8L",
+        &crate::vp8l_encode::encode(&argb, width, height, has_alpha),
+    );
+    riff(&body)
+}
+
+/// An `ALPH` chunk payload: no filter, lossless VP8L compression, the alpha
+/// carried in the green channel of an image stream of implicit size.
+fn encode_alpha(alpha: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let argb: Vec<u32> = alpha
+        .iter()
+        .map(|&a| 0xff00_0000 | (u32::from(a) << 8))
+        .collect();
+    let mut w = crate::vp8l_encode::BitWriter::default();
+    crate::vp8l_encode::write_image_stream(&mut w, &argb, width, height);
+    let mut out = vec![1]; // compression 1, filter 0, no preprocessing
+    out.extend_from_slice(&w.finish());
+    out
 }
 
 #[cfg(test)]

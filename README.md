@@ -39,8 +39,8 @@ OS-backend gaps.
    SIMD kernels inside, dispatched once per tile.
 5. **Own the codecs** — PNG, GIF, TIFF, baseline JPEG, WebP, AVIF and raw
    implemented from scratch, every one checked against its reference
-   implementation; only progressive JPEG decode, and for now WebP lossless
-   encode (ADR-0014), are wrapped behind the same trait.
+   implementation; only progressive JPEG decode is wrapped behind the same
+   trait.
 
 ## Documents
 

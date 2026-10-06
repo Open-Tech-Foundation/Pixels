@@ -1,33 +1,19 @@
-//! WebP codec for `otf-pixels`, being moved from [`image-webp`] to an owned
-//! implementation (ADR-0014).
+//! WebP codec for `otf-pixels`, lossy and lossless, owned outright
+//! (ADR-0014).
 //!
-//! [`image-webp`]: https://docs.rs/image-webp
+//! # Layers
 //!
-//! # Ownership, layer by layer
-//!
-//! Decoding is owned end to end and matches libwebp exactly: the RIFF
-//! container (`riff`), the VP8L lossless decoder ([`vp8l`]), the VP8 lossy
-//! decoder (`vp8`), `ALPH` alpha (`alpha`), libwebp's YUV-to-RGB conversion
-//! (`yuv`), and an animation's first frame on its canvas. Encoding still uses
-//! `image-webp`'s lossless encoder until the owned encoders land; the
-//! dependency goes when they do.
+//! The RIFF container (`riff`); VP8L lossless decode ([`vp8l`]) and encode
+//! (`vp8l_encode`); VP8 lossy decode and encode (`vp8`); `ALPH` alpha
+//! (`alpha`); and libwebp's YUV/RGB conversions (`yuv`). Decoding matches
+//! libwebp exactly, and libwebp checks every file we write.
 //!
 //! # Memory
 //!
 //! Internally buffered in both directions, as SPEC §Formats says. The decoder
-//! needs to seek within the RIFF container, and the lossless encoder builds a
-//! dictionary over the whole image, so neither end can work a row at a time.
-//!
-//! # Encoding is lossless only
-//!
-//! The wrapped encoder writes **lossless** WebP and has no quality control, so
-//! [`EncodeOptions::quality`] is ignored here. For a photograph that means a
-//! considerably larger file than a lossy WebP encoder would produce — the
-//! format's headline feature is exactly the one not available. This is a
-//! property of the wrapped crate, not a decision, and it is the strongest
-//! argument for revisiting WebP ownership.
-//!
-//! [`EncodeOptions::quality`]: otf_pixels_core::EncodeOptions::quality
+//! holds the whole file, whose chunks may come in any order the container
+//! allows; both encoders make decisions over the whole picture before the
+//! first byte is final.
 
 mod alpha;
 mod decoder;
@@ -35,6 +21,7 @@ mod encoder;
 mod riff;
 mod vp8;
 pub mod vp8l;
+mod vp8l_encode;
 mod yuv;
 
 pub use decoder::{WebPCodec, WebPDecoder, probe};

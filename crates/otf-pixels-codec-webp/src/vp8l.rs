@@ -34,7 +34,7 @@ const LENGTH_CODES: usize = 24;
 /// Distance prefix codes.
 const DISTANCE_CODES: usize = 40;
 /// The 120 short distance codes' `(dx, dy)` neighbour offsets (§3.6.2.2.1).
-const DISTANCE_MAP: [(i8, i8); 120] = [
+pub(crate) const DISTANCE_MAP: [(i8, i8); 120] = [
     (0, 1),
     (1, 0),
     (1, 1),
@@ -421,7 +421,7 @@ enum Transform {
     ColorIndexing { bits: u32, table: Vec<u32> },
 }
 
-const fn div_round_up(value: usize, bits: u32) -> usize {
+pub(crate) const fn div_round_up(value: usize, bits: u32) -> usize {
     (value + (1 << bits) - 1) >> bits
 }
 
@@ -722,7 +722,7 @@ fn select(left: u32, top: u32, top_left: u32) -> u32 {
 }
 
 /// Predictor `mode` from left, top, top-right and top-left (§3.5.1).
-fn predict(mode: u32, l: u32, t: u32, tr: u32, tl: u32) -> u32 {
+pub(crate) fn predict(mode: u32, l: u32, t: u32, tr: u32, tl: u32) -> u32 {
     match mode {
         1 => l,
         2 => t,

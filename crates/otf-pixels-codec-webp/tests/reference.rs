@@ -1,10 +1,9 @@
 //! WebP decode checked against libwebp, not against ourselves.
 //!
-//! The codec is wrapped (ADR-0004), so the VP8 bitstream is not what is on
-//! trial — libwebp and `image-webp` are both mature. What is on trial is the
-//! adaptation: dimensions, pixel format, whether alpha was detected, row
-//! order, and that a row served is the row asked for. Those are what a
-//! wrapper gets wrong, and a reference raster is what catches them.
+//! These first fixtures check the `Decoder` contract around the bitstreams:
+//! dimensions, pixel format, whether alpha was detected, row order, and that
+//! a row served is the row asked for. The bitstreams themselves are held to
+//! libwebp exactly by `tests/{lossless,lossy,animated}.rs`.
 //!
 //! Reference rasters come from libwebp via Pillow; regenerate them with
 //! `scripts/regenerate-webp-reference.py`.

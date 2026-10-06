@@ -1,6 +1,6 @@
 [package]
 name = "otf-pixels-codec-webp"
-description = "WebP codec for otf-pixels, wrapping image-webp."
+description = "WebP codec for otf-pixels, lossy and lossless, implemented from scratch."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,11 +12,6 @@ keywords.workspace = true
 
 [dependencies]
 otf-pixels-core.workspace = true
-# Wrapped, not owned (ADR-0004): WebP is two codecs behind one container —
-# VP8 intra for lossy and a separate lossless format — and owning both is not
-# what this project's from-scratch budget is best spent on. Pure Rust, and its
-# only dependencies are byteorder-lite and quick-error.
-image-webp = "0.2.4"
 
 [lints]
 workspace = true
