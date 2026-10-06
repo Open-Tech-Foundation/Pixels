@@ -57,6 +57,8 @@ versioning: [SemVer](https://semver.org/).
   with it rather than failing to build.
 
 ### Changed
+- CI's fuzz job installs a prebuilt `cargo-fuzz` instead of compiling it on
+  every run.
 - The reference-manifest check (`tsr references`) is a local task, run after
   regenerating fixtures, and no longer a CI step. It re-encodes every
   fixture with whatever encoders the runner's distribution ships, so it could
