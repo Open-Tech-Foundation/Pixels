@@ -31,7 +31,8 @@
 use super::bits::BitReader;
 use super::cdef::CdefFilter;
 use super::cdf;
-use super::coeff::{CoeffCdfs, TxTypeCtx, decode_coeffs};
+use super::coder::{CoeffJob, Site, TileCoder};
+use super::coeff::{CoeffCdfs, TxTypeCtx};
 use super::deblock::Deblock;
 use super::direction::{
     ANGLE_STEP, Edge, mode_base_angle, predict_directional, predict_filter_intra,
@@ -52,7 +53,7 @@ use super::transform::{
     quantizer_matrix,
 };
 use super::transform_type::{IntraTxTypeCdfs, intra_dir, intra_tx_set};
-use super::tx_size::{BLOCK_4X4, TxDepthCdfs, TxSizeParams, max_tx_size_rect, read_tx_size};
+use super::tx_size::{BLOCK_4X4, TxDepthCdfs, TxSizeParams, code_tx_size, max_tx_size_rect};
 use otf_pixels_core::{PixelsError, Result};
 
 /// `MI_SIZE` (§3): the side of the smallest coded block, in samples.
@@ -248,11 +249,11 @@ fn tile_overrun(number: u32) -> PixelsError {
 /// One tile's extent in 4x4 units (`MiRowStart`..`MiRowEnd`,
 /// `MiColStart`..`MiColEnd`).
 #[derive(Debug, Clone, Copy)]
-struct TileBounds {
-    row_start: usize,
-    row_end: usize,
-    col_start: usize,
-    col_end: usize,
+pub(crate) struct TileBounds {
+    pub(crate) row_start: usize,
+    pub(crate) row_end: usize,
+    pub(crate) col_start: usize,
+    pub(crate) col_end: usize,
 }
 
 /// Whether every post-filter this decoder does *not* implement is disabled, so
@@ -429,7 +430,7 @@ struct LevelContext {
 }
 
 /// The whole mutable state of a tile decode.
-struct TileState {
+pub(crate) struct TileState {
     planes: Vec<Plane>,
     cdfs: FrameCdfs,
     bit_depth: u8,
@@ -696,6 +697,13 @@ impl TileState {
     /// `decode_tile` (§5.11.2): one tile, from fresh CDFs and cleared above
     /// contexts, its superblocks in raster order within its bounds.
     fn decode_tile(&mut self, tile_data: &[u8], tile: TileBounds) -> Result<()> {
+        let mut dec = SymbolDecoder::new(tile_data, false)?;
+        self.code_tile(&mut dec, tile)
+    }
+
+    /// `decode_tile` (§5.11.2) over any [`TileCoder`]: the decoder reading a
+    /// stream, or the encoder deciding and writing one.
+    pub(crate) fn code_tile(&mut self, dec: &mut impl TileCoder, tile: TileBounds) -> Result<()> {
         self.tile = tile;
         self.cdfs = FrameCdfs::new(self.qctx);
         self.current_qindex = self.base_q;
@@ -706,7 +714,6 @@ impl TileState {
             c.above_level.fill(0);
             c.above_dc.fill(0);
         }
-        let mut dec = SymbolDecoder::new(tile_data, false)?;
         let sb_size4 = self.sb_size4;
         // Superblocks are decoded in raster order; each seeds the partition
         // recursion. The left contexts reset at the start of each SB row.
@@ -717,8 +724,8 @@ impl TileState {
             while sb_col < tile.col_end {
                 self.read_deltas = self.delta_q_present;
                 self.clear_block_decoded(sb_row, sb_col);
-                self.read_lr(&mut dec, sb_row, sb_col)?;
-                self.decode_partition(&mut dec, sb_row, sb_col, sb_size4)?;
+                self.read_lr(dec, sb_row, sb_col)?;
+                self.decode_partition(dec, sb_row, sb_col, sb_size4)?;
                 sb_col += sb_size4;
             }
             sb_row += sb_size4;
@@ -911,7 +918,7 @@ impl TileState {
     /// produces. `bsize4` is the block side in 4-sample units (a power of two).
     fn decode_partition(
         &mut self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         r: usize,
         c: usize,
         bsize4: usize,
@@ -1014,7 +1021,7 @@ impl TileState {
     /// Read the `partition` symbol and return the partition type.
     fn read_partition(
         &mut self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         r: usize,
         c: usize,
         bsize4: usize,
@@ -1024,7 +1031,7 @@ impl TileState {
         let ctx = self.partition_ctx(r, c, bsize4, avail_u, avail_l);
         let bsl = floor_log2_usize(bsize4);
         let cdf_row = self.partition_cdf(bsl, ctx)?;
-        dec.read_symbol(cdf_row)
+        dec.symbol(cdf_row, Site::Partition { r, c, bsize4 })
     }
 
     /// The context for the `partition` and `split_or_*` symbols (§8.3.2).
@@ -1068,7 +1075,7 @@ impl TileState {
     )]
     fn read_split_or(
         &mut self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         r: usize,
         c: usize,
         bsize4: usize,
@@ -1102,13 +1109,13 @@ impl TileState {
             psum += if horz { prob(9) } else { prob(8) };
         }
         let mut derived = [((1 << 15) - psum) as u16, 1 << 15, 0];
-        Ok(dec.read_symbol(&mut derived)? != 0)
+        Ok(dec.symbol(&mut derived, Site::SplitOr { r, c, bsize4 })? != 0)
     }
 
     /// `decode_block` (§5.11.5) plus mode info and residual, for one block.
     fn decode_block(
         &mut self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         r: usize,
         c: usize,
         bw4: usize,
@@ -1145,6 +1152,7 @@ impl TileState {
         // --- intra_frame_mode_info (§5.11.7) ---
         // segment_id comes before skip when a segment forces skipping, and
         // after it (where a skipped block inherits its prediction) otherwise.
+        dec.plan_block(self, r, c, bw4, bh4);
         self.segment_id = 0;
         if self.seg_pre_skip {
             self.read_segment_id(dec, r, c, avail_u, avail_l, false)?;
@@ -1190,11 +1198,11 @@ impl TileState {
         }
 
         let y_mode = self.read_intra_frame_y_mode(dec, r, c, avail_u, avail_l)?;
-        let y_delta = self.read_angle_delta(dec, y_mode, bw4, bh4)?;
+        let y_delta = self.read_angle_delta(dec, y_mode, bw4, bh4, Site::AngleDeltaY)?;
 
         let (uv_mode, uv_delta, cfl) = if has_chroma {
             let (uv, cfl) = self.read_uv_mode(dec, y_mode, bw4, bh4)?;
-            let d = self.read_angle_delta(dec, uv, bw4, bh4)?;
+            let d = self.read_angle_delta(dec, uv, bw4, bh4, Site::AngleDeltaUv)?;
             (uv, d, cfl)
         } else {
             (DC_PRED, 0, None)
@@ -1270,7 +1278,7 @@ impl TileState {
 
     fn read_skip(
         &mut self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         r: usize,
         c: usize,
         avail_u: bool,
@@ -1284,7 +1292,7 @@ impl TileState {
             ctx += usize::from(self.skip_at(r, c.wrapping_sub(1)));
         }
         let cdf_row = get_mut(&mut self.cdfs.skip, ctx)?;
-        Ok(dec.read_symbol(cdf_row)? != 0)
+        Ok(dec.symbol(cdf_row, Site::Skip)? != 0)
     }
 
     /// `read_cdef` (§5.11.56): read the `cdef_idx` literal for the 64x64 block
@@ -1295,7 +1303,7 @@ impl TileState {
     /// coded strength).
     fn read_cdef(
         &mut self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         r: usize,
         c: usize,
         bw4: usize,
@@ -1313,7 +1321,7 @@ impl TileState {
         if self.cdef_idx.get(base_r * self.mi_cols + base_c).copied() != Some(-1) {
             return Ok(());
         }
-        let value = dec.read_literal(self.cdef.bits)? as i16;
+        let value = dec.literal(self.cdef.bits, Site::CdefIdx)? as i16;
         let mut i = base_r;
         while i < base_r + bh4 {
             let mut j = base_c;
@@ -1335,7 +1343,7 @@ impl TileState {
     /// the prediction stands — read the difference from it.
     fn read_segment_id(
         &mut self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         r: usize,
         c: usize,
         avail_u: bool,
@@ -1377,7 +1385,7 @@ impl TileState {
             } else {
                 0
             };
-            let diff = dec.read_symbol(get_mut(&mut self.cdfs.segment_id, ctx)?)? as i32;
+            let diff = dec.symbol(get_mut(&mut self.cdfs.segment_id, ctx)?, Site::Other)? as i32;
             neg_deinterleave(diff, pred, self.last_active_segment as i32 + 1)
         };
         // A conformant stream stays within 0..=LastActiveSegId.
@@ -1422,7 +1430,7 @@ impl TileState {
     /// (it then has no coefficients for a quantizer to matter to).
     fn read_delta_qindex(
         &mut self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         bw4: usize,
         bh4: usize,
         skip: bool,
@@ -1442,7 +1450,7 @@ impl TileState {
     /// with chroma, U and V).
     fn read_delta_lf(
         &mut self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         bw4: usize,
         bh4: usize,
         skip: bool,
@@ -1482,7 +1490,7 @@ impl TileState {
     /// false in this subset. Units are laid out over the upscaled frame, so with
     /// super-resolution a superblock's coded columns are scaled by
     /// `SuperresDenom / SUPERRES_NUM` to find the units it covers.
-    fn read_lr(&mut self, dec: &mut SymbolDecoder<'_>, r: usize, c: usize) -> Result<()> {
+    fn read_lr(&mut self, dec: &mut impl TileCoder, r: usize, c: usize) -> Result<()> {
         if !self.uses_lr {
             return Ok(());
         }
@@ -1524,7 +1532,7 @@ impl TileState {
     /// per-plane reference used by the sub-exponential coding).
     fn read_lr_unit(
         &mut self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         plane: usize,
         unit_row: usize,
         unit_col: usize,
@@ -1535,20 +1543,20 @@ impl TileState {
             .map_or(RESTORE_NONE, |p| p.frame_restoration_type);
         let restoration_type = match frame_type {
             RESTORE_WIENER => {
-                if dec.read_symbol(&mut self.cdfs.use_wiener)? != 0 {
+                if dec.symbol(&mut self.cdfs.use_wiener, Site::Other)? != 0 {
                     RESTORE_WIENER
                 } else {
                     RESTORE_NONE
                 }
             }
             RESTORE_SGRPROJ => {
-                if dec.read_symbol(&mut self.cdfs.use_sgrproj)? != 0 {
+                if dec.symbol(&mut self.cdfs.use_sgrproj, Site::Other)? != 0 {
                     RESTORE_SGRPROJ
                 } else {
                     RESTORE_NONE
                 }
             }
-            RESTORE_SWITCHABLE => dec.read_symbol(&mut self.cdfs.restoration_type)? as u8,
+            RESTORE_SWITCHABLE => dec.symbol(&mut self.cdfs.restoration_type, Site::Other)? as u8,
             _ => RESTORE_NONE,
         };
 
@@ -1589,7 +1597,7 @@ impl TileState {
 
     fn read_intra_frame_y_mode(
         &mut self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         r: usize,
         c: usize,
         avail_u: bool,
@@ -1608,14 +1616,14 @@ impl TileState {
         let a = INTRA_MODE_CONTEXT.get(above).copied().unwrap_or(0);
         let l = INTRA_MODE_CONTEXT.get(left).copied().unwrap_or(0);
         let cdf_row = get_mut(get_mut(&mut self.cdfs.intra_frame_y_mode, a)?, l)?;
-        dec.read_symbol(cdf_row)
+        dec.symbol(cdf_row, Site::YMode)
     }
 
     /// Read `uv_mode` and, for a chroma-from-luma block, its alphas. Returns the
     /// UV mode and `Some((alphaU, alphaV))` when the block is CfL.
     fn read_uv_mode(
         &mut self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         y_mode: usize,
         bw4: usize,
         bh4: usize,
@@ -1634,10 +1642,10 @@ impl TileState {
         };
         let uv = if cfl_allowed {
             let cdf_row = get_mut(&mut self.cdfs.uv_cfl_allowed, y_mode)?;
-            dec.read_symbol(cdf_row)?
+            dec.symbol(cdf_row, Site::UvMode)?
         } else {
             let cdf_row = get_mut(&mut self.cdfs.uv_cfl_not_allowed, y_mode)?;
-            dec.read_symbol(cdf_row)?
+            dec.symbol(cdf_row, Site::UvMode)?
         };
         let cfl = if uv == UV_CFL_PRED {
             Some(self.read_cfl_alphas(dec)?)
@@ -1648,21 +1656,23 @@ impl TileState {
     }
 
     /// `read_cfl_alphas` (§5.11.45): the signed U and V scaling factors.
-    fn read_cfl_alphas(&mut self, dec: &mut SymbolDecoder<'_>) -> Result<(i32, i32)> {
-        let signs = dec.read_symbol(&mut self.cdfs.cfl_sign)? as i32;
+    fn read_cfl_alphas(&mut self, dec: &mut impl TileCoder) -> Result<(i32, i32)> {
+        let signs = dec.symbol(&mut self.cdfs.cfl_sign, Site::CflSign)? as i32;
         let sign_u = (signs + 1) / 3;
         let sign_v = (signs + 1) % 3;
         // CFL_SIGN_ZERO = 0, CFL_SIGN_NEG = 1, CFL_SIGN_POS = 2.
         let alpha_u = if sign_u != 0 {
             let ctx = ((sign_u - 1) * 3 + sign_v) as usize;
-            let mag = dec.read_symbol(get_mut(&mut self.cdfs.cfl_alpha, ctx)?)? as i32 + 1;
+            let mag =
+                dec.symbol(get_mut(&mut self.cdfs.cfl_alpha, ctx)?, Site::CflAlpha)? as i32 + 1;
             if sign_u == 1 { -mag } else { mag }
         } else {
             0
         };
         let alpha_v = if sign_v != 0 {
             let ctx = ((sign_v - 1) * 3 + sign_u) as usize;
-            let mag = dec.read_symbol(get_mut(&mut self.cdfs.cfl_alpha, ctx)?)? as i32 + 1;
+            let mag =
+                dec.symbol(get_mut(&mut self.cdfs.cfl_alpha, ctx)?, Site::CflAlpha)? as i32 + 1;
             if sign_v == 1 { -mag } else { mag }
         } else {
             0
@@ -1678,7 +1688,7 @@ impl TileState {
     )]
     fn read_palette_mode_info(
         &mut self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         r: usize,
         c: usize,
         bw4: usize,
@@ -1698,9 +1708,9 @@ impl TileState {
             let ctx = usize::from(avail_u && self.palette_size_at(0, r.wrapping_sub(1), c) > 0)
                 + usize::from(avail_l && self.palette_size_at(0, r, c.wrapping_sub(1)) > 0);
             let cdf_row = get_mut(get_mut(&mut self.cdfs.palette_y_mode, bsize_ctx)?, ctx)?;
-            if dec.read_symbol(cdf_row)? != 0 {
+            if dec.symbol(cdf_row, Site::Other)? != 0 {
                 let size_cdf = get_mut(&mut self.cdfs.palette_y_size, bsize_ctx)?;
-                let size = dec.read_symbol(size_cdf)? + 2;
+                let size = dec.symbol(size_cdf, Site::Other)? + 2;
                 let cache = self.palette_cache_for(0, r, c);
                 palette.size_y = size;
                 palette.colors_y = self.read_palette_colors(dec, size, &cache, true)?;
@@ -1709,9 +1719,9 @@ impl TileState {
         if has_chroma && uv_mode == DC_PRED {
             let ctx = usize::from(palette.size_y > 0);
             let cdf_row = get_mut(&mut self.cdfs.palette_uv_mode, ctx)?;
-            if dec.read_symbol(cdf_row)? != 0 {
+            if dec.symbol(cdf_row, Site::Other)? != 0 {
                 let size_cdf = get_mut(&mut self.cdfs.palette_uv_size, bsize_ctx)?;
-                let size = dec.read_symbol(size_cdf)? + 2;
+                let size = dec.symbol(size_cdf, Site::Other)? + 2;
                 let cache = self.palette_cache_for(1, r, c);
                 palette.size_uv = size;
                 palette.colors_u = self.read_palette_colors(dec, size, &cache, false)?;
@@ -1742,7 +1752,7 @@ impl TileState {
     /// a base colour, then Clip1-accumulated deltas, sorted ascending.
     fn read_palette_colors(
         &self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         size: usize,
         cache: &[u16],
         is_luma: bool,
@@ -1756,23 +1766,23 @@ impl TileState {
             if idx >= size {
                 break;
             }
-            if dec.read_literal(1)? != 0 {
+            if dec.literal(1, Site::Other)? != 0 {
                 set_at(&mut colors, idx, cached);
                 idx += 1;
             }
         }
         if idx < size {
-            set_at(&mut colors, idx, dec.read_literal(bd)? as u16);
+            set_at(&mut colors, idx, dec.literal(bd, Site::Other)? as u16);
             idx += 1;
         }
         if idx < size {
             let min_bits = bd.saturating_sub(3);
-            let mut palette_bits = min_bits + dec.read_literal(2)?;
+            let mut palette_bits = min_bits + dec.literal(2, Site::Other)?;
             while idx < size {
                 // The luma delta is coded one less than its value; the chroma
                 // delta is coded directly (spec §5.11.47). The range that bounds
                 // the next `paletteBits` likewise drops one only for luma.
-                let delta = dec.read_literal(palette_bits)? + u32::from(is_luma);
+                let delta = dec.literal(palette_bits, Site::Other)? + u32::from(is_luma);
                 let prev = i32::from(at(&colors, idx - 1));
                 let color = clip1(prev + delta as i32);
                 set_at(&mut colors, idx, color);
@@ -1790,19 +1800,19 @@ impl TileState {
     /// either as wrapping deltas or as raw literals.
     fn read_palette_colors_v(
         &self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         size: usize,
     ) -> Result<[u16; PALETTE_COLORS]> {
         let bd = u32::from(self.bit_depth);
         let max = (1_i32 << bd) - 1;
         let max_val = 1_i32 << bd;
         let mut colors = [0_u16; PALETTE_COLORS];
-        if dec.read_literal(1)? != 0 {
-            let mut palette_bits = bd.saturating_sub(4) + dec.read_literal(2)?;
-            set_at(&mut colors, 0, dec.read_literal(bd)? as u16);
+        if dec.literal(1, Site::Other)? != 0 {
+            let mut palette_bits = bd.saturating_sub(4) + dec.literal(2, Site::Other)?;
+            set_at(&mut colors, 0, dec.literal(bd, Site::Other)? as u16);
             for idx in 1..size {
-                let mut delta = dec.read_literal(palette_bits)? as i32;
-                if delta != 0 && dec.read_literal(1)? != 0 {
+                let mut delta = dec.literal(palette_bits, Site::Other)? as i32;
+                if delta != 0 && dec.literal(1, Site::Other)? != 0 {
                     delta = -delta;
                 }
                 let mut val = i32::from(at(&colors, idx - 1)) + delta;
@@ -1817,7 +1827,7 @@ impl TileState {
             }
         } else {
             for idx in 0..size {
-                set_at(&mut colors, idx, dec.read_literal(bd)? as u16);
+                set_at(&mut colors, idx, dec.literal(bd, Site::Other)? as u16);
             }
         }
         Ok(colors)
@@ -1828,7 +1838,7 @@ impl TileState {
     /// frame edge is coded; the rest of the map replicates its last column/row.
     fn read_palette_tokens(
         &mut self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         r: usize,
         c: usize,
         palette: &mut Palette,
@@ -1872,7 +1882,7 @@ impl TileState {
     /// Decode one colour-index map (`ColorMapY`/`ColorMapUV`) of `dims`.
     fn read_color_map(
         &mut self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         size: usize,
         dims: MapDims,
         chroma: bool,
@@ -1880,7 +1890,7 @@ impl TileState {
         let (bw, bh) = (dims.onscreen_w, dims.onscreen_h);
         let stride = dims.w;
         let mut map = vec![0_u8; dims.w * dims.h];
-        let first = dec.read_ns(size as u32)? as u8;
+        let first = dec.ns(size as u32)? as u8;
         if let Some(m) = map.first_mut() {
             *m = first;
         }
@@ -1910,7 +1920,7 @@ impl TileState {
                 } else {
                     self.cdfs.palette_y_color.row(size, ctx)?
                 };
-                let sym = dec.read_symbol(cdf)?;
+                let sym = dec.symbol(cdf, Site::Other)?;
                 let color = order.get(sym).copied().unwrap_or(0);
                 if let Some(slot) = map.get_mut(row * stride + jj) {
                     *slot = color;
@@ -1944,16 +1954,17 @@ impl TileState {
     /// for non-directional modes and small blocks, which read nothing.
     fn read_angle_delta(
         &mut self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         mode: usize,
         bw4: usize,
         bh4: usize,
+        site: Site,
     ) -> Result<i32> {
         let directional = (1..=8).contains(&mode);
         if directional && at_least_block_8x8(bw4, bh4) {
             let index = mode - 1;
             let cdf_row = get_mut(&mut self.cdfs.angle_delta, index)?;
-            let symbol = dec.read_symbol(cdf_row)? as i32;
+            let symbol = dec.symbol(cdf_row, site)? as i32;
             return Ok(symbol - MAX_ANGLE_DELTA);
         }
         Ok(0)
@@ -1963,7 +1974,7 @@ impl TileState {
     /// filter-intra, and if so which of the five kernels.
     fn read_filter_intra(
         &mut self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         y_mode: usize,
         bw4: usize,
         bh4: usize,
@@ -1972,8 +1983,8 @@ impl TileState {
         if self.enable_filter_intra && y_mode == DC_PRED && max_dim <= 32 {
             let size = block_size_index(bw4, bh4);
             let cdf_row = get_mut(&mut self.cdfs.filter_intra, size)?;
-            if dec.read_symbol(cdf_row)? != 0 {
-                let mode = dec.read_symbol(&mut self.cdfs.filter_intra_mode)?;
+            if dec.symbol(cdf_row, Site::Other)? != 0 {
+                let mode = dec.symbol(&mut self.cdfs.filter_intra_mode, Site::Other)?;
                 return Ok(Some(mode));
             }
         }
@@ -1986,7 +1997,7 @@ impl TileState {
     /// selection gate is always open.
     fn read_block_tx_size(
         &mut self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         r: usize,
         c: usize,
         bw4: usize,
@@ -2011,7 +2022,7 @@ impl TileState {
             above_w,
             left_h,
         };
-        let tx = read_tx_size(dec, &mut self.cdfs.tx_depth, &params)?;
+        let tx = code_tx_size(dec, &mut self.cdfs.tx_depth, &params)?;
         for y in r..(r + bh4).min(self.mi_rows) {
             for x in c..(c + bw4).min(self.mi_cols) {
                 if let Some(v) = self.tx_sizes.get_mut(y * self.mi_cols + x) {
@@ -2042,7 +2053,7 @@ impl TileState {
     /// (subsampled) residual block in that plane's transform size.
     fn residual(
         &mut self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         modes: &BlockModes,
         bw4: usize,
         bh4: usize,
@@ -2080,7 +2091,7 @@ impl TileState {
     #[allow(clippy::too_many_arguments, reason = "mirrors the residual loop state")]
     fn residual_plane(
         &mut self,
-        dec: &mut SymbolDecoder<'_>,
+        dec: &mut impl TileCoder,
         modes: &BlockModes,
         block: usize,
         chunk_size: usize,
@@ -2275,7 +2286,7 @@ impl TileState {
         above || left
     }
 
-    fn transform_block(&mut self, dec: &mut SymbolDecoder<'_>, tb: &TxBlock) -> Result<()> {
+    fn transform_block(&mut self, dec: &mut impl TileCoder, tb: &TxBlock) -> Result<()> {
         let (plane, x, y, tx_size, skip) = (tb.plane, tb.x, tb.y, tb.tx_size, tb.skip);
         let w = tx_size.width();
         let h = tx_size.height();
@@ -2326,6 +2337,17 @@ impl TileState {
             // transform_type (§5.11.47) gates the luma symbol on the segment's
             // quantizer before any delta_q.
             let qindex_positive = self.segment_qindex(true) > 0;
+            // The block's quantizers, which an encoder needs before it codes
+            // the coefficients and the decoder after.
+            let qindex = self.segment_qindex(false);
+            let dc = dc_q(
+                self.bit_depth,
+                qindex + self.q_dc.get(plane).copied().unwrap_or(0),
+            );
+            let ac = ac_q(
+                self.bit_depth,
+                qindex + self.q_ac.get(plane).copied().unwrap_or(0),
+            );
             let tx_ctx = TxTypeCtx {
                 set: tx_set,
                 intra_cdfs: &mut self.cdfs.intra_tx_type,
@@ -2334,28 +2356,25 @@ impl TileState {
                 qindex_positive,
                 lossless: self.lossless,
             };
-            let block = decode_coeffs(
-                dec,
+            let job = CoeffJob {
+                plane,
+                x,
+                y,
+                prediction: &prediction,
+                dc_q: dc,
+                ac_q: ac,
+            };
+            let block = dec.coeffs(
                 &mut self.cdfs.coeff,
                 tx_size,
                 tx_ctx,
                 ptype,
                 all_zero_ctx,
                 dc_sign_ctx,
+                &job,
             )?;
             self.update_level_context(plane, x4, y4, w4, h4, block.cul_level, block.dc_category);
             if block.eob > 0 {
-                // get_dc_quant / get_ac_quant (§7.12.2) over get_qindex(0, ..):
-                // the segment's offset from CurrentQIndex or base_q_idx.
-                let qindex = self.segment_qindex(false);
-                let dc = dc_q(
-                    self.bit_depth,
-                    qindex + self.q_dc.get(plane).copied().unwrap_or(0),
-                );
-                let ac = ac_q(
-                    self.bit_depth,
-                    qindex + self.q_ac.get(plane).copied().unwrap_or(0),
-                );
                 // §7.12.3 step 1b: a matrix weights only the 2D transforms
                 // (types before IDTX), and level 15 means none.
                 // SegQMLevel (§5.9.12): 15, meaning none, for a lossless segment.
@@ -3040,14 +3059,14 @@ fn neg_deinterleave(diff: i32, reference: i32, max: i32) -> i32 {
 /// The magnitude-and-sign coding shared by `delta_qindex` and `delta_lf`: a
 /// symbol up to `DELTA_Q_SMALL` (= `DELTA_LF_SMALL` = 3), escaping to a
 /// literal-length literal, then a sign bit when nonzero.
-fn read_delta(dec: &mut SymbolDecoder<'_>, cdf: &mut [u16]) -> Result<i32> {
-    let mut abs = dec.read_symbol(cdf)? as i32;
+fn read_delta(dec: &mut impl TileCoder, cdf: &mut [u16]) -> Result<i32> {
+    let mut abs = dec.symbol(cdf, Site::Other)? as i32;
     if abs == DELTA_SMALL {
-        let rem_bits = dec.read_literal(3)? + 1;
-        let abs_bits = dec.read_literal(rem_bits)? as i32;
+        let rem_bits = dec.literal(3, Site::Other)? + 1;
+        let abs_bits = dec.literal(rem_bits, Site::Other)? as i32;
         abs = abs_bits + (1 << rem_bits) + 1;
     }
-    if abs != 0 && dec.read_literal(1)? == 1 {
+    if abs != 0 && dec.literal(1, Site::Other)? == 1 {
         abs = -abs;
     }
     Ok(abs)

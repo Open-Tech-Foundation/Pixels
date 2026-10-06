@@ -29,8 +29,8 @@
               by spec-bounded constants; sample planes use Plane's checked API"
 )]
 
+use super::coder::{Site, TileCoder};
 use super::plane::Plane;
-use super::symbol::SymbolDecoder;
 use otf_pixels_core::Result;
 
 /// `RESTORE_NONE` (§7.17).
@@ -120,7 +120,7 @@ fn inverse_recenter(r: i32, v: i32) -> i32 {
 
 /// `decode_subexp_bool(numSyms, k)` (§5.11.58): a sub-exponential code read from
 /// the arithmetic decoder as uniform literals.
-fn decode_subexp_bool(dec: &mut SymbolDecoder<'_>, num_syms: i32, k: i32) -> Result<i32> {
+fn decode_subexp_bool(dec: &mut impl TileCoder, num_syms: i32, k: i32) -> Result<i32> {
     let mut i = 0_i32;
     let mut mk = 0_i32;
     loop {
@@ -128,14 +128,14 @@ fn decode_subexp_bool(dec: &mut SymbolDecoder<'_>, num_syms: i32, k: i32) -> Res
         let a = 1 << b2;
         if num_syms <= mk + 3 * a {
             let count = (num_syms - mk) as u32;
-            let unif = dec.read_ns(count)? as i32;
+            let unif = dec.ns(count)? as i32;
             return Ok(unif + mk);
         }
-        if dec.read_literal(1)? != 0 {
+        if dec.literal(1, Site::Other)? != 0 {
             i += 1;
             mk += a;
         } else {
-            let bits = dec.read_literal(b2 as u32)? as i32;
+            let bits = dec.literal(b2 as u32, Site::Other)? as i32;
             return Ok(bits + mk);
         }
     }
@@ -143,7 +143,7 @@ fn decode_subexp_bool(dec: &mut SymbolDecoder<'_>, num_syms: i32, k: i32) -> Res
 
 /// `decode_unsigned_subexp_with_ref_bool(mx, k, r)` (§5.11.58).
 fn decode_unsigned_subexp_with_ref_bool(
-    dec: &mut SymbolDecoder<'_>,
+    dec: &mut impl TileCoder,
     mx: i32,
     k: i32,
     r: i32,
@@ -159,7 +159,7 @@ fn decode_unsigned_subexp_with_ref_bool(
 /// `decode_signed_subexp_with_ref_bool(low, high, k, r)` (§5.11.58): read a
 /// signed value in `[low, high)` coded relative to the running reference `r`.
 pub fn decode_signed_subexp_with_ref_bool(
-    dec: &mut SymbolDecoder<'_>,
+    dec: &mut impl TileCoder,
     low: i32,
     high: i32,
     k: i32,
@@ -173,7 +173,7 @@ pub fn decode_signed_subexp_with_ref_bool(
 /// updating the running reference `ref_wiener`. Chroma (`is_chroma`) forces the
 /// outermost tap to zero, giving the 5-tap chroma filter.
 pub fn read_wiener_unit(
-    dec: &mut SymbolDecoder<'_>,
+    dec: &mut impl TileCoder,
     ref_wiener: &mut [[i32; WIENER_COEFFS]; 2],
     is_chroma: bool,
 ) -> Result<[[i32; WIENER_COEFFS]; 2]> {
@@ -203,10 +203,10 @@ pub fn read_wiener_unit(
 /// Read one unit's self-guided parameters (§5.11.58): the parameter-set index
 /// and the two projection weights, updating the running reference `ref_xqd`.
 pub fn read_sgrproj_unit(
-    dec: &mut SymbolDecoder<'_>,
+    dec: &mut impl TileCoder,
     ref_xqd: &mut [i32; 2],
 ) -> Result<(u8, [i32; 2])> {
-    let set = dec.read_literal(SGRPROJ_PARAMS_BITS)? as usize;
+    let set = dec.literal(SGRPROJ_PARAMS_BITS, Site::Other)? as usize;
     let mut xqd = [0_i32; 2];
     for i in 0..2 {
         let radius = SGR_PARAMS[set][i * 2];

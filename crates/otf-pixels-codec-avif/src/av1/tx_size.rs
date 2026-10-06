@@ -14,6 +14,7 @@
 //! path; the helpers here take the resolved neighbour widths directly.
 
 use super::cdf;
+use super::coder::{Site, TileCoder};
 use super::symbol::SymbolDecoder;
 use super::transform::TxSize;
 use otf_pixels_core::{PixelsError, Result};
@@ -206,6 +207,16 @@ pub fn read_tx_size(
     cdfs: &mut TxDepthCdfs,
     params: &TxSizeParams,
 ) -> Result<TxSize> {
+    code_tx_size(dec, cdfs, params)
+}
+
+/// [`read_tx_size`] over any [`TileCoder`], for the tile syntax to share
+/// between decoding and encoding.
+pub(crate) fn code_tx_size(
+    dec: &mut impl TileCoder,
+    cdfs: &mut TxDepthCdfs,
+    params: &TxSizeParams,
+) -> Result<TxSize> {
     if params.lossless {
         return Ok(TxSize::Tx4x4);
     }
@@ -215,10 +226,10 @@ pub fn read_tx_size(
     if params.block > BLOCK_4X4 && params.allow_select && params.tx_mode_select {
         let ctx = tx_depth_ctx(params.above_w, params.left_h, max_rect);
         let depth = match max_depth {
-            4 => dec.read_symbol(row_mut(&mut cdfs.tx64x64, ctx)?)?,
-            3 => dec.read_symbol(row_mut(&mut cdfs.tx32x32, ctx)?)?,
-            2 => dec.read_symbol(row_mut(&mut cdfs.tx16x16, ctx)?)?,
-            _ => dec.read_symbol(row_mut(&mut cdfs.tx8x8, ctx)?)?,
+            4 => dec.symbol(row_mut(&mut cdfs.tx64x64, ctx)?, Site::TxDepth)?,
+            3 => dec.symbol(row_mut(&mut cdfs.tx32x32, ctx)?, Site::TxDepth)?,
+            2 => dec.symbol(row_mut(&mut cdfs.tx16x16, ctx)?, Site::TxDepth)?,
+            _ => dec.symbol(row_mut(&mut cdfs.tx8x8, ctx)?, Site::TxDepth)?,
         };
         for _ in 0..depth {
             tx = split_tx_size(tx);
