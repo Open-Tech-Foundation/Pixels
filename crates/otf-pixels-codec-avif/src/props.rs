@@ -17,7 +17,7 @@
 //! unknown essential property would produce a confidently wrong image.
 
 use crate::boxes::{FourCc, Reader};
-use otf_pixels_core::{PixelsError, Result};
+use otf_pixels_core::{Orientation, PixelsError, Result};
 use std::collections::HashMap;
 
 /// How the chroma planes are sampled relative to luma.
@@ -129,8 +129,8 @@ pub enum Property {
     Colour(Colour),
     /// `irot` — rotation, in counter-clockwise multiples of 90 degrees (0–3).
     Rotation(u8),
-    /// `imir` — mirroring. `false` mirrors left-to-right about a vertical
-    /// axis; `true` mirrors top-to-bottom about a horizontal axis.
+    /// `imir` — mirroring. `true` exchanges left and right (mode 1);
+    /// `false` exchanges top and bottom (mode 0).
     Mirror(bool),
     /// `auxC` — the auxiliary type URN, which is how an alpha plane announces
     /// itself.
@@ -290,21 +290,38 @@ impl Properties {
             })
     }
 
-    /// The item's rotation and mirroring, as `(rotation, mirror)`.
-    ///
-    /// Rotation is counter-clockwise quarter turns, 0–3.
+    /// The item's `irot` and `imir` properties, composed in association
+    /// order, which is the order HEIF applies transformative properties in.
     #[must_use]
-    pub fn orientation(&self, item_id: u32) -> (u8, Option<bool>) {
-        let mut rotation = 0;
-        let mut mirror = None;
+    pub fn orientation(&self, item_id: u32) -> Orientation {
+        // Track the result as "rotate `turns` clockwise, then mirror left to
+        // right if `mirrored`".
+        let (mut turns, mut mirrored) = (0_u8, false);
         for property in self.for_item(item_id) {
             match property {
-                Property::Rotation(turns) => rotation = *turns,
-                Property::Mirror(axis) => mirror = Some(*axis),
+                Property::Rotation(anticlockwise) => {
+                    // A rotation after a mirror is the opposite rotation
+                    // before it, so the mirror stays last.
+                    let clockwise = (4 - anticlockwise % 4) % 4;
+                    turns = if mirrored {
+                        (turns + 4 - clockwise) % 4
+                    } else {
+                        (turns + clockwise) % 4
+                    };
+                }
+                Property::Mirror(left_right) => {
+                    // Exchanging top and bottom is a half turn followed by
+                    // exchanging left and right. A half turn commutes with a
+                    // mirror, so it folds into `turns` either way.
+                    if !left_right {
+                        turns = (turns + 2) % 4;
+                    }
+                    mirrored = !mirrored;
+                }
                 _ => {}
             }
         }
-        (rotation, mirror)
+        Orientation::from_parts(turns, mirrored)
     }
 }
 
@@ -345,12 +362,12 @@ fn parse_property(kind: FourCc, mut payload: Reader<'_>) -> Result<Property> {
             Ok(Property::Rotation(turns))
         }
         b"imir" => {
-            // Low bit: 0 is a vertical axis (mirror left-to-right), 1 is a
-            // horizontal axis (mirror top-to-bottom). An early HEIF draft
-            // defined these the other way round, and files written against it
-            // exist; we follow the published standard.
-            let axis = payload.u8()? & 0x01;
-            Ok(Property::Mirror(axis == 1))
+            // Low bit, per ISO/IEC 23008-12:2022: mode 0 exchanges top and
+            // bottom, mode 1 exchanges left and right. The 2017 text called
+            // the field `axis` and worded it ambiguously; libavif, which
+            // writes most AVIFs, has always meant what the 2022 text says.
+            let mode = payload.u8()? & 0x01;
+            Ok(Property::Mirror(mode == 1))
         }
         b"auxC" => {
             let (_version, _flags) = payload.full_box()?;
@@ -659,6 +676,52 @@ mod tests {
             panic!("expected an ICC colr");
         };
         assert_eq!(profile, vec![1, 2, 3, 4]);
+    }
+
+    /// A store holding `properties`, all associated with item 1 in order.
+    fn item_with(properties: Vec<Property>) -> Properties {
+        let associations = (1..=properties.len())
+            .map(|index| Association {
+                index: u16::try_from(index).unwrap(),
+                essential: true,
+            })
+            .collect();
+        Properties {
+            entries: properties,
+            associations: HashMap::from([(1, associations)]),
+        }
+    }
+
+    #[test]
+    fn irot_and_imir_compose_in_association_order() {
+        use Property::{Mirror, Rotation};
+        let cases = [
+            (vec![], Orientation::Normal),
+            // irot counts anticlockwise: one turn is EXIF 8.
+            (vec![Rotation(1)], Orientation::Rotate270),
+            (vec![Rotation(2)], Orientation::Rotate180),
+            (vec![Rotation(3)], Orientation::Rotate90),
+            // libavif: mode 0 is top-to-bottom, mode 1 left-to-right.
+            (vec![Mirror(false)], Orientation::FlipVertical),
+            (vec![Mirror(true)], Orientation::FlipHorizontal),
+            // MIAF order, rotation then mirror. A quarter turn clockwise then
+            // exchanging left and right is the transverse; anticlockwise,
+            // the transpose.
+            (vec![Rotation(3), Mirror(true)], Orientation::Transpose),
+            (vec![Rotation(1), Mirror(true)], Orientation::Transverse),
+            (vec![Rotation(1), Mirror(false)], Orientation::Transpose),
+            // Out of MIAF order: the mirror first. Mirroring then turning
+            // anticlockwise equals turning clockwise then mirroring.
+            (vec![Mirror(true), Rotation(1)], Orientation::Transpose),
+        ];
+        for (properties, expected) in cases {
+            assert_eq!(
+                item_with(properties.clone()).orientation(1),
+                expected,
+                "{properties:?}"
+            );
+        }
+        assert_eq!(Properties::default().orientation(7), Orientation::Normal);
     }
 
     #[test]

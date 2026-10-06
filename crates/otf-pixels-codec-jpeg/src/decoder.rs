@@ -22,8 +22,8 @@ use crate::format::{
 use crate::huffman::HuffmanTable;
 use crate::idct::{self, Scale};
 use otf_pixels_core::{
-    Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, PixelFormat, PixelsError,
-    Result, Source,
+    Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, Orientation, PixelFormat,
+    PixelsError, Result, Source,
 };
 
 /// The most blocks a single MCU may contain (ITU-T T.81 §B.2.3).
@@ -72,7 +72,7 @@ enum Parsed<S: Source> {
         source: S,
         /// Carried across the handover so a progressive photograph reports its
         /// orientation like a baseline one does.
-        orientation: Option<u8>,
+        orientation: Option<Orientation>,
     },
 }
 
@@ -161,20 +161,6 @@ impl<S: Source> JpegDecoder<S> {
         }
     }
 
-    /// The EXIF orientation tag, 1..=8, if the file carries one.
-    ///
-    /// Applying it is the caller's job: `auto_orient` is a pipeline decision
-    /// (SPEC §Safety and limits), and a decoder that rotated its own output
-    /// would leave no way to turn that off.
-    #[must_use]
-    pub const fn orientation(&self) -> Option<u8> {
-        match &self.inner {
-            Inner::Baseline(baseline) => baseline.orientation,
-            #[cfg(feature = "progressive")]
-            Inner::Progressive(progressive) => progressive.orientation(),
-        }
-    }
-
     /// Whether this stream was progressive, and so decoded by the wrapped
     /// codec rather than by this crate.
     #[must_use]
@@ -194,6 +180,16 @@ impl<S: Source + std::fmt::Debug> Decoder for JpegDecoder<S> {
             #[cfg(feature = "progressive")]
             Inner::Progressive(progressive) => progressive.descriptor(),
         }
+    }
+
+    /// The EXIF orientation, from the first EXIF `APP1` segment.
+    fn orientation(&self) -> Orientation {
+        match &self.inner {
+            Inner::Baseline(baseline) => baseline.orientation,
+            #[cfg(feature = "progressive")]
+            Inner::Progressive(progressive) => progressive.orientation(),
+        }
+        .unwrap_or_default()
     }
 
     fn capability(&self) -> DecodeCapability {
@@ -250,7 +246,7 @@ struct Baseline<S: Source> {
     /// MCUs left before the next restart marker is due.
     restarts_left: u32,
     /// The EXIF orientation tag, if the file carries one.
-    orientation: Option<u8>,
+    orientation: Option<Orientation>,
     planes: Vec<Plane>,
     /// Per-component DC predictor, reset at every restart.
     predictors: Vec<i32>,

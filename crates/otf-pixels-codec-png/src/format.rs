@@ -317,6 +317,7 @@ impl Chunk {
     /// ancillary, so a decoder that does not understand it may ignore it. An
     /// unknown *critical* chunk means the image cannot be rendered correctly,
     /// so it is an error rather than something to skip.
+    #[cfg(test)]
     #[must_use]
     pub fn is_ancillary(&self) -> bool {
         self.kind.first().copied().unwrap_or(0) & 0x20 != 0
@@ -353,6 +354,7 @@ impl<'a> ChunkReader<'a> {
     }
 
     /// Whether every byte has been consumed.
+    #[cfg(test)]
     #[must_use]
     pub const fn is_finished(&self) -> bool {
         self.position >= self.data.len()

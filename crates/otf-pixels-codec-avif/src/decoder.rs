@@ -22,8 +22,8 @@ use crate::meta::Meta;
 use crate::props::{Av1Config, Colour, Subsampling};
 use crate::yuv::{Depths, Layout, YuvMatrix, identity_to_rgb, plane_to_grey, yuv_to_rgb};
 use otf_pixels_core::{
-    Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, PixelFormat, PixelsError,
-    Result, Source,
+    Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, Orientation, PixelFormat,
+    PixelsError, Result, Source,
 };
 
 /// The most container bytes read before a file is called hostile.
@@ -56,6 +56,9 @@ pub struct AvifInfo {
     /// The primary item's `colr` colour information, if it has any. Its `nclx`
     /// matrix, when present, overrides the one in the AV1 sequence header.
     pub colour: Option<Colour>,
+    /// The primary item's `irot`/`imir` transform. Reported through
+    /// [`Decoder::orientation`], never applied to the decoded rows.
+    pub orientation: Orientation,
 }
 
 /// An alpha plane's coded image: a second AV1 still, usually monochrome.
@@ -240,6 +243,7 @@ fn parse_container(bytes: &[u8]) -> Result<AvifInfo> {
         has_alpha: meta.alpha_item(primary.id).is_some(),
         is_grid: primary.is_grid(),
         colour: meta.properties.colour(primary.id).cloned(),
+        orientation: meta.properties.orientation(primary.id),
     })
 }
 
@@ -467,6 +471,10 @@ fn pixel_format(info: &AvifInfo) -> PixelFormat {
 impl Decoder for AvifDecoder {
     fn descriptor(&self) -> ImageDescriptor {
         self.descriptor
+    }
+
+    fn orientation(&self) -> Orientation {
+        self.info.orientation
     }
 
     fn capability(&self) -> DecodeCapability {
@@ -819,6 +827,7 @@ mod tests {
                 has_alpha,
                 is_grid: false,
                 colour: None,
+                orientation: Orientation::Normal,
             };
             pixel_format(&info)
         }
@@ -841,6 +850,7 @@ mod tests {
                 has_alpha: alpha,
                 is_grid: false,
                 colour: None,
+                orientation: Orientation::Normal,
             })
         };
         assert_eq!(mono(8, false), PixelFormat::Gray8);

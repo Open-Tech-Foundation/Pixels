@@ -1,8 +1,8 @@
 //! The WebP decoder, wrapping `image-webp`.
 
 use otf_pixels_core::{
-    Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, PixelFormat, PixelsError,
-    Result, Source,
+    Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, Orientation, PixelFormat,
+    PixelsError, Result, Source,
 };
 
 /// The most compressed bytes read before a file is called hostile.
@@ -21,6 +21,8 @@ pub struct WebPDecoder {
     pixels: Vec<u8>,
     /// Rows already served.
     row: u32,
+    /// From the `EXIF` chunk, if there is one.
+    orientation: Orientation,
 }
 
 impl WebPDecoder {
@@ -87,10 +89,20 @@ impl WebPDecoder {
         let mut pixels = vec![0_u8; wanted];
         decoder.read_image(&mut pixels).map_err(decode_error)?;
 
+        // A chunk that fails to read is metadata lost, not an image refused:
+        // the pixels above decoded fine.
+        let orientation = decoder
+            .exif_metadata()
+            .ok()
+            .flatten()
+            .and_then(|exif| Orientation::from_exif_block(&exif))
+            .unwrap_or_default();
+
         Ok(Self {
             descriptor,
             pixels,
             row: 0,
+            orientation,
         })
     }
 }
@@ -116,6 +128,10 @@ fn decode_error(error: image_webp::DecodingError) -> PixelsError {
 impl Decoder for WebPDecoder {
     fn descriptor(&self) -> ImageDescriptor {
         self.descriptor
+    }
+
+    fn orientation(&self) -> Orientation {
+        self.orientation
     }
 
     fn capability(&self) -> DecodeCapability {

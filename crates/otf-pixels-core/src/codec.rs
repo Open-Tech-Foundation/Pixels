@@ -5,7 +5,9 @@
 //! behind [`Decoder`] and [`Encoder`], so a format can be rewritten without an
 //! API change.
 
-use crate::{ImageDescriptor, PixelFormat, PixelsError, Region, Result, Sink, TileMut};
+use crate::{
+    ImageDescriptor, Orientation, PixelFormat, PixelsError, Region, Result, Sink, TileMut,
+};
 use core::fmt;
 
 /// A container format.
@@ -185,6 +187,18 @@ pub trait Decoder: Send + fmt::Debug {
     /// What this decoder can produce without a full decode.
     fn capability(&self) -> DecodeCapability {
         DecodeCapability::Sequential
+    }
+
+    /// How the stored image must be turned to display upright, as its
+    /// metadata declares.
+    ///
+    /// Reported, never applied: rows come out in stored order whatever this
+    /// says. Applying it is the pipeline's `auto_orient` decision (SPEC
+    /// §Safety and limits), which a decoder that rotated its own output would
+    /// take away from the caller. Known after the header is parsed, like
+    /// [`Decoder::descriptor`].
+    fn orientation(&self) -> Orientation {
+        Orientation::Normal
     }
 
     /// Decode the next row, top to bottom, into `out`.

@@ -118,7 +118,13 @@ g.output(Format::Png, opts).bytes()?;        // Vec<u8>
 
 - `max_pixels` (default 268 MP, Sharp-compatible): checked at header parse,
   before pixel allocation. Exceeding it is an error, not a truncation.
-- `auto_orient` (default on): JPEG EXIF orientation applied before any op.
+- `auto_orient` (default on, `OpenOptions`): the orientation the file
+  declares is applied before any op — EXIF `Orientation` in JPEG, TIFF, PNG
+  (an `eXIf` chunk before `IDAT`) and WebP, `irot`/`imir` in AVIF. Decoders
+  report it (`Decoder::orientation`) and never apply it themselves, so turning
+  it off yields the pixels as stored; `Image::orient` applies one by hand. A
+  quarter turn over a sequential source is the reverse-order exception of
+  §Guarantees 1, at the shrink-on-load size when that applies.
 - Malformed input never panics and never aborts the process; all codec
   parsers are fuzzed in CI.
 - Decompression bombs beyond dimensions (e.g. malicious deflate streams)

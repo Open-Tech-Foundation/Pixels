@@ -23,7 +23,8 @@
 //! decoder, or another crate — changes nothing above this module.
 
 use otf_pixels_core::{
-    DecodeCapability, Decoder, ImageDescriptor, Limits, PixelFormat, PixelsError, Result, Source,
+    DecodeCapability, Decoder, ImageDescriptor, Limits, Orientation, PixelFormat, PixelsError,
+    Result, Source,
 };
 
 /// The most compressed bytes read before a file is called hostile.
@@ -44,7 +45,7 @@ pub struct Progressive {
     row: u32,
     /// Read from the header before the handover, so a progressive photograph
     /// reports its orientation like a baseline one does.
-    orientation: Option<u8>,
+    orientation: Option<Orientation>,
 }
 
 impl Progressive {
@@ -65,7 +66,7 @@ impl Progressive {
         replay: Vec<u8>,
         mut source: S,
         limits: Limits,
-        orientation: Option<u8>,
+        orientation: Option<Orientation>,
     ) -> Result<Self> {
         let mut bytes = replay;
         let mut chunk = [0_u8; 64 * 1024];
@@ -141,7 +142,7 @@ impl Progressive {
 
     /// The EXIF orientation tag carried over from the header.
     #[must_use]
-    pub const fn orientation(&self) -> Option<u8> {
+    pub const fn orientation(&self) -> Option<Orientation> {
         self.orientation
     }
 }

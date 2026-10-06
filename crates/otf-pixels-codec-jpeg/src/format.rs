@@ -6,7 +6,7 @@
 //! segment payload, so segment framing is the reader's job and validation is
 //! this module's.
 
-use otf_pixels_core::{PixelsError, Result};
+use otf_pixels_core::{Orientation, PixelsError, Result};
 
 /// Marker bytes, without the preceding `0xFF`.
 pub mod marker {
@@ -339,58 +339,17 @@ pub fn adobe_transform(payload: &[u8]) -> Option<AdobeTransform> {
     }
 }
 
-/// The EXIF orientation tag, 1..=8, if `payload` is an EXIF `APP1` segment
-/// that carries one.
+/// The EXIF orientation, if `payload` is an EXIF `APP1` segment that carries
+/// one.
 ///
+/// `APP1` also carries XMP, so the `Exif\0\0` identifier is required here
+/// even though [`Orientation::from_exif_block`] would accept a bare block.
 /// Failure at any step returns `None` rather than an error: a broken EXIF
-/// block is not a broken image, and refusing to decode a photograph because
-/// its metadata is malformed would be the wrong trade.
+/// block is not a broken image.
 #[must_use]
-pub fn exif_orientation(payload: &[u8]) -> Option<u8> {
-    let tiff = payload.strip_prefix(b"Exif\0\0")?;
-
-    let big_endian = match tiff.get(..2)? {
-        b"MM" => true,
-        b"II" => false,
-        _ => return None,
-    };
-    let short = |at: usize| -> Option<u16> {
-        let bytes = [*tiff.get(at)?, *tiff.get(at + 1)?];
-        Some(if big_endian {
-            u16::from_be_bytes(bytes)
-        } else {
-            u16::from_le_bytes(bytes)
-        })
-    };
-    let long = |at: usize| -> Option<u32> {
-        let bytes = [
-            *tiff.get(at)?,
-            *tiff.get(at + 1)?,
-            *tiff.get(at + 2)?,
-            *tiff.get(at + 3)?,
-        ];
-        Some(if big_endian {
-            u32::from_be_bytes(bytes)
-        } else {
-            u32::from_le_bytes(bytes)
-        })
-    };
-
-    if short(2)? != 42 {
-        return None;
-    }
-    let ifd = long(4)? as usize;
-    let entries = short(ifd)?;
-    for entry in 0..entries as usize {
-        let at = ifd.checked_add(2)?.checked_add(entry.checked_mul(12)?)?;
-        // 0x0112 is Orientation; a SHORT, so its single value sits in the
-        // first two bytes of the value field rather than at an offset.
-        if short(at)? == 0x0112 {
-            let value = short(at + 8)?;
-            return (1..=8).contains(&value).then_some(value as u8);
-        }
-    }
-    None
+pub fn exif_orientation(payload: &[u8]) -> Option<Orientation> {
+    payload.strip_prefix(b"Exif\0\0")?;
+    Orientation::from_exif_block(payload)
 }
 
 /// Read a big-endian `u16` out of an exactly-two-byte slice.
@@ -551,10 +510,10 @@ mod tests {
     fn exif_orientation_is_read_from_both_byte_orders() {
         // Little-endian: II, 42, IFD at 8, one entry, tag 0x0112, SHORT, 1, 6.
         let little = b"Exif\0\0II*\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0";
-        assert_eq!(exif_orientation(little), Some(6));
+        assert_eq!(exif_orientation(little), Some(Orientation::Rotate90));
 
         let big = b"Exif\0\0MM\0*\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0\x03\0\0";
-        assert_eq!(exif_orientation(big), Some(3));
+        assert_eq!(exif_orientation(big), Some(Orientation::Rotate180));
     }
 
     #[test]

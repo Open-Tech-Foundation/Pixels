@@ -28,8 +28,8 @@
 //! deferred rather than dismissed.
 
 use otf_pixels_core::{
-    Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, PixelFormat, PixelsError,
-    Region, Result, Source, TileMut,
+    Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, Orientation, PixelFormat,
+    PixelsError, Region, Result, Source, TileMut,
 };
 
 use crate::ifd::{ByteOrder, Directory, parse_header, probe as probe_header};
@@ -356,6 +356,10 @@ fn write_sample(
 impl Decoder for TiffDecoder {
     fn descriptor(&self) -> ImageDescriptor {
         self.image.descriptor
+    }
+
+    fn orientation(&self) -> Orientation {
+        self.image.orientation
     }
 
     fn capability(&self) -> DecodeCapability {

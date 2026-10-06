@@ -63,8 +63,8 @@ use std::sync::Arc;
 
 pub use otf_pixels_core::{
     AccessPattern, ChannelLayout, Codec, ColorModel, Decoder, EncodeOptions, Encoder, ErrorCode,
-    Format, ImageDescriptor, Limit, Limits, Metadata, PixelFormat, PixelsError, PlanOptions,
-    Region, Result, RunStats, SchedulerOptions, Sink, Source, TileShape,
+    Format, ImageDescriptor, Limit, Limits, Metadata, Orientation, PixelFormat, PixelsError,
+    PlanOptions, Region, Result, RunStats, SchedulerOptions, Sink, Source, TileShape,
     evaluate as evaluate_reference,
 };
 pub use otf_pixels_ops::{
@@ -92,6 +92,38 @@ pub use otf_pixels_codec_webp::{WebPCodec, WebPDecoder, WebPEncoder};
 
 #[cfg(feature = "avif")]
 pub use otf_pixels_codec_avif::{AvifCodec, AvifDecoder};
+
+/// How [`Image::open_with`] and [`Image::from_stream_with`] read an image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OpenOptions {
+    /// Turn the image upright as its metadata declares — EXIF `Orientation`
+    /// in JPEG, TIFF and WebP, `irot`/`imir` in AVIF — before any op.
+    ///
+    /// On by default (SPEC §Safety and limits): a phone photograph is stored
+    /// sideways far more often than anyone wants it processed that way. Off,
+    /// pixels arrive as stored, and [`Image::orient`] applies an orientation
+    /// read some other way.
+    pub auto_orient: bool,
+}
+
+impl OpenOptions {
+    /// The defaults with `auto_orient` replaced.
+    ///
+    /// [`OpenOptions`] is `#[non_exhaustive]`, so outside this crate a setter
+    /// is the only way to change a field.
+    #[must_use]
+    pub const fn with_auto_orient(mut self, auto_orient: bool) -> Self {
+        self.auto_orient = auto_orient;
+        self
+    }
+}
+
+impl Default for OpenOptions {
+    fn default() -> Self {
+        Self { auto_orient: true }
+    }
+}
 
 /// A lazily evaluated image pipeline.
 ///
@@ -136,7 +168,8 @@ impl Image {
         Ok(Self::from_decoder(Box::new(decoder), Format::Raw))
     }
 
-    /// Open an image file, identifying its format from its contents.
+    /// Open an image file, identifying its format from its contents, with
+    /// default [`OpenOptions`] — so it is turned upright.
     ///
     /// The path's extension is **ignored**. Detection is by magic bytes only
     /// (SPEC §Formats), because a name is an attacker-controlled hint while
@@ -149,6 +182,15 @@ impl Image {
     /// [`PixelsError::Malformed`] if the header is invalid for the format its
     /// magic bytes claim.
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        Self::open_with(path, OpenOptions::default())
+    }
+
+    /// Open an image file with explicit [`OpenOptions`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Image::open`].
+    pub fn open_with(path: impl AsRef<std::path::Path>, options: OpenOptions) -> Result<Self> {
         let path = path.as_ref();
         let file = std::fs::File::open(path).map_err(|e| {
             // `PixelsError::io` takes a static context, so the path goes into
@@ -158,7 +200,7 @@ impl Image {
             let detail = std::io::Error::new(kind, format!("{}: {e}", path.display()));
             PixelsError::io("opening image file", detail)
         })?;
-        Self::from_stream(std::io::BufReader::new(file))
+        Self::from_stream_with(std::io::BufReader::new(file), options)
     }
 
     /// Build an image from a byte stream, identifying its format from the
@@ -176,7 +218,19 @@ impl Image {
     /// the stream, [`PixelsError::Io`] on read failure, or
     /// [`PixelsError::Malformed`] if the header is invalid for the format its
     /// magic bytes claim.
-    pub fn from_stream(mut source: impl Source + std::fmt::Debug + 'static) -> Result<Self> {
+    pub fn from_stream(source: impl Source + std::fmt::Debug + 'static) -> Result<Self> {
+        Self::from_stream_with(source, OpenOptions::default())
+    }
+
+    /// Build an image from a byte stream with explicit [`OpenOptions`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Image::from_stream`].
+    pub fn from_stream_with(
+        mut source: impl Source + std::fmt::Debug + 'static,
+        options: OpenOptions,
+    ) -> Result<Self> {
         let codecs = sniffing_codecs();
         let longest = codecs.iter().map(|c| c.magic_len()).max().unwrap_or(0);
 
@@ -208,38 +262,38 @@ impl Image {
         let stream = Prefixed::new(prefix, source);
         // Unused when no decoding codec is compiled in, which is a legitimate
         // if degenerate build rather than a mistake.
-        let _ = &stream;
+        let _ = (&stream, options);
 
         match codec.format() {
             #[cfg(feature = "png")]
             Format::Png => {
                 let decoder = PngDecoder::new(stream, Limits::default())?;
-                Ok(Self::from_decoder(Box::new(decoder), Format::Png))
+                Ok(Self::decoded(Box::new(decoder), Format::Png, options))
             }
             #[cfg(feature = "gif")]
             Format::Gif => {
                 let decoder = GifDecoder::new(stream, Limits::default())?;
-                Ok(Self::from_decoder(Box::new(decoder), Format::Gif))
+                Ok(Self::decoded(Box::new(decoder), Format::Gif, options))
             }
             #[cfg(feature = "jpeg")]
             Format::Jpeg => {
                 let decoder = JpegDecoder::new(stream, Limits::default())?;
-                Ok(Self::from_decoder(Box::new(decoder), Format::Jpeg))
+                Ok(Self::decoded(Box::new(decoder), Format::Jpeg, options))
             }
             #[cfg(feature = "tiff")]
             Format::Tiff => {
                 let decoder = TiffDecoder::new(stream, Limits::default())?;
-                Ok(Self::from_decoder(Box::new(decoder), Format::Tiff))
+                Ok(Self::decoded(Box::new(decoder), Format::Tiff, options))
             }
             #[cfg(feature = "webp")]
             Format::WebP => {
                 let decoder = WebPDecoder::new(stream, Limits::default())?;
-                Ok(Self::from_decoder(Box::new(decoder), Format::WebP))
+                Ok(Self::decoded(Box::new(decoder), Format::WebP, options))
             }
             #[cfg(feature = "avif")]
             Format::Avif => {
                 let decoder = AvifDecoder::new(stream, Limits::default())?;
-                Ok(Self::from_decoder(Box::new(decoder), Format::Avif))
+                Ok(Self::decoded(Box::new(decoder), Format::Avif, options))
             }
             other => Err(PixelsError::unsupported(format!(
                 "{other} was detected but no decoder for it is compiled in"
@@ -247,9 +301,33 @@ impl Image {
         }
     }
 
+    /// Wrap a sniffed decoder, turning it upright if `options` say so.
+    ///
+    /// The orientation is read before the decoder disappears into a source,
+    /// which is the last point it is reachable.
+    #[cfg(any(
+        feature = "png",
+        feature = "gif",
+        feature = "jpeg",
+        feature = "tiff",
+        feature = "webp",
+        feature = "avif"
+    ))]
+    fn decoded(decoder: Box<dyn Decoder>, format: Format, options: OpenOptions) -> Self {
+        let orientation = decoder.orientation();
+        let image = Self::from_decoder(decoder, format);
+        if options.auto_orient {
+            image.orient(orientation)
+        } else {
+            image
+        }
+    }
+
     /// Build an image from any decoder whose header has already been parsed.
     ///
     /// This is the extension point for codecs living outside this crate.
+    /// Pixels arrive as stored: [`Decoder::orientation`] is not applied here,
+    /// so pass it to [`Image::orient`] to turn the result upright.
     #[must_use]
     pub fn from_decoder(decoder: Box<dyn Decoder>, format: Format) -> Self {
         let source = otf_pixels_core::DecodedSource::new(decoder);
@@ -330,6 +408,28 @@ impl Image {
             .with_fit(Fit::Inside)
             .without_enlargement(true);
         self.resize_with(width, height, options)
+    }
+
+    /// Apply `orientation`: the stored image becomes the upright one.
+    ///
+    /// [`Image::open`] and [`Image::from_stream`] already do this with the
+    /// orientation the file declares; this is for pixels opened with
+    /// `auto_orient` off or through [`Image::from_decoder`]. It is a quarter
+    /// turn and a mirror at most, and both rescale, so an oriented JPEG
+    /// keeps its shrink-on-load fast path.
+    #[must_use]
+    pub fn orient(self, orientation: Orientation) -> Self {
+        let turns = orientation.clockwise_turns();
+        let image = if turns == 0 {
+            self
+        } else {
+            self.rotate(90 * i32::from(turns))
+        };
+        if orientation.mirrored() {
+            image.flop()
+        } else {
+            image
+        }
     }
 
     /// Rotate by `degrees`, which must be a multiple of 90.

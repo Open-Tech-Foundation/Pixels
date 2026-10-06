@@ -88,6 +88,8 @@ pub mod tag {
     pub const PHOTOMETRIC: u16 = 262;
     /// Byte offset of each strip.
     pub const STRIP_OFFSETS: u16 = 273;
+    /// How the stored image must be turned to display upright.
+    pub const ORIENTATION: u16 = 274;
     /// Channels per pixel.
     pub const SAMPLES_PER_PIXEL: u16 = 277;
     /// Rows per strip.

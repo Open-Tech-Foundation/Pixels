@@ -32,7 +32,7 @@
 )]
 
 use otf_pixels_codec_jpeg::JpegDecoder;
-use otf_pixels_core::{Decoder, ErrorCode, Limits, PixelFormat};
+use otf_pixels_core::{Decoder, ErrorCode, Limits, Orientation, PixelFormat};
 
 fn fixture_dir() -> String {
     format!("{}/tests/fixtures", env!("CARGO_MANIFEST_DIR"))
@@ -374,7 +374,7 @@ fn exif_orientation_is_read_but_not_applied() {
         JpegDecoder::new(&plain[..], Limits::default())
             .unwrap()
             .orientation(),
-        None,
+        Orientation::Normal,
         "a file with no EXIF has no orientation to report"
     );
 
@@ -387,7 +387,7 @@ fn exif_orientation_is_read_but_not_applied() {
     tagged.extend_from_slice(&plain[2..]);
 
     let mut decoder = JpegDecoder::new(&tagged[..], Limits::default()).unwrap();
-    assert_eq!(decoder.orientation(), Some(6));
+    assert_eq!(decoder.orientation(), Orientation::Rotate90);
 
     // And the pixels are untouched: same shape, same bytes as the file
     // without the tag.

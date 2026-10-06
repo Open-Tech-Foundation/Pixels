@@ -405,7 +405,7 @@ fn max_pixels_is_enforced_before_decoding() {
 }
 
 #[test]
-fn construction_reads_only_the_header() {
+fn construction_reads_no_image_data() {
     // SPEC §Guarantees 3: metadata costs the header, not the pixels.
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -435,10 +435,18 @@ fn construction_reads_only_the_header() {
     };
     let decoder = PngDecoder::new(source, Limits::default()).unwrap();
     assert_eq!(decoder.descriptor().width, 32);
+
+    // Everything up to and including the first IDAT's length and type, and
+    // not one byte of its payload: the chunks before the image data decide
+    // the format and orientation, the image data is the pixels.
+    let idat = bytes
+        .windows(4)
+        .position(|window| window == b"IDAT")
+        .unwrap();
     assert_eq!(
         read.load(Ordering::Relaxed),
-        33,
-        "construction should read exactly the signature and IHDR"
+        idat + 4,
+        "construction should stop at the first IDAT's header"
     );
 }
 

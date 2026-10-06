@@ -7,6 +7,12 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- AVIF `imir` was documented, though not yet used, with its two modes swapped.
+  Mode 0 exchanges top and bottom and mode 1 left and right, per ISO/IEC
+  23008-12:2022 and libavif, which writes most AVIFs.
+- A PNG with `tRNS` reported an opaque pixel format until its first row was
+  read. The chunks before `IDAT` are now read at construction, so the format
+  is final from the start.
 - Any streaming decode resized to more than one tile column failed outright
   with "source cannot rewind" — 512x512 to 300x300 on PNG or JPEG alike, while
   512x512 to 32x32 worked, the boundary being one 128px tile. Consecutive
@@ -30,6 +36,11 @@ versioning: [SemVer](https://semver.org/).
   with it rather than failing to build.
 
 ### Changed
+- `PngDecoder::new` now reads through to the first `IDAT` header rather than
+  stopping after `IHDR`, so that `eXIf` and `tRNS` are known at open. It still
+  reads no image data.
+- `JpegDecoder::orientation` is now the `Decoder` trait method and returns
+  `Orientation` instead of a raw `Option<u8>`.
 - SPEC's JPEG fast-path paragraph now records that it describes intent rather
   than facade behaviour, and what stands in the way: the planner analyses an
   immutable graph where selecting a reduced source would require rewriting it,
@@ -126,6 +137,20 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- Auto-orientation, on by default as SPEC always said it was. `Image::open`
+  and `Image::from_stream` turn an image upright as its metadata declares
+  before any op runs: EXIF `Orientation` in JPEG, TIFF, PNG (`eXIf`) and WebP,
+  and `irot`/`imir` in AVIF. Previously every phone photograph came out
+  sideways. `OpenOptions::with_auto_orient(false)` with `Image::open_with` /
+  `Image::from_stream_with` leaves pixels as stored, and `Image::orient`
+  applies an orientation by hand. Rotation and mirroring rescale, so an
+  oriented JPEG thumbnail still takes the shrink-on-load fast path. Checked
+  against Pillow's `exif_transpose` for all eight EXIF values in every format
+  and against libavif's `--irot`/`--imir` for AVIF
+  (`scripts/regenerate-orientation-reference.py`).
+- `otf-pixels-core`: `Orientation`, the eight EXIF orientations with their
+  rotate-then-mirror decomposition and a shared EXIF parser, and
+  `Decoder::orientation`, which decoders report and never apply.
 - AVIF alpha and monochrome decode. A straight alpha plane — stored as a
   second, usually monochrome, AV1 image — becomes the alpha channel (`Rgba8`,
   `Rgba16`, `GrayA8`), expanded to full range if coded at studio range; a

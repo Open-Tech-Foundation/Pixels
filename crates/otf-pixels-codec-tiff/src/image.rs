@@ -8,7 +8,7 @@
 
 use otf_pixels_compress::{LzwDecoder, inflate_to, zlib_decompress};
 use otf_pixels_core::{
-    ImageDescriptor, Limits, PixelFormat, PixelsError, Region, Result, SampleKind,
+    ImageDescriptor, Limits, Orientation, PixelFormat, PixelsError, Region, Result, SampleKind,
 };
 
 use crate::ifd::{ByteOrder, Directory, tag};
@@ -134,6 +134,9 @@ pub struct TiffImage {
     pub color_map: Vec<u32>,
     /// The byte order the file declared.
     pub order: ByteOrder,
+    /// The `Orientation` tag; [`Orientation::Normal`] when absent or out of
+    /// range, which is metadata declined rather than an image refused.
+    pub orientation: Orientation,
 }
 
 impl TiffImage {
@@ -260,6 +263,10 @@ impl TiffImage {
             predictor,
             color_map: directory.values(tag::COLOR_MAP).to_vec(),
             order,
+            orientation: u16::try_from(directory.value_or(tag::ORIENTATION, 1))
+                .ok()
+                .and_then(Orientation::from_exif)
+                .unwrap_or_default(),
         })
     }
 
@@ -561,6 +568,7 @@ mod tests {
             predictor: true,
             color_map: Vec::new(),
             order: ByteOrder::Little,
+            orientation: Orientation::Normal,
         };
         // Row of four RGB pixels, stored as differences from the left.
         let mut data = vec![
@@ -641,6 +649,7 @@ mod tests {
             predictor: false,
             color_map: Vec::new(),
             order: ByteOrder::Little,
+            orientation: Orientation::Normal,
         };
         assert_eq!(image.chunks_across(), 4, "100 / 32 rounds up to 4");
         assert_eq!(image.chunks_down(), 3, "70 / 32 rounds up to 3");
@@ -673,6 +682,7 @@ mod tests {
             predictor: false,
             color_map: Vec::new(),
             order: ByteOrder::Little,
+            orientation: Orientation::Normal,
         };
         assert_eq!(image.chunks_across(), 1);
         assert_eq!(image.chunks_down(), 3);

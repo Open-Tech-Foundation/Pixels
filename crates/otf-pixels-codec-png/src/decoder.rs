@@ -2,9 +2,12 @@
 //!
 //! # Laziness
 //!
-//! Construction reads only the signature and `IHDR` — 33 bytes — so the
-//! descriptor is available without touching pixel data (SPEC §Guarantees 3).
-//! The remaining chunks are read on the first [`Decoder::read_row`].
+//! Construction reads the chunks up to the first `IDAT` and stops at its
+//! header, so the descriptor and orientation are known without touching pixel
+//! data (SPEC §Guarantees 3). Everything that changes how a pixel is read or
+//! shown — `PLTE`, `tRNS`, `eXIf` — precedes `IDAT` (§5.6), so nothing found
+//! later can revise them. The image data is read on the first
+//! [`Decoder::read_row`].
 //!
 //! # Memory
 //!
@@ -20,8 +23,8 @@
 //! leave no choice.
 
 use otf_pixels_core::{
-    Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, PixelFormat, PixelsError,
-    Result, Source,
+    Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, Orientation, PixelFormat,
+    PixelsError, Result, Source,
 };
 
 use crate::format::{
@@ -36,6 +39,12 @@ const MAX_PLTE: usize = 256 * 3;
 const MAX_TRNS: usize = 256;
 /// How much compressed data is pulled from the source per refill.
 const READ_CHUNK: usize = 64 * 1024;
+/// How much of an `eXIf` chunk is read looking for the orientation.
+///
+/// The tag lives in the first directory, which writers put at the front; the
+/// rest is typically a thumbnail. A tag beyond this is not found, which is
+/// metadata declined rather than an image refused.
+const EXIF_PREFIX: usize = 64 * 1024;
 
 /// Transparency from a `tRNS` chunk (§11.3.2.1).
 #[derive(Debug, Clone)]
@@ -53,10 +62,9 @@ enum Transparency {
 pub struct PngDecoder<S: Source> {
     header: Header,
     descriptor: ImageDescriptor,
-    limits: Limits,
-    source: Option<S>,
-    /// Bytes already read while parsing the header, kept for the full parse.
-    prefix: Vec<u8>,
+    /// Everything read before the image data, until a decode path takes it.
+    prelude: Option<Prelude<S>>,
+    orientation: Orientation,
     /// The decoded image in output format, produced on first row read.
     ///
     /// Only used by the interlaced path; a non-interlaced image never
@@ -65,8 +73,15 @@ pub struct PngDecoder<S: Source> {
     /// Per-row state for the non-interlaced streaming path.
     stream: Option<Box<Streaming<S>>>,
     row: u32,
-    /// Set when the `tRNS` chunk was seen, which changes the output format.
-    has_transparency: bool,
+}
+
+/// The chunks before the image data, and the stream left at the first `IDAT`.
+#[derive(Debug)]
+struct Prelude<S: Source> {
+    /// Positioned inside the first `IDAT`, its payload unread.
+    chunks: ChunkStream<S>,
+    palette: Option<Vec<[u8; 3]>>,
+    transparency: Option<Transparency>,
 }
 
 /// Everything the streaming path carries between rows.
@@ -91,12 +106,13 @@ struct Streaming<S: Source> {
 }
 
 impl<S: Source> PngDecoder<S> {
-    /// Parse the signature and `IHDR`, reading nothing further.
+    /// Parse the signature, `IHDR` and every chunk before the image data.
     ///
     /// # Errors
     ///
-    /// Returns [`PixelsError::Malformed`] for a bad signature or header, or
-    /// [`PixelsError::LimitExceeded`] if the dimensions exceed `limits`.
+    /// Returns [`PixelsError::Malformed`] for a bad signature, header or
+    /// pre-`IDAT` chunk, or [`PixelsError::LimitExceeded`] if the dimensions
+    /// exceed `limits`.
     pub fn new(mut source: S, limits: Limits) -> Result<Self> {
         // Signature plus a complete IHDR chunk: 8 + 4 + 4 + 13 + 4.
         let mut prefix = vec![0_u8; 33];
@@ -112,43 +128,10 @@ impl<S: Source> PngDecoder<S> {
         }
         let header = Header::parse(&chunk.data, &limits)?;
 
-        // `tRNS` appears later in the stream but changes the output format, so
-        // the descriptor cannot be final until the whole stream is read. It is
-        // resolved here optimistically and corrected during the full parse;
-        // callers see the corrected one because `descriptor()` reads the field.
-        let descriptor = header.descriptor(false, &limits)?;
-        Ok(Self {
-            header,
-            descriptor,
-            limits,
-            source: Some(source),
-            prefix,
-            raster: None,
-            stream: None,
-            row: 0,
-            has_transparency: false,
-        })
-    }
-
-    /// The parsed header.
-    #[must_use]
-    pub const fn header(&self) -> Header {
-        self.header
-    }
-
-    /// Walk chunks up to the first `IDAT`, resolving the final format.
-    ///
-    /// `PLTE` and `tRNS` both precede `IDAT` (§5.6), which is what makes
-    /// streaming possible at all: everything needed to expand a pixel is
-    /// known before the first one arrives.
-    fn begin_streaming(&mut self) -> Result<Streaming<S>> {
-        let Some(source) = self.source.take() else {
-            return Err(PixelsError::graph("png source was already consumed"));
-        };
         let mut chunks = ChunkStream::new(source);
         let mut palette: Option<Vec<[u8; 3]>> = None;
         let mut transparency: Option<Transparency> = None;
-
+        let mut orientation = None;
         loop {
             let kind = chunks.open_next()?;
             match &kind {
@@ -162,8 +145,23 @@ impl<S: Source> PngDecoder<S> {
                 }
                 b"tRNS" => {
                     let data = chunks.read_payload_to_end(MAX_TRNS)?;
-                    transparency = Some(parse_trns(&data, self.header.color_type)?);
+                    transparency = Some(parse_trns(&data, header.color_type)?);
                     chunks.close()?;
+                }
+                b"eXIf" => {
+                    let mut exif = vec![0_u8; EXIF_PREFIX];
+                    let mut filled = 0;
+                    while let Some(rest) = exif.get_mut(filled..) {
+                        match chunks.read_payload(rest)? {
+                            0 => break,
+                            n => filled += n,
+                        }
+                    }
+                    exif.truncate(filled);
+                    chunks.skip_payload()?;
+                    chunks.close()?;
+                    // The first one wins; §11.3.6.1 permits only one.
+                    orientation = orientation.or_else(|| Orientation::from_exif_block(&exif));
                 }
                 b"IDAT" => break,
                 b"IEND" => {
@@ -182,16 +180,45 @@ impl<S: Source> PngDecoder<S> {
             }
         }
 
-        if self.header.color_type == ColorType::Palette && palette.is_none() {
+        if header.color_type == ColorType::Palette && palette.is_none() {
             return Err(PixelsError::malformed(
                 "png",
                 "palette image has no PLTE chunk",
             ));
         }
-        self.has_transparency = transparency.is_some();
-        self.descriptor = self
-            .header
-            .descriptor(self.has_transparency, &self.limits)?;
+        let descriptor = header.descriptor(transparency.is_some(), &limits)?;
+
+        Ok(Self {
+            header,
+            descriptor,
+            prelude: Some(Prelude {
+                chunks,
+                palette,
+                transparency,
+            }),
+            orientation: orientation.unwrap_or_default(),
+            raster: None,
+            stream: None,
+            row: 0,
+        })
+    }
+
+    /// The parsed header.
+    #[must_use]
+    pub const fn header(&self) -> Header {
+        self.header
+    }
+
+    /// Start the streaming path from where construction stopped.
+    fn begin_streaming(&mut self) -> Result<Streaming<S>> {
+        let Some(Prelude {
+            chunks,
+            palette,
+            transparency,
+        }) = self.prelude.take()
+        else {
+            return Err(PixelsError::graph("png source was already consumed"));
+        };
 
         let row_bytes = self.header.row_bytes(self.header.width);
         Ok(Streaming {
@@ -208,85 +235,50 @@ impl<S: Source> PngDecoder<S> {
         })
     }
 
-    /// Read every remaining chunk and produce the output-format raster.
+    /// Read the rest of the stream and produce the output-format raster.
     fn decode_image(&mut self) -> Result<Vec<u8>> {
-        let mut all = std::mem::take(&mut self.prefix);
-        if let Some(mut source) = self.source.take() {
-            // A forward-only source is drained once; PNG needs the whole
-            // stream because IDAT may be split and tRNS may follow it.
-            let mut buffer = [0_u8; 64 * 1024];
+        let Some(Prelude {
+            mut chunks,
+            palette,
+            transparency,
+        }) = self.prelude.take()
+        else {
+            return Err(PixelsError::graph("png source was already consumed"));
+        };
+
+        // Construction left the first IDAT open; collect it and any that
+        // follow, skipping ancillary chunks between them.
+        let mut compressed: Vec<u8> = Vec::new();
+        let mut buffer = vec![0_u8; READ_CHUNK];
+        loop {
             loop {
-                let read = source.read(&mut buffer)?;
+                let read = chunks.read_payload(&mut buffer)?;
                 if read == 0 {
                     break;
                 }
-                let Some(chunk) = buffer.get(..read) else {
-                    break;
-                };
-                all.extend_from_slice(chunk);
+                compressed.extend_from_slice(buffer.get(..read).unwrap_or(&[]));
             }
-        }
-
-        let mut reader = ChunkReader::new(&all)?;
-        let mut compressed: Vec<u8> = Vec::new();
-        let mut palette: Option<Vec<[u8; 3]>> = None;
-        let mut transparency: Option<Transparency> = None;
-        let mut seen_ihdr = false;
-        let mut seen_iend = false;
-
-        while !reader.is_finished() {
-            let chunk = reader.next_chunk()?;
-            match &chunk.kind {
-                b"IHDR" => {
-                    if seen_ihdr {
-                        return Err(PixelsError::malformed("png", "more than one IHDR"));
-                    }
-                    seen_ihdr = true;
-                }
-                b"PLTE" => {
-                    palette = Some(parse_plte(&chunk.data)?);
-                }
-                b"tRNS" => {
-                    transparency = Some(parse_trns(&chunk.data, self.header.color_type)?);
-                }
-                b"IDAT" => compressed.extend_from_slice(&chunk.data),
+            chunks.close()?;
+            match &chunks.open_next()? {
+                b"IDAT" => {}
                 b"IEND" => {
-                    seen_iend = true;
+                    chunks.skip_payload()?;
+                    chunks.close()?;
                     break;
                 }
                 _ => {
                     // Unknown critical chunks mean the image cannot be
                     // rendered correctly; ancillary ones are skipped (§5.4).
-                    if !chunk.is_ancillary() {
+                    if !chunks.is_ancillary() {
                         return Err(PixelsError::malformed(
                             "png",
-                            format!("unknown critical chunk `{}`", chunk.name()),
+                            format!("unknown critical chunk `{}`", chunks.name()),
                         ));
                     }
+                    chunks.skip_payload()?;
                 }
             }
         }
-
-        if !seen_iend {
-            return Err(PixelsError::malformed(
-                "png",
-                "stream ends without an IEND chunk",
-            ));
-        }
-        if compressed.is_empty() {
-            return Err(PixelsError::malformed("png", "no IDAT data"));
-        }
-        if self.header.color_type == ColorType::Palette && palette.is_none() {
-            return Err(PixelsError::malformed(
-                "png",
-                "palette image has no PLTE chunk",
-            ));
-        }
-
-        self.has_transparency = transparency.is_some();
-        self.descriptor = self
-            .header
-            .descriptor(self.has_transparency, &self.limits)?;
 
         // The limit is the exact filtered size the header implies, which is
         // what makes a decompression bomb a malformed-input error.
@@ -902,6 +894,12 @@ fn parse_trns(data: &[u8], color_type: ColorType) -> Result<Transparency> {
 impl<S: Source + std::fmt::Debug> Decoder for PngDecoder<S> {
     fn descriptor(&self) -> ImageDescriptor {
         self.descriptor
+    }
+
+    /// From an `eXIf` chunk before the image data. One after it is not
+    /// seen: by then the pipeline has been built, and §5.6 puts `eXIf` first.
+    fn orientation(&self) -> Orientation {
+        self.orientation
     }
 
     fn capability(&self) -> DecodeCapability {
