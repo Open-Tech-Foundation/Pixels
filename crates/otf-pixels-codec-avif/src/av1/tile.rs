@@ -47,7 +47,10 @@ use super::restoration::{
 use super::seq::SequenceHeader;
 use super::superres::{SUPERRES_NUM, Superres};
 use super::symbol::SymbolDecoder;
-use super::transform::{TxSize, ac_q, add_residual, dc_q, dequantize, inverse_transform_2d};
+use super::transform::{
+    TxSize, TxType, ac_q, add_residual, dc_q, dequantize_with_matrix, inverse_transform_2d,
+    quantizer_matrix,
+};
 use super::transform_type::{IntraTxTypeCdfs, intra_dir, intra_tx_set};
 use super::tx_size::{BLOCK_4X4, TxDepthCdfs, TxSizeParams, max_tx_size_rect, read_tx_size};
 use otf_pixels_core::{PixelsError, Result};
@@ -258,17 +261,11 @@ fn unimplemented_filters_off(frame: &FrameHeader) -> bool {
 }
 
 /// The first coding tool `frame` switches on that the tile decoder does not
-/// implement, if any. Each of these changes what is *coded* — extra symbols
-/// (`segment_id`) or a different dequantisation (quantizer matrices) — so
-/// decoding past one without it produces a wrong image with no error.
+/// implement, if any. Segmentation changes what is *coded* — an extra
+/// `segment_id` symbol per block, and per-segment quantizers — so decoding
+/// past it without it produces a wrong image with no error.
 fn unimplemented_tool(frame: &FrameHeader) -> Option<&'static str> {
-    if frame.segmentation.enabled {
-        Some("segmentation")
-    } else if frame.quantization.using_qmatrix {
-        Some("quantizer matrices")
-    } else {
-        None
-    }
+    frame.segmentation.enabled.then_some("segmentation")
 }
 
 /// `MiSize >= BLOCK_8X8` for a block of `bw4 x bh4` 4x4 units. The spec compares
@@ -466,6 +463,10 @@ struct TileState {
     current_qindex: i32,
     /// `base_q_idx`, which `CurrentQIndex` restarts from in every tile.
     base_q: i32,
+    /// `SegQMLevel[plane][0]` (§5.9.12): the quantizer-matrix level per plane,
+    /// 15 (no matrix) unless `using_qmatrix` and the frame is not lossless.
+    /// Segmentation is refused, so segment 0 is the only one.
+    qm_level: [u8; 3],
     /// The coefficient-CDF quantiser context, for each tile's fresh CDFs.
     qctx: usize,
     /// The tile being decoded. Neighbours outside it are unavailable
@@ -619,6 +620,11 @@ impl TileState {
             q_ac: [0, q.delta_q_u_ac, q.delta_q_v_ac],
             current_qindex: base_q,
             base_q,
+            qm_level: if q.using_qmatrix && !frame.coded_lossless {
+                [q.qm_y, q.qm_u, q.qm_v]
+            } else {
+                [15; 3]
+            },
             qctx,
             tile: TileBounds {
                 row_start: 0,
@@ -2214,7 +2220,14 @@ impl TileState {
                     self.bit_depth,
                     qindex + self.q_ac.get(plane).copied().unwrap_or(0),
                 );
-                let dequant = dequantize(&block.quant, tx_size, dc, ac, self.bit_depth);
+                // §7.12.3 step 1b: a matrix weights only the 2D transforms
+                // (types before IDTX), and level 15 means none.
+                let level = self.qm_level.get(plane).copied().unwrap_or(15);
+                let matrix = ((block.tx_type as usize) < TxType::Idtx as usize)
+                    .then(|| quantizer_matrix(level, plane > 0, tx_size))
+                    .flatten();
+                let dequant =
+                    dequantize_with_matrix(&block.quant, tx_size, dc, ac, matrix, self.bit_depth);
                 let residual = inverse_transform_2d(
                     &dequant,
                     tx_size,

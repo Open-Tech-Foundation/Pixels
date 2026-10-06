@@ -180,6 +180,8 @@ FIXTURES = {
     "photo_420_deltaq": (mixed(256, 192, 3), False, 0, "", 2),
     # A 2x2 tile grid, end to end.
     "photo_420_tiles": (mixed(256, 192, 3), False, 0, "", 2),
+    # Quantizer matrices, end to end.
+    "photo_420_qm": (mixed(256, 192, 3), False, 0, "", 2),
     # 10- and 12-bit: decoded to 16-bit RGB over the full 0..=65535 range.
     # Here libavif converts in floating point rather than through libyuv, and
     # we agree on 99% of samples and within one 16-bit step on the rest — the
@@ -238,6 +240,7 @@ PHOTO_ARGS = {
     "photo_420_bt709_studio": ["-y", "420", "-q", "60", "--cicp", "1/13/1", "-r", "limited"],
     "photo_420_bt2020": ["-y", "420", "-q", "60", "--cicp", "9/16/9"],
     "photo_420_tiles": ["-y", "420", "-q", "60", "--tilecolslog2", "1", "--tilerowslog2", "1"],
+    "photo_420_qm": ["-y", "420", "-q", "60", "-a", "enable-qm=1"],
     "photo_420_deltaq": [
         "-y", "420", "-q", "60",
         "-a", "deltaq-mode=3", "-a", "enable-tpl-model=0", "-a", "delta-lf-mode=1",
@@ -739,6 +742,31 @@ PLANES = {
         soft(272, 144),
         ["-y", "420", "-q", "5", "-s", "4", "-a", "sb-size=128", "--tilecolslog2", "1", *FILTERS_ON],
     ),
+    # Quantizer matrices: each coefficient's quantizer weighted by position.
+    # qm-min/qm-max pin the level (0 is the steepest weighting) or leave the
+    # encoder a range; screen content picks identity transforms, which the
+    # matrix must leave alone. (libaom gives chroma its own level only with
+    # separate_uv_delta_q, which avifenc does not set.)
+    "mixed_420_qm": (
+        mixed(256, 192, 3),
+        ["-y", "420", "-q", "50", "-s", "4", "-a", "enable-qm=1", "-a", "qm-min=0", "-a", "qm-max=0",
+         *FILTERS_ON],
+    ),
+    "textured_444_10bit_qm": (
+        textured(99, 70),
+        ["-d", "10", "-y", "444", "-q", "40", "-s", "4", "-a", "enable-qm=1", "-a", "qm-min=6",
+         "-a", "qm-max=6", *FILTERS_ON],
+    ),
+    "blocks_420_qm": (
+        blocks(90, 70),
+        ["-y", "420", "-q", "40", "-s", "6", "-a", "enable-qm=1", "-a", "qm-min=3", "-a", "qm-max=3",
+         *FILTERS_ON],
+    ),
+    "textured_420_qm_range": (
+        textured(128, 96),
+        ["-y", "420", "-q", "40", "-s", "4", "-a", "enable-qm=1", "-a", "qm-min=2", "-a", "qm-max=12",
+         *FILTERS_ON],
+    ),
     "blocks_444_palette_tiles": (
         blocks(130, 70),
         ["-y", "444", "-r", "full", "--cicp", "1/13/0", "-q", "60", "-s", "6",
@@ -825,7 +853,6 @@ def write_planes(fixtures: str) -> None:
 # the identity matrix unless the tool under test is the colour format itself.
 IDENTITY_444 = ["-y", "444", "-r", "full", "--cicp", "1/13/0", "-q", "60"]
 UNSUPPORTED = {
-    "qmatrix": (textured(64, 64), [*IDENTITY_444, "-a", "enable-qm=1"]),
     "premultiplied": (with_alpha(textured(32, 32)), ["-q", "60", "--premultiply"]),
     "ycgco": (textured(32, 32), ["-y", "444", "-q", "60", "--cicp", "1/13/8"]),
 }

@@ -51,6 +51,22 @@ fn a_420_avif_opens_and_crops_to_libavifs_pixels() {
 }
 
 #[test]
+fn an_avif_with_quantizer_matrices_matches_libavif() {
+    // photo_420_qm: libaom's default matrix levels, weighting each
+    // coefficient's quantizer by its frequency.
+    let image = Image::open(fixture("photo_420_qm.avif")).unwrap();
+    let ours = image
+        .output(Format::Raw, EncodeOptions::default())
+        .bytes()
+        .unwrap();
+    let theirs = std::fs::read(fixture("photo_420_qm.raw")).unwrap();
+    assert_eq!(ours.len(), theirs.len());
+    for (index, (a, b)) in ours.iter().zip(&theirs).enumerate() {
+        assert!(a.abs_diff(*b) <= 2, "byte {index}: {a} vs {b}");
+    }
+}
+
+#[test]
 fn a_tiled_avif_matches_libavif() {
     // photo_420_tiles: four independently coded tiles in a 2x2 grid, which is
     // how encoders split large images. Within libavif's YUV->RGB rounding.
@@ -138,7 +154,7 @@ fn an_avif_with_alpha_decodes_to_rgba_with_libavifs_alpha() {
 fn an_avif_using_an_unimplemented_tool_fails_cleanly_through_the_facade() {
     // Opening only reads the container; the refusal comes when pixels are
     // pulled, and it is a catchable Unsupported rather than a wrong image.
-    let image = Image::open(fixture("unsupported/qmatrix.avif")).unwrap();
+    let image = Image::open(fixture("unsupported/premultiplied.avif")).unwrap();
     let err = image
         .output(Format::Raw, EncodeOptions::default())
         .bytes()

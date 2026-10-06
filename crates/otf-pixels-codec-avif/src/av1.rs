@@ -50,7 +50,7 @@ pub use symbol::SymbolDecoder;
 pub use tile::{DecodedFrame, decode_still};
 pub use transform::{
     Dequant, Residual, TxSize, TxType, ac_q, add_residual, add_residual_4x4, dc_q, dequantize,
-    inverse_transform_2d,
+    dequantize_with_matrix, inverse_transform_2d, quantizer_matrix,
 };
 pub use transform_type::{
     IntraTxSet, IntraTxTypeCdfs, chroma_tx_type, intra_dir, intra_tx_set, is_tx_type_in_set_intra,

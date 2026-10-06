@@ -26,6 +26,7 @@ photo_420_10bit_studio 96 64 3 1 16
 photo_420_bt2020 96 64 3 2 8
 photo_420_bt709_studio 96 64 3 5 8
 photo_420_deltaq 256 192 3 2 8
+photo_420_qm 256 192 3 2 8
 photo_420_tiles 256 192 3 2 8
 photo_422 96 64 3 2 8
 photo_444 96 64 3 1 8

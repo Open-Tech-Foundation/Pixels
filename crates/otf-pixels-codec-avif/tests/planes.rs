@@ -54,6 +54,20 @@ const CASES: &[(&str, (u8, u8))] = &[
     ("soft_420_sb128_tiles", (1, 1)),
     ("blocks_444_palette_tiles", (0, 0)),
     ("textured_444_tilegroups", (0, 0)),
+    // Quantizer matrices.
+    ("mixed_420_qm", (1, 1)),
+    ("textured_444_10bit_qm", (0, 0)),
+    ("blocks_420_qm", (1, 1)),
+    ("textured_420_qm_range", (1, 1)),
+];
+
+/// Fixtures that exist to exercise quantizer matrices, with the `(qm_y, qm_u,
+/// qm_v)` levels each must actually carry.
+const QM_LEVELS: &[(&str, (u8, u8, u8))] = &[
+    ("mixed_420_qm", (0, 0, 0)),
+    ("textured_444_10bit_qm", (6, 6, 6)),
+    ("blocks_420_qm", (3, 3, 3)),
+    ("textured_420_qm_range", (8, 8, 8)),
 ];
 
 /// Fixtures that exist to exercise tiling, with the `(tile columns, tile
@@ -179,6 +193,18 @@ fn tiled_fixtures_have_the_tiling_they_test() {
             (cols, rows, groups),
             "{name}"
         );
+    }
+}
+
+#[test]
+fn matrix_fixtures_carry_the_levels_they_test() {
+    for &(name, levels) in QM_LEVELS {
+        let file = std::fs::read(format!("{}/{name}.avif", fixture_dir())).unwrap();
+        let (frame_data, config_obus) = primary_frame(&file);
+        let still = StillPicture::parse(&config_obus, &frame_data).unwrap();
+        let q = &still.frame.quantization;
+        assert!(q.using_qmatrix, "{name}");
+        assert_eq!((q.qm_y, q.qm_u, q.qm_v), levels, "{name}");
     }
 }
 

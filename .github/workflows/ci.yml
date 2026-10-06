@@ -51,6 +51,13 @@ jobs:
           python3 scripts/generate-av1-scan-tables.py
           git diff --exit-code -- crates/otf-pixels-codec-avif/src/av1/scan_tables.rs
 
+      # The quantizer matrices are generated from a vendored spec extract and
+      # validated against the spec's own derivation of every size.
+      - name: generated quantizer matrix tables are current
+        run: |
+          python3 scripts/generate-av1-qm-tables.py
+          git diff --exit-code -- crates/otf-pixels-codec-avif/src/av1/qm_tables.rs
+
   docs:
     name: docs
     runs-on: ubuntu-latest

@@ -74,7 +74,10 @@ pub fn add_residual_4x4(
     result
 }
 
-pub use dsp::{Dequant, Residual, TxSize, TxType, ac_q, dc_q, dequantize, inverse_transform_2d};
+pub use dsp::{
+    Dequant, Residual, TxSize, TxType, ac_q, dc_q, dequantize, dequantize_with_matrix,
+    inverse_transform_2d, quantizer_matrix,
+};
 
 /// The lossy inverse-transform machinery (spec §7.13): the DCT/ADST/identity
 /// butterfly network, the 2D transform driver, and the dequantiser lookups.
@@ -905,6 +908,22 @@ mod dsp {
         ac_quant: i64,
         bit_depth: u8,
     ) -> Dequant {
+        dequantize_with_matrix(quant, tx_size, dc_quant, ac_quant, None, bit_depth)
+    }
+
+    /// [`dequantize`], with each position's quantizer first weighted by a
+    /// quantizer matrix (§7.12.3 step 1b): `q2 = Round2(q * matrix[i * tw + j],
+    /// AOM_QM_BITS)`. `matrix` is [`quantizer_matrix`]'s slice for the block,
+    /// or `None` when no matrix applies.
+    #[must_use]
+    pub fn dequantize_with_matrix(
+        quant: &[i32],
+        tx_size: TxSize,
+        dc_quant: i64,
+        ac_quant: i64,
+        matrix: Option<&[u8]>,
+        bit_depth: u8,
+    ) -> Dequant {
         let tw = tx_size.width().min(32);
         let th = tx_size.height().min(32);
         let denom = tx_size.dq_denom();
@@ -912,6 +931,10 @@ mod dsp {
         for (idx, out) in values.iter_mut().enumerate().take(tw * th) {
             let level = quant.get(idx).copied().unwrap_or(0);
             let q = if idx == 0 { dc_quant } else { ac_quant };
+            let q = match matrix.and_then(|m| m.get(idx)) {
+                Some(&weight) => (q * i64::from(weight) + (1 << (AOM_QM_BITS - 1))) >> AOM_QM_BITS,
+                None => q,
+            };
             let dq = i64::from(level) * q;
             let sign = if dq < 0 { -1 } else { 1 };
             let dq2 = sign * ((dq.abs() & 0xFF_FFFF) / denom);
@@ -941,6 +964,23 @@ mod dsp {
     }
 
     include!("quant_tables.rs");
+    include!("qm_tables.rs");
+
+    /// `AOM_QM_BITS` (§3): the fixed-point precision of a matrix weight, in
+    /// which 32 is unity.
+    const AOM_QM_BITS: u32 = 5;
+
+    /// The quantizer matrix weights for a `tx_size` block, `Min(32, w) x
+    /// Min(32, h)` of them row-major, at `level` for luma or chroma — or `None`
+    /// at level 15, which means no matrix (`SegQMLevel`, §5.9.12).
+    #[must_use]
+    pub fn quantizer_matrix(level: u8, chroma: bool, tx_size: TxSize) -> Option<&'static [u8]> {
+        let table = QUANTIZER_MATRIX.get(usize::from(level))?;
+        let plane = table.get(usize::from(chroma))?;
+        let start = usize::from(*QM_OFFSET.get(tx_size as usize)?);
+        let len = tx_size.width().min(32) * tx_size.height().min(32);
+        plane.get(start..start + len)
+    }
 
     #[cfg(test)]
     #[allow(
@@ -950,6 +990,36 @@ mod dsp {
     )]
     mod dsp_tests {
         use super::*;
+
+        #[test]
+        fn quantizer_matrix_lookup_follows_the_spec_table() {
+            // Level 0 luma 4x4 opens the spec's table (§9.5.3).
+            let m = quantizer_matrix(0, false, TxSize::Tx4x4).unwrap();
+            assert_eq!(&m[..4], &[32, 43, 73, 97]);
+            assert_eq!(m.len(), 16);
+            // Sizes past 32 share the 32-capped matrix (Qm_Offset repeats).
+            assert_eq!(
+                quantizer_matrix(4, true, TxSize::Tx64x64),
+                quantizer_matrix(4, true, TxSize::Tx32x32)
+            );
+            assert_eq!(
+                quantizer_matrix(4, true, TxSize::Tx16x64).unwrap().len(),
+                16 * 32
+            );
+            // Level 15 is "no matrix".
+            assert_eq!(quantizer_matrix(15, false, TxSize::Tx8x8), None);
+        }
+
+        #[test]
+        fn a_flat_matrix_weight_leaves_the_quantizer_unchanged() {
+            // 32 is unity at AOM_QM_BITS = 5; 48 is 1.5x, rounded.
+            let quant = [3, -2, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            let plain = dequantize(&quant, TxSize::Tx4x4, 40, 25, 8);
+            let unity = dequantize_with_matrix(&quant, TxSize::Tx4x4, 40, 25, Some(&[32; 16]), 8);
+            assert_eq!(plain.values, unity.values);
+            let steeper = dequantize_with_matrix(&quant, TxSize::Tx4x4, 40, 25, Some(&[48; 16]), 8);
+            assert_eq!(&steeper.values[..4], &[3 * 60, -2 * 38, 0, 38]);
+        }
 
         fn dequant_from(vals: &[(usize, i64)], tw: usize, th: usize) -> Dequant {
             let mut values = [0_i64; 32 * 32];

@@ -143,6 +143,17 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- AVIF quantizer matrices (`using_qmatrix`), which libaom's `enable-qm`
+  turns on. Those files were refused as `Unsupported`. Each 2D transform's
+  coefficients are now dequantised with their position's matrix weight, and
+  identity transforms are left alone, as §7.12.3 says. The 100,320-entry
+  `Quantizer_Matrix` table is generated from a vendored spec extract by
+  `scripts/generate-av1-qm-tables.py`. The generator checks every matrix size
+  against the spec's own derivation from the fundamental matrices, and CI
+  checks that the table is current. Four plane fixtures (levels 0, 3, 6 and 8;
+  4:2:0, 10-bit 4:4:4, screen content) match libaom exactly, and a photo at
+  libaom's default level matches libavif's RGB through the facade.
+- `otf-pixels-codec-avif`: `dequantize_with_matrix` and `quantizer_matrix`.
 - AVIF multi-tile decode. Encoders split large images into tiles (libavif's
   `--autotiling`, `--tilecolslog2`/`--tilerowslog2`), and those files were
   refused as `Unsupported`. Each tile now decodes from fresh CDFs and cleared
