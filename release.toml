@@ -1,0 +1,165 @@
+adapters = ["crates.io"]
+tag_format = "{name}@{version}"
+provider = "github"
+default_branch = "main"
+changelog_strategy = "curated"
+changelog_scope = "root"
+github_release_notes = "curated-changelog"
+
+[hooks]
+
+[publish.ignore_paths]
+otf-pixels-codec-jpeg = [
+    "**/*.md",
+    "**/tests/**",
+    "**/benches/**",
+]
+otf-pixels-codec-tiff = [
+    "**/*.md",
+    "**/tests/**",
+    "**/benches/**",
+]
+otf-pixels-core = [
+    "**/*.md",
+    "**/tests/**",
+    "**/benches/**",
+]
+otf-pixels = [
+    "**/*.md",
+    "**/tests/**",
+    "**/benches/**",
+]
+otf-pixels-codec-avif = [
+    "**/*.md",
+    "**/tests/**",
+    "**/benches/**",
+]
+otf-pixels-ops = [
+    "**/*.md",
+    "**/tests/**",
+    "**/benches/**",
+]
+otf-pixels-codec-gif = [
+    "**/*.md",
+    "**/tests/**",
+    "**/benches/**",
+]
+otf-pixels-codec-raw = [
+    "**/*.md",
+    "**/tests/**",
+    "**/benches/**",
+]
+otf-pixels-codec-png = [
+    "**/*.md",
+    "**/tests/**",
+    "**/benches/**",
+]
+otf-pixels-codec-webp = [
+    "**/*.md",
+    "**/tests/**",
+    "**/benches/**",
+]
+otf-pixels-compress = [
+    "**/*.md",
+    "**/tests/**",
+    "**/benches/**",
+]
+
+[[package]]
+name = "otf-pixels"
+adapter = "crates.io"
+mode = "publish"
+matrix = false
+command = ""
+artifacts = ""
+manifest = "crates/otf-pixels/Cargo.toml"
+
+[[package]]
+name = "otf-pixels-codec-avif"
+adapter = "crates.io"
+mode = "publish"
+matrix = false
+command = ""
+artifacts = ""
+manifest = "crates/otf-pixels-codec-avif/Cargo.toml"
+
+[[package]]
+name = "otf-pixels-codec-gif"
+adapter = "crates.io"
+mode = "publish"
+matrix = false
+command = ""
+artifacts = ""
+manifest = "crates/otf-pixels-codec-gif/Cargo.toml"
+
+[[package]]
+name = "otf-pixels-codec-jpeg"
+adapter = "crates.io"
+mode = "publish"
+matrix = false
+command = ""
+artifacts = ""
+manifest = "crates/otf-pixels-codec-jpeg/Cargo.toml"
+
+[[package]]
+name = "otf-pixels-codec-png"
+adapter = "crates.io"
+mode = "publish"
+matrix = false
+command = ""
+artifacts = ""
+manifest = "crates/otf-pixels-codec-png/Cargo.toml"
+
+[[package]]
+name = "otf-pixels-codec-raw"
+adapter = "crates.io"
+mode = "publish"
+matrix = false
+command = ""
+artifacts = ""
+manifest = "crates/otf-pixels-codec-raw/Cargo.toml"
+
+[[package]]
+name = "otf-pixels-codec-tiff"
+adapter = "crates.io"
+mode = "publish"
+matrix = false
+command = ""
+artifacts = ""
+manifest = "crates/otf-pixels-codec-tiff/Cargo.toml"
+
+[[package]]
+name = "otf-pixels-codec-webp"
+adapter = "crates.io"
+mode = "publish"
+matrix = false
+command = ""
+artifacts = ""
+manifest = "crates/otf-pixels-codec-webp/Cargo.toml"
+
+[[package]]
+name = "otf-pixels-compress"
+adapter = "crates.io"
+mode = "publish"
+matrix = false
+command = ""
+artifacts = ""
+manifest = "crates/otf-pixels-compress/Cargo.toml"
+
+[[package]]
+name = "otf-pixels-core"
+adapter = "crates.io"
+mode = "publish"
+matrix = false
+command = ""
+artifacts = ""
+manifest = "crates/otf-pixels-core/Cargo.toml"
+
+[[package]]
+name = "otf-pixels-ops"
+adapter = "crates.io"
+mode = "publish"
+matrix = false
+command = ""
+artifacts = ""
+manifest = "crates/otf-pixels-ops/Cargo.toml"

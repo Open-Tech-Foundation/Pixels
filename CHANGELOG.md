@@ -47,9 +47,14 @@ versioning: [SemVer](https://semver.org/).
   with it rather than failing to build.
 
 ### Changed
-- Published crates leave out their test fixtures (only `cargo test` reads
-  them), so dependents no longer download them: the AVIF crate drops from
-  3.2 MiB to 282 KiB compressed and the WebP crate from 2.6 MiB to 68 KiB.
+- Published crates leave out their integration tests and fixtures, which
+  only run from the repository, so dependents no longer download them: the
+  AVIF crate drops from 3.2 MiB to 279 KiB compressed and the WebP crate
+  from 2.6 MiB to 66 KiB. The unit tests that ship pass from the unpacked
+  packages, on Rust 1.85 as declared. The facade's own tests need 1.87, for
+  a benchmark-only dev-dependency.
+- Every published crate carries the Apache-2.0 `LICENSE` and the `NOTICE`,
+  as the licence requires of redistributions.
 - Version 0.1.0, the first release candidate. All crates package and verify
   with `cargo package --workspace`.
 - `Fit`, `Blend`, `Filter`, `Conversion` and `Unconvertible` are
