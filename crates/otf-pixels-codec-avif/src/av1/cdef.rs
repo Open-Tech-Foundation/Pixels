@@ -279,7 +279,8 @@ impl CdefFilter<'_> {
     }
 
     /// `cdef_get_at` (§7.15.3): the sample `k` steps along `dir` from `(i, j)`,
-    /// or `None` when it falls outside the (single-tile) filter region.
+    /// or `None` when it falls outside the filter region, which is the whole
+    /// frame whatever its tiling (`is_inside_filter_region`, §5.11.52).
     #[allow(clippy::too_many_arguments, reason = "mirrors the spec's input list")]
     fn get_at(
         &self,

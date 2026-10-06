@@ -7,7 +7,10 @@
 //! neighbour-context arrays it threads between blocks are what make the entropy
 //! contexts match the encoder.
 //!
-//! Scope is the single-tile intra still image in YUV 4:4:4, 4:2:2 or 4:2:0.
+//! Scope is the intra still image in YUV 4:4:4, 4:2:2 or 4:2:0, in any tiling.
+//! Each tile decodes from fresh CDFs and cleared above contexts, and treats a
+//! neighbour across its edge as unavailable (`is_inside`); the in-loop
+//! filters then run over the whole frame.
 //! Subsampled chroma is decoded in its own sample grid: a block one unit wide
 //! or high shares its chroma with its neighbour, the odd one of the pair coding
 //! it (`HasChroma`). Both `CodedLossless`
@@ -25,6 +28,7 @@
 //! [`PixelsError::unsupported`] rather than decoded wrong, so a stream that uses
 //! it fails cleanly instead of desynchronising.
 
+use super::bits::BitReader;
 use super::cdef::CdefFilter;
 use super::cdf;
 use super::coeff::{CoeffCdfs, TxTypeCtx, decode_coeffs};
@@ -32,7 +36,7 @@ use super::deblock::Deblock;
 use super::direction::{
     ANGLE_STEP, Edge, mode_base_angle, predict_directional, predict_filter_intra,
 };
-use super::frame::{Cdef, FrameHeader, LoopFilter, TxMode};
+use super::frame::{Cdef, FrameHeader, LoopFilter, TileInfo, TxMode};
 use super::palette::{PALETTE_COLORS, color_context, palette_cache};
 use super::plane::Plane;
 use super::predict::{IntraMode, PredBlock, predict_intra_block};
@@ -88,20 +92,21 @@ pub struct DecodedFrame {
     pub planes: Vec<Plane>,
 }
 
-/// Decode a single-tile intra still frame into its sample planes. Handles both
-/// lossless and lossy frames, the latter only when film grain is disabled (see
-/// `unimplemented_filters_off`).
+/// Decode an intra still frame into its sample planes, from the payloads of its
+/// tile groups in order. Handles both lossless and lossy frames, the latter
+/// only when film grain is disabled (see `unimplemented_filters_off`).
 ///
 /// # Errors
 ///
 /// Returns [`PixelsError::unsupported`] for anything outside the intra subset
-/// this decodes — multiple tiles, intra block copy, the tools
-/// `unimplemented_tool` lists, or a lossy frame using film grain — and [`PixelsError::malformed`] for a stream
-/// that ends early or violates the syntax.
+/// this decodes — intra block copy, the tools `unimplemented_tool` lists, or a
+/// lossy frame using film grain — and [`PixelsError::malformed`] for a stream
+/// that ends early, violates the syntax, or does not code every tile exactly
+/// once.
 pub fn decode_still(
     seq: &SequenceHeader,
     frame: &FrameHeader,
-    tile_data: &[u8],
+    tile_groups: &[&[u8]],
 ) -> Result<DecodedFrame> {
     // We reconstruct the residual, apply every in-loop filter — deblocking
     // (§7.14), CDEF (§7.15) and loop restoration (§7.17) — and the
@@ -120,11 +125,6 @@ pub fn decode_still(
             "avif: {tool} is not implemented yet"
         )));
     }
-    if frame.tile_info.count() != 1 {
-        return Err(PixelsError::unsupported(
-            "avif: multi-tile decode is not implemented yet",
-        ));
-    }
     if frame.allow_intrabc {
         // Intra block copy is not implemented; decoding its blocks would
         // desynchronise the symbol stream.
@@ -133,11 +133,120 @@ pub fn decode_still(
         ));
     }
 
+    let info = &frame.tile_info;
+    let sb_shift = if seq.use_128x128_superblock { 5 } else { 4 };
     let mut state = TileState::new(seq, frame)?;
-    state.decode(tile_data)?;
+    let mut next_tile = 0;
+    for group in tile_groups {
+        for tile in split_tile_group(group, info)? {
+            // Tiles must arrive in order, each exactly once; tg_start says
+            // where a group begins, so a gap or a repeat is a broken stream.
+            if tile.number != next_tile {
+                return Err(PixelsError::malformed(
+                    "avif",
+                    format!(
+                        "tile {} arrived where tile {next_tile} was due",
+                        tile.number
+                    ),
+                ));
+            }
+            next_tile += 1;
+            let (row, col) = (tile.number / info.cols, tile.number % info.cols);
+            let start = |starts: &[u32], i: u32, limit: usize| {
+                starts
+                    .get(i as usize)
+                    .map_or(limit, |&sb| ((sb as usize) << sb_shift).min(limit))
+            };
+            state.decode_tile(
+                tile.data,
+                TileBounds {
+                    row_start: start(&info.row_starts_sb, row, state.mi_rows),
+                    row_end: start(&info.row_starts_sb, row + 1, state.mi_rows),
+                    col_start: start(&info.col_starts_sb, col, state.mi_cols),
+                    col_end: start(&info.col_starts_sb, col + 1, state.mi_cols),
+                },
+            )?;
+        }
+    }
+    if next_tile != info.count() {
+        return Err(PixelsError::malformed(
+            "avif",
+            format!("the frame codes {next_tile} of its {} tiles", info.count()),
+        ));
+    }
+    state.post_filter();
     Ok(DecodedFrame {
         planes: state.planes,
     })
+}
+
+/// One tile's coded bytes and its index in raster order.
+#[derive(Debug)]
+struct Tile<'a> {
+    number: u32,
+    data: &'a [u8],
+}
+
+/// Split a tile group (`tile_group_obu`, §5.11.1) into its tiles.
+///
+/// A group with several tiles may name the range it carries; every tile but
+/// its last is preceded by its size, `TileSizeBytes` little-endian bytes
+/// holding the size minus one, and the last runs to the end of the group.
+fn split_tile_group<'a>(group: &'a [u8], info: &TileInfo) -> Result<Vec<Tile<'a>>> {
+    let count = info.count();
+    let mut reader = BitReader::new(group);
+    let (start, end) = if count > 1 && reader.flag()? {
+        let bits = info.cols_log2 + info.rows_log2;
+        (reader.f(bits)?, reader.f(bits)?)
+    } else {
+        (0, count.saturating_sub(1))
+    };
+    if start > end || end >= count {
+        return Err(PixelsError::malformed(
+            "avif",
+            format!("tile group spans tiles {start}..={end} of {count}"),
+        ));
+    }
+    reader.byte_alignment()?;
+    let mut rest = group.get(reader.byte_position()..).unwrap_or(&[]);
+
+    let mut tiles = Vec::new();
+    for number in start..=end {
+        let data = if number == end {
+            core::mem::take(&mut rest)
+        } else {
+            let width = info.tile_size_bytes as usize;
+            let size_bytes = rest.get(..width).ok_or_else(|| tile_overrun(number))?;
+            let size = size_bytes
+                .iter()
+                .rev()
+                .fold(0_usize, |acc, &b| (acc << 8) | usize::from(b))
+                + 1;
+            let body = rest.get(width..).ok_or_else(|| tile_overrun(number))?;
+            let (data, after) = (body.get(..size), body.get(size..));
+            rest = after.ok_or_else(|| tile_overrun(number))?;
+            data.ok_or_else(|| tile_overrun(number))?
+        };
+        tiles.push(Tile { number, data });
+    }
+    Ok(tiles)
+}
+
+fn tile_overrun(number: u32) -> PixelsError {
+    PixelsError::malformed(
+        "avif",
+        format!("tile {number} claims more bytes than its tile group holds"),
+    )
+}
+
+/// One tile's extent in 4x4 units (`MiRowStart`..`MiRowEnd`,
+/// `MiColStart`..`MiColEnd`).
+#[derive(Debug, Clone, Copy)]
+struct TileBounds {
+    row_start: usize,
+    row_end: usize,
+    col_start: usize,
+    col_end: usize,
 }
 
 /// Whether every post-filter this decoder does *not* implement is disabled, so
@@ -351,9 +460,17 @@ struct TileState {
     q_dc: [i32; 3],
     /// Per-plane AC quantiser offset (zero for luma).
     q_ac: [i32; 3],
-    /// `CurrentQIndex` (§5.11.12): `base_q_idx`, moved by each `delta_qindex`
-    /// when `delta_q_present`. Never 0 once moved, so never lossless.
+    /// `CurrentQIndex` (§5.11.12): `base_q_idx` at each tile's start, moved by
+    /// each `delta_qindex` when `delta_q_present`. Never 0 once moved, so never
+    /// lossless.
     current_qindex: i32,
+    /// `base_q_idx`, which `CurrentQIndex` restarts from in every tile.
+    base_q: i32,
+    /// The coefficient-CDF quantiser context, for each tile's fresh CDFs.
+    qctx: usize,
+    /// The tile being decoded. Neighbours outside it are unavailable
+    /// (`is_inside`, §5.11.51) even when they lie inside the frame.
+    tile: TileBounds,
     /// `delta_q_present`, `delta_q_res` (§5.9.17).
     delta_q_present: bool,
     delta_q_res: u32,
@@ -501,6 +618,14 @@ impl TileState {
             q_dc: [q.delta_q_y_dc, q.delta_q_u_dc, q.delta_q_v_dc],
             q_ac: [0, q.delta_q_u_ac, q.delta_q_v_ac],
             current_qindex: base_q,
+            base_q,
+            qctx,
+            tile: TileBounds {
+                row_start: 0,
+                row_end: mi_rows,
+                col_start: 0,
+                col_end: mi_cols,
+            },
             delta_q_present: frame.delta_q_present,
             delta_q_res: frame.delta_q_res,
             delta_lf_present: frame.delta_lf_present,
@@ -551,16 +676,28 @@ impl TileState {
         })
     }
 
-    fn decode(&mut self, tile_data: &[u8]) -> Result<()> {
+    /// `decode_tile` (§5.11.2): one tile, from fresh CDFs and cleared above
+    /// contexts, its superblocks in raster order within its bounds.
+    fn decode_tile(&mut self, tile_data: &[u8], tile: TileBounds) -> Result<()> {
+        self.tile = tile;
+        self.cdfs = FrameCdfs::new(self.qctx);
+        self.current_qindex = self.base_q;
+        self.delta_lf = [0; FRAME_LF_COUNT];
+        self.ref_lr_wiener = [[WIENER_TAPS_MID; 2]; 3];
+        self.ref_sgr_xqd = [SGRPROJ_XQD_MID; 3];
+        for c in &mut self.ctx {
+            c.above_level.fill(0);
+            c.above_dc.fill(0);
+        }
         let mut dec = SymbolDecoder::new(tile_data, false)?;
         let sb_size4 = self.sb_size4;
         // Superblocks are decoded in raster order; each seeds the partition
         // recursion. The left contexts reset at the start of each SB row.
-        let mut sb_row = 0;
-        while sb_row < self.mi_rows {
+        let mut sb_row = tile.row_start;
+        while sb_row < tile.row_end {
             self.reset_left_context();
-            let mut sb_col = 0;
-            while sb_col < self.mi_cols {
+            let mut sb_col = tile.col_start;
+            while sb_col < tile.col_end {
                 self.read_deltas = self.delta_q_present;
                 self.clear_block_decoded(sb_row, sb_col);
                 self.read_lr(&mut dec, sb_row, sb_col)?;
@@ -569,6 +706,12 @@ impl TileState {
             }
             sb_row += sb_size4;
         }
+        Ok(())
+    }
+
+    /// The in-loop filters and upscale, over the whole frame once every tile
+    /// is reconstructed: they cross tile boundaries (§5.11.52).
+    fn post_filter(&mut self) {
         self.deblock();
         // Loop restoration reads both the pre-CDEF (deblocked) and post-CDEF
         // frames, so when it runs, snapshot the deblocked frame before CDEF. Both
@@ -585,7 +728,6 @@ impl TileState {
         } else if let Some(curr) = curr {
             self.loop_restore(&curr);
         }
-        Ok(())
     }
 
     /// The upscaling geometry when the frame uses super-resolution.
@@ -670,8 +812,8 @@ impl TileState {
         let stride = sb + 2;
         for plane in 0..self.num_planes {
             let (sub_x, sub_y) = self.plane_subsampling(plane);
-            let sb_width4 = ((self.mi_cols - c) >> sub_x) as isize;
-            let sb_height4 = ((self.mi_rows - r) >> sub_y) as isize;
+            let sb_width4 = ((self.tile.col_end - c) >> sub_x) as isize;
+            let sb_height4 = ((self.tile.row_end - r) >> sub_y) as isize;
             let (sb_w, sb_h) = ((sb >> sub_x) as isize, (sb >> sub_y) as isize);
             let Some(grid) = self.block_decoded.get_mut(plane) else {
                 continue;
@@ -720,6 +862,16 @@ impl TileState {
         }
     }
 
+    /// `AvailU`: `is_inside(r - 1, c)` for a block at `(r, c)` in this tile.
+    const fn avail_u(&self, r: usize) -> bool {
+        r > self.tile.row_start
+    }
+
+    /// `AvailL`: `is_inside(r, c - 1)`.
+    const fn avail_l(&self, c: usize) -> bool {
+        c > self.tile.col_start
+    }
+
     fn reset_left_context(&mut self) {
         for c in &mut self.ctx {
             for v in &mut c.left_level {
@@ -743,8 +895,8 @@ impl TileState {
         if r >= self.mi_rows || c >= self.mi_cols {
             return Ok(());
         }
-        let avail_u = r > 0;
-        let avail_l = c > 0;
+        let avail_u = self.avail_u(r);
+        let avail_l = self.avail_l(c);
         let half = bsize4 >> 1;
         let has_rows = r + half < self.mi_rows;
         let has_cols = c + half < self.mi_cols;
@@ -938,8 +1090,8 @@ impl TileState {
         bw4: usize,
         bh4: usize,
     ) -> Result<()> {
-        let avail_u = r > 0;
-        let avail_l = c > 0;
+        let avail_u = self.avail_u(r);
+        let avail_l = self.avail_l(c);
         // HasChroma (§5.11.5): with subsampling, a block one unit wide (high)
         // at an even column (row) shares its chroma with the next block, which
         // codes it; only that odd-positioned block carries chroma.
@@ -952,12 +1104,12 @@ impl TileState {
         let (avail_u_chroma, avail_l_chroma) = if has_chroma {
             (
                 if sub_y == 1 && bh4 == 1 {
-                    r >= 2
+                    r >= self.tile.row_start + 2
                 } else {
                     avail_u
                 },
                 if sub_x == 1 && bw4 == 1 {
-                    c >= 2
+                    c >= self.tile.col_start + 2
                 } else {
                     avail_l
                 },
@@ -1400,8 +1552,8 @@ impl TileState {
         // is only reached for blocks of at least four 4x4 units (log2 sum >= 2),
         // so the subtraction never underflows.
         let bsize_ctx = (floor_log2_usize(bw4) + floor_log2_usize(bh4)).saturating_sub(2) as usize;
-        let avail_u = r > 0;
-        let avail_l = c > 0;
+        let avail_u = self.avail_u(r);
+        let avail_l = self.avail_l(c);
         if y_mode == DC_PRED {
             let ctx = usize::from(avail_u && self.palette_size_at(0, r.wrapping_sub(1), c) > 0)
                 + usize::from(avail_l && self.palette_size_at(0, r, c.wrapping_sub(1)) > 0);
@@ -1431,13 +1583,13 @@ impl TileState {
 
     /// The neighbour palette cache for `plane` at `(r, c)` (`get_palette_cache`).
     fn palette_cache_for(&self, plane: usize, r: usize, c: usize) -> Vec<u16> {
-        let above = if r > 0 && (r * MI_SIZE) % 64 != 0 {
+        let above = if self.avail_u(r) && (r * MI_SIZE) % 64 != 0 {
             let n = self.palette_size_at(plane, r - 1, c) as usize;
             self.palette_colors_at(plane, r - 1, c, n)
         } else {
             Vec::new()
         };
-        let left = if c > 0 {
+        let left = if self.avail_l(c) {
             let n = self.palette_size_at(plane, r, c - 1) as usize;
             self.palette_colors_at(plane, r, c - 1, n)
         } else {
@@ -1701,8 +1853,12 @@ impl TileState {
         bh4: usize,
         _skip: bool,
     ) -> Result<TxSize> {
-        let above_w = if r > 0 { self.tx_width_at(r - 1, c) } else { 0 };
-        let left_h = if c > 0 {
+        let above_w = if self.avail_u(r) {
+            self.tx_width_at(r - 1, c)
+        } else {
+            0
+        };
+        let left_h = if self.avail_l(c) {
             self.tx_height_at(r, c - 1)
         } else {
             0
@@ -2890,6 +3046,67 @@ fn get_mut<T>(slice: &mut [T], index: usize) -> Result<&mut T> {
 )]
 mod tests {
     use super::*;
+
+    fn tiling(cols: u32, rows: u32, size_bytes: u32) -> TileInfo {
+        TileInfo {
+            cols_log2: cols.trailing_zeros(),
+            rows_log2: rows.trailing_zeros(),
+            cols,
+            rows,
+            col_starts_sb: (0..=cols).collect(),
+            row_starts_sb: (0..=rows).collect(),
+            context_update_tile_id: 0,
+            tile_size_bytes: size_bytes,
+        }
+    }
+
+    fn numbers_and_data<'a>(tiles: &[Tile<'a>]) -> Vec<(u32, &'a [u8])> {
+        tiles.iter().map(|t| (t.number, t.data)).collect()
+    }
+
+    #[test]
+    fn a_single_tile_group_has_no_header_and_no_sizes() {
+        let group = [9, 8, 7];
+        let tiles = split_tile_group(&group, &tiling(1, 1, 4)).unwrap();
+        assert_eq!(numbers_and_data(&tiles), [(0, &group[..])]);
+    }
+
+    #[test]
+    fn tiles_are_split_by_their_little_endian_sizes() {
+        // Flag 0 (whole frame), aligned to a byte; then tile 0 with a two-byte
+        // size of 2 (coded as 1), tile 1 likewise with 1, and tile 2 last.
+        let group = [0x00, 0x01, 0x00, 0xA, 0xB, 0x00, 0x00, 0xC, 0xD, 0xE];
+        let tiles = split_tile_group(&group, &tiling(3, 1, 2)).unwrap();
+        assert_eq!(
+            numbers_and_data(&tiles),
+            [(0, &[0xA, 0xB][..]), (1, &[0xC][..]), (2, &[0xD, 0xE][..])]
+        );
+    }
+
+    #[test]
+    fn a_group_can_name_the_tiles_it_carries() {
+        // 2x2 tiles: flag 1, tg_start = 2 and tg_end = 3 in two bits each
+        // (1 10 11 + padding = 0b1101_1000), then one one-byte size.
+        let group = [0b1101_1000, 0x00, 0xA, 0xB];
+        let tiles = split_tile_group(&group, &tiling(2, 2, 1)).unwrap();
+        assert_eq!(numbers_and_data(&tiles), [(2, &[0xA][..]), (3, &[0xB][..])]);
+    }
+
+    #[test]
+    fn broken_tile_groups_are_malformed_not_panics() {
+        let info = tiling(2, 1, 4);
+        // A size larger than what follows it.
+        let error = split_tile_group(&[0x00, 0xFF, 0, 0, 0, 1], &info).unwrap_err();
+        assert_eq!(error.code(), otf_pixels_core::ErrorCode::Malformed);
+        // Too short to hold the size field at all.
+        let error = split_tile_group(&[0x00, 0x01], &info).unwrap_err();
+        assert_eq!(error.code(), otf_pixels_core::ErrorCode::Malformed);
+        // tg_start after tg_end (2x2: flag 1, start 3, end 0).
+        let error = split_tile_group(&[0b1110_0000], &tiling(2, 2, 1)).unwrap_err();
+        assert_eq!(error.code(), otf_pixels_core::ErrorCode::Malformed);
+        // Empty input.
+        assert!(split_tile_group(&[], &info).is_err());
+    }
 
     #[test]
     fn block_size_indices_match_the_spec_ordering() {

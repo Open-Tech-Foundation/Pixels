@@ -7,14 +7,14 @@
 //! the cache — an AVIF still is one AV1 key frame with no prefix that yields a
 //! partial raster, so the decode is inherently whole-image (SPEC §Memory).
 //!
-//! The AV1 reconstruction covers the single-tile intra still in 4:4:4, 4:2:2
+//! The AV1 reconstruction covers the intra still, in any tiling, in 4:4:4, 4:2:2
 //! and 4:2:0 at 8, 10 and 12 bits, and the raster conversion handles the
 //! identity matrix and the BT.601/709/2020 YUV matrices at full and studio
 //! range (`yuv.rs`), to `Rgb8` or — for 10/12-bit — full-range `Rgb16`.
 //! Monochrome pictures decode to grey, and a straight (not premultiplied)
 //! alpha auxiliary item — a second AV1 image — becomes the alpha channel.
-//! Anything outside that (other matrices, premultiplied alpha, multiple tiles,
-//! intra block copy, grids, film grain, the tools `decode_still` refuses) is
+//! Anything outside that (other matrices, premultiplied alpha, intra block copy,
+//! grids, film grain, the tools `decode_still` refuses) is
 //! reported as [`PixelsError::Unsupported`] rather than decoded wrong.
 
 use crate::boxes::{FourCc, Reader};
@@ -297,10 +297,8 @@ fn decode_frame(
     use crate::av1::{StillPicture, decode_still};
 
     let still = StillPicture::parse(config_obus, frame_data)?;
-    let located = frame_data
-        .get(still.tile_data_offset..still.tile_data_offset + still.tile_data_len)
-        .ok_or_else(|| PixelsError::malformed("avif", "tile data runs past the coded frame"))?;
-    let frame = decode_still(&still.sequence, &still.frame, located)?;
+    let groups = still.tile_group_data(frame_data)?;
+    let frame = decode_still(&still.sequence, &still.frame, &groups)?;
     Ok((frame, still.sequence))
 }
 

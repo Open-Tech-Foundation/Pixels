@@ -7,6 +7,9 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- An AVIF whose coded frame repeated its header in an
+  `OBU_REDUNDANT_FRAME_HEADER` after the tile data lost that tile data. A
+  redundant copy now only stands in for a header that never arrived.
 - AVIF `imir` was documented, though not yet used, with its two modes swapped.
   Mode 0 exchanges top and bottom and mode 1 left and right, per ISO/IEC
   23008-12:2022 and libavif, which writes most AVIFs.
@@ -36,6 +39,9 @@ versioning: [SemVer](https://semver.org/).
   with it rather than failing to build.
 
 ### Changed
+- `otf-pixels-codec-avif`: `StillPicture` records every tile group
+  (`tile_groups`, `tile_group_data`) in place of one `tile_data_offset`/
+  `tile_data_len` range, and `decode_still` takes the tile groups' bytes.
 - `PngDecoder::new` now reads through to the first `IDAT` header rather than
   stopping after `IHDR`, so that `eXIf` and `tRNS` are known at open. It still
   reads no image data.
@@ -137,6 +143,16 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- AVIF multi-tile decode. Encoders split large images into tiles (libavif's
+  `--autotiling`, `--tilecolslog2`/`--tilerowslog2`), and those files were
+  refused as `Unsupported`. Each tile now decodes from fresh CDFs and cleared
+  above contexts, restarts `CurrentQIndex`, `DeltaLF` and the restoration
+  references, and treats neighbours across its edge as unavailable; the
+  in-loop filters then run over the whole frame. Tile groups split across
+  several OBUs are joined in order, and a missing, repeated or overrunning
+  tile is `Malformed`. Seven plane fixtures, among them uneven grids, 128x128
+  superblocks, palettes at tile edges and multiple tile groups, match libaom
+  exactly, and a tiled photo matches libavif's RGB through the facade.
 - AVIF per-superblock quantizer and loop-filter deltas (`delta_q`,
   `delta_lf`). libaom's key-frame visual-quality mode (`deltaq-mode=3`) sets
   them, so files that were refused as `Unsupported` now decode. `CurrentQIndex`

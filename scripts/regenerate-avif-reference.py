@@ -178,6 +178,8 @@ FIXTURES = {
     # Per-superblock quantizer and loop-filter deltas, end to end; large enough
     # that the encoder actually varies the quantizer.
     "photo_420_deltaq": (mixed(256, 192, 3), False, 0, "", 2),
+    # A 2x2 tile grid, end to end.
+    "photo_420_tiles": (mixed(256, 192, 3), False, 0, "", 2),
     # 10- and 12-bit: decoded to 16-bit RGB over the full 0..=65535 range.
     # Here libavif converts in floating point rather than through libyuv, and
     # we agree on 99% of samples and within one 16-bit step on the rest — the
@@ -235,6 +237,7 @@ PHOTO_ARGS = {
     "photo_444": ["-y", "444", "-q", "60"],
     "photo_420_bt709_studio": ["-y", "420", "-q", "60", "--cicp", "1/13/1", "-r", "limited"],
     "photo_420_bt2020": ["-y", "420", "-q", "60", "--cicp", "9/16/9"],
+    "photo_420_tiles": ["-y", "420", "-q", "60", "--tilecolslog2", "1", "--tilerowslog2", "1"],
     "photo_420_deltaq": [
         "-y", "420", "-q", "60",
         "-a", "deltaq-mode=3", "-a", "enable-tpl-model=0", "-a", "delta-lf-mode=1",
@@ -473,6 +476,29 @@ def encode_superres(image: Image.Image, path: str, cq_level: int, denominator: i
     os.remove(obu)
 
 
+def encode_aomenc(image: Image.Image, path: str, args: list) -> None:
+    """Encode `image` as one 4:4:4 identity-matrix key frame with aomenc and
+    `args`, muxed into an AVIF (see `mux_avif`)."""
+    width, height = image.size
+    rgb = image.convert("RGB")
+    planes = [rgb.getchannel(c).tobytes() for c in ("G", "B", "R")]
+    y4m = path + ".src.y4m"
+    obu = path + ".obu"
+    with open(y4m, "wb") as out:
+        out.write(f"YUV4MPEG2 W{width} H{height} F1:1 Ip A1:1 C444\nFRAME\n".encode())
+        out.write(b"".join(planes))
+    cmd = [
+        "aomenc", y4m, "--obu", "-o", obu, "--limit=1", "--usage=2", "--profile=1",
+        "--end-usage=q", "--color-primaries=bt709", "--transfer-characteristics=srgb",
+        "--matrix-coefficients=identity", "--deltaq-mode=0", "--enable-tpl-model=0", *args,
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with open(obu, "rb") as data:
+        mux_avif(data.read(), width, height, path)
+    os.remove(y4m)
+    os.remove(obu)
+
+
 def encode(image: Image.Image, path: str, lossless: bool, quality: int, yuv: str) -> None:
     name = os.path.splitext(os.path.basename(path))[0]
     if name in PHOTO_ARGS:
@@ -687,6 +713,49 @@ PLANES = {
         ["-d", "10", "-y", "444", "-q", "40", "-s", "4", *DELTA_LF],
     ),
     "textured_400_deltalf": (textured(128, 96), ["-y", "400", "-q", "50", "-s", "4", *DELTA_LF]),
+    # Tiles: each starts from fresh CDFs and cleared above contexts, and treats
+    # neighbours across its edge as unavailable. A 2x2 grid; an uneven 3x2 grid
+    # (5 superblock columns split 2/2/1) with the quantizer, loop-filter and
+    # restoration references all restarting per tile; 128x128 superblocks; and
+    # palettes, whose colour cache stops at a tile edge.
+    "mixed_420_tiles": (
+        mixed(256, 192, 3),
+        ["-y", "420", "-q", "50", "-s", "4", "--tilecolslog2", "1", "--tilerowslog2", "1", *FILTERS_ON],
+    ),
+    "textured_odd_420_tiles": (
+        textured(301, 157),
+        ["-y", "420", "-q", "40", "-s", "4", "--tilecolslog2", "2", "--tilerowslog2", "1",
+         "-a", "enable-restoration=1", *DELTA_LF],
+    ),
+    # Deblocking on with per-block deltas, and restoration units starting in
+    # more than one tile, so DeltaLF and the restoration references restarting
+    # per tile both show in the pixels.
+    "mixed_420_tiles_filtered": (
+        mixed(400, 320, 3),
+        ["-y", "420", "-q", "20", "-s", "4", "--tilecolslog2", "1", "--tilerowslog2", "1",
+         "-a", "enable-restoration=1", *DELTA_LF],
+    ),
+    "soft_420_sb128_tiles": (
+        soft(272, 144),
+        ["-y", "420", "-q", "5", "-s", "4", "-a", "sb-size=128", "--tilecolslog2", "1", *FILTERS_ON],
+    ),
+    "blocks_444_palette_tiles": (
+        blocks(130, 70),
+        ["-y", "444", "-r", "full", "--cicp", "1/13/0", "-q", "60", "-s", "6",
+         "--tilecolslog2", "1", *FILTERS_ON],
+    ),
+}
+
+# Plane fixtures libavif cannot produce, encoded with aomenc as 4:4:4 identity
+# and muxed by `mux_avif`. name -> (image, aomenc arguments).
+PLANES_AOMENC = {
+    # Tiles split across tile-group OBUs: an OBU_FRAME carrying the first group,
+    # then an OBU_TILE_GROUP naming its own tile range. (libaom settles on two
+    # tile columns and two groups here, whatever is asked for.)
+    "textured_444_tilegroups": (
+        textured(256, 128),
+        ["--cq-level=30", "--tile-columns=2", "--tile-rows=1", "--num-tile-groups=3"],
+    ),
 }
 
 
@@ -733,6 +802,19 @@ def write_planes(fixtures: str) -> None:
         )
         os.remove(base + ".obu")
         print(f"planes/{name}: {os.path.getsize(base + '.avif')} bytes")
+    for name, (image, args) in sorted(PLANES_AOMENC.items()):
+        base = os.path.join(directory, name)
+        encode_aomenc(image, base + ".avif", args)
+        with open(base + ".obu", "wb") as out:
+            out.write(carve_primary_item(base + ".avif"))
+        subprocess.run(
+            ["aomdec", "--rawvideo", "-o", base + ".yuv", base + ".obu"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        os.remove(base + ".obu")
+        print(f"planes/{name}: {os.path.getsize(base + '.avif')} bytes")
 
 
 # Files this decoder must *refuse*: each uses one coding tool it does not
@@ -746,7 +828,6 @@ UNSUPPORTED = {
     "qmatrix": (textured(64, 64), [*IDENTITY_444, "-a", "enable-qm=1"]),
     "premultiplied": (with_alpha(textured(32, 32)), ["-q", "60", "--premultiply"]),
     "ycgco": (textured(32, 32), ["-y", "444", "-q", "60", "--cicp", "1/13/8"]),
-    "tiles": (textured(128, 64), [*IDENTITY_444, "--tilecolslog2", "1"]),
 }
 
 

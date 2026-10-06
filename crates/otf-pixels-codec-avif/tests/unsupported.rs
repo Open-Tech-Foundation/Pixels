@@ -26,7 +26,6 @@ const CASES: &[(&str, &str)] = &[
     ("qmatrix", "quantizer matrices"),
     ("premultiplied", "premultiplied alpha"),
     ("ycgco", "colour matrix 8"),
-    ("tiles", "multi-tile"),
 ];
 
 fn decode(bytes: &[u8]) -> otf_pixels_core::Result<()> {

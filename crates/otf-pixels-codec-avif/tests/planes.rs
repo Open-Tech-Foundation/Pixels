@@ -47,6 +47,24 @@ const CASES: &[(&str, (u8, u8))] = &[
     ("mixed_420_deltalf", (1, 1)),
     ("textured_444_10bit_deltalf", (0, 0)),
     ("textured_400_deltalf", (1, 1)),
+    // Multiple tiles, and multiple tile groups.
+    ("mixed_420_tiles", (1, 1)),
+    ("textured_odd_420_tiles", (1, 1)),
+    ("mixed_420_tiles_filtered", (1, 1)),
+    ("soft_420_sb128_tiles", (1, 1)),
+    ("blocks_444_palette_tiles", (0, 0)),
+    ("textured_444_tilegroups", (0, 0)),
+];
+
+/// Fixtures that exist to exercise tiling, with the `(tile columns, tile
+/// rows, tile groups)` each must actually have.
+const TILINGS: &[(&str, (u32, u32, usize))] = &[
+    ("mixed_420_tiles", (2, 2, 1)),
+    ("textured_odd_420_tiles", (3, 2, 1)),
+    ("mixed_420_tiles_filtered", (2, 2, 1)),
+    ("soft_420_sb128_tiles", (2, 1, 1)),
+    ("blocks_444_palette_tiles", (2, 1, 1)),
+    ("textured_444_tilegroups", (2, 1, 2)),
 ];
 
 /// Fixtures that exist to exercise a frame-header tool, with the
@@ -58,6 +76,7 @@ const DELTA_TOOLS: &[(&str, (bool, bool))] = &[
     ("mixed_420_deltalf", (true, true)),
     ("textured_444_10bit_deltalf", (true, true)),
     ("textured_400_deltalf", (true, true)),
+    ("mixed_420_tiles_filtered", (true, true)),
 ];
 
 fn fixture_dir() -> String {
@@ -93,9 +112,8 @@ fn decoded_planes_match_libaom() {
             (expect_sub_x, expect_sub_y),
             "{name}: chroma subsampling"
         );
-        let tile =
-            &frame_data[still.tile_data_offset..still.tile_data_offset + still.tile_data_len];
-        let decoded = decode_still(&still.sequence, &still.frame, tile)
+        let groups = still.tile_group_data(&frame_data).unwrap();
+        let decoded = decode_still(&still.sequence, &still.frame, &groups)
             .unwrap_or_else(|e| panic!("{name}: {e}"));
 
         let width = still.frame.upscaled_width as usize;
@@ -144,6 +162,21 @@ fn delta_fixtures_carry_the_tools_they_test() {
         assert_eq!(
             (still.frame.delta_q_present, still.frame.delta_lf_present),
             expected,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn tiled_fixtures_have_the_tiling_they_test() {
+    for &(name, (cols, rows, groups)) in TILINGS {
+        let file = std::fs::read(format!("{}/{name}.avif", fixture_dir())).unwrap();
+        let (frame_data, config_obus) = primary_frame(&file);
+        let still = StillPicture::parse(&config_obus, &frame_data).unwrap();
+        let info = &still.frame.tile_info;
+        assert_eq!(
+            (info.cols, info.rows, still.tile_groups.len()),
+            (cols, rows, groups),
             "{name}"
         );
     }

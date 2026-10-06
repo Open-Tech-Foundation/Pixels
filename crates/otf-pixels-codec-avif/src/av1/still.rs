@@ -4,14 +4,15 @@
 //! out. The sequence header arrives in the `av1C` box's configuration OBUs; the
 //! coded frame arrives as the primary item's data, as an `OBU_FRAME` (a frame
 //! header immediately followed by its tile group) or as a separate
-//! `OBU_FRAME_HEADER` plus `OBU_TILE_GROUP`. Either way this returns the two
-//! parsed headers and the byte range of the tile-group data that follows them,
-//! which is where P2 stops and reconstruction picks up.
+//! `OBU_FRAME_HEADER` plus one or more `OBU_TILE_GROUP`s. Either way this
+//! returns the two parsed headers and the byte ranges of the tile groups that
+//! follow them, which is where P2 stops and reconstruction picks up.
 
 use super::bits::BitReader;
 use super::frame::FrameHeader;
 use super::obu::{Obu, ObuType};
 use super::seq::SequenceHeader;
+use core::ops::Range;
 use otf_pixels_core::{PixelsError, Result};
 
 /// The parsed headers of a still picture, plus a locator for its tile data.
@@ -21,15 +22,31 @@ pub struct StillPicture {
     pub sequence: SequenceHeader,
     /// The frame (uncompressed) header.
     pub frame: FrameHeader,
-    /// The byte offset of the tile-group data within the coded frame buffer.
+    /// Each tile group's bytes, in order, as ranges of the `frame_data` passed
+    /// to [`StillPicture::parse`].
     ///
-    /// For an `OBU_FRAME` this points inside that OBU's payload, past the
-    /// byte-aligned frame header. For a separate `OBU_TILE_GROUP` it points at
-    /// that OBU's payload. It is an offset into the `frame_data` passed to
-    /// [`StillPicture::parse`].
-    pub tile_data_offset: usize,
-    /// The length in bytes of the tile-group data.
-    pub tile_data_len: usize,
+    /// For an `OBU_FRAME` the first range lies inside that OBU's payload, past
+    /// the byte-aligned frame header; each `OBU_TILE_GROUP` adds its payload.
+    pub tile_groups: Vec<Range<usize>>,
+}
+
+impl StillPicture {
+    /// The tile groups' bytes, ready for [`super::decode_still`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::Malformed`] if a range lies outside
+    /// `frame_data`, which means it is not the buffer these were parsed from.
+    pub fn tile_group_data<'a>(&self, frame_data: &'a [u8]) -> Result<Vec<&'a [u8]>> {
+        self.tile_groups
+            .iter()
+            .map(|range| {
+                frame_data.get(range.clone()).ok_or_else(|| {
+                    PixelsError::malformed("avif", "tile group lies outside the coded frame")
+                })
+            })
+            .collect()
+    }
 }
 
 /// Parse the sequence header out of a run of configuration OBUs.
@@ -61,6 +78,7 @@ impl StillPicture {
 
         let obus = Obu::parse_stream(frame_data)?;
         let mut frame = None;
+        let mut tile_groups = Vec::new();
 
         for obu in &obus {
             // Each OBU records where its payload begins in frame_data, so the
@@ -82,13 +100,15 @@ impl StillPicture {
                         obu.header.spatial_id,
                     )?;
                     reader.byte_alignment()?;
-                    let consumed = reader.byte_position();
-                    frame = Some((
-                        header,
-                        payload_offset + consumed,
-                        obu.payload.len().saturating_sub(consumed),
-                    ));
+                    let consumed = reader.byte_position().min(obu.payload.len());
+                    frame = Some(header);
+                    tile_groups.clear();
+                    tile_groups.push(payload_offset + consumed..payload_offset + obu.payload.len());
                 }
+                // A redundant copy repeats a header already in hand, so it
+                // matters only if the original was lost; it must not discard
+                // the tile groups already collected.
+                ObuType::RedundantFrameHeader if frame.is_some() => {}
                 ObuType::FrameHeader | ObuType::RedundantFrameHeader => {
                     let seq = sequence.as_ref().ok_or_else(missing_sequence)?;
                     let mut reader = BitReader::new(obu.payload);
@@ -98,35 +118,32 @@ impl StillPicture {
                         obu.header.temporal_id,
                         obu.header.spatial_id,
                     )?;
-                    // Tile data arrives in a following OBU_TILE_GROUP; record
-                    // the header now and fill the locator when it is seen.
-                    frame = Some((header, 0, 0));
+                    // Tile data arrives in the OBU_TILE_GROUPs that follow.
+                    frame = Some(header);
+                    tile_groups.clear();
                 }
-                ObuType::TileGroup => {
-                    if let Some((header, off, len)) = frame.take() {
-                        // A separate tile group supersedes a placeholder locator.
-                        let (off, len) = if len == 0 {
-                            (payload_offset, obu.payload.len())
-                        } else {
-                            (off, len)
-                        };
-                        frame = Some((header, off, len));
-                    }
+                ObuType::TileGroup if frame.is_some() => {
+                    tile_groups.push(payload_offset..payload_offset + obu.payload.len());
                 }
                 _ => {}
             }
         }
 
         let sequence = sequence.ok_or_else(missing_sequence)?;
-        let (frame, tile_data_offset, tile_data_len) = frame.ok_or_else(|| {
+        let frame = frame.ok_or_else(|| {
             PixelsError::malformed("avif", "the coded frame contains no frame header")
         })?;
+        if tile_groups.is_empty() {
+            return Err(PixelsError::malformed(
+                "avif",
+                "the coded frame has a header but no tile group",
+            ));
+        }
 
         Ok(Self {
             sequence,
             frame,
-            tile_data_offset,
-            tile_data_len,
+            tile_groups,
         })
     }
 }
@@ -236,8 +253,8 @@ mod tests {
         assert_eq!(still.frame.quantization.base_q_idx, 100);
         assert_eq!(still.frame.tile_info.count(), 1);
         // The tile locator points at the trailing bytes of the OBU_FRAME.
-        let located = &frame_stream[still.tile_data_offset..][..still.tile_data_len];
-        assert_eq!(located, &tile);
+        let located = still.tile_group_data(&frame_stream).unwrap();
+        assert_eq!(located, [&tile[..]]);
     }
 
     #[test]
@@ -247,11 +264,34 @@ mod tests {
         let mut stream = obu(3, &header_only); // OBU_FRAME_HEADER
         let tile = [1, 2, 3];
         stream.extend(obu(4, &tile)); // OBU_TILE_GROUP
+        stream.extend(obu(4, &[4, 5])); // a second OBU_TILE_GROUP
 
         let still = StillPicture::parse(&config, &stream).unwrap();
         assert_eq!(still.frame.frame_width, 32);
-        let located = &stream[still.tile_data_offset..][..still.tile_data_len];
-        assert_eq!(located, &tile);
+        let located = still.tile_group_data(&stream).unwrap();
+        assert_eq!(located, [&tile[..], &[4, 5][..]]);
+    }
+
+    #[test]
+    fn a_redundant_frame_header_keeps_the_tile_groups_already_seen() {
+        let config = obu(1, &seq_bytes(32, 32));
+        let header = frame_bytes(&[]);
+        let mut stream = obu(3, &header); // OBU_FRAME_HEADER
+        stream.extend(obu(4, &[1, 2])); // OBU_TILE_GROUP
+        stream.extend(obu(7, &header)); // OBU_REDUNDANT_FRAME_HEADER
+        stream.extend(obu(4, &[3])); // OBU_TILE_GROUP
+
+        let still = StillPicture::parse(&config, &stream).unwrap();
+        let located = still.tile_group_data(&stream).unwrap();
+        assert_eq!(located, [&[1, 2][..], &[3][..]]);
+    }
+
+    #[test]
+    fn a_frame_header_without_tile_data_is_malformed() {
+        let config = obu(1, &seq_bytes(32, 32));
+        let stream = obu(3, &frame_bytes(&[])); // OBU_FRAME_HEADER alone
+        let error = StillPicture::parse(&config, &stream).unwrap_err();
+        assert!(error.to_string().contains("no tile group"), "{error}");
     }
 
     #[test]

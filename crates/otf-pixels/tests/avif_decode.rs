@@ -51,6 +51,23 @@ fn a_420_avif_opens_and_crops_to_libavifs_pixels() {
 }
 
 #[test]
+fn a_tiled_avif_matches_libavif() {
+    // photo_420_tiles: four independently coded tiles in a 2x2 grid, which is
+    // how encoders split large images. Within libavif's YUV->RGB rounding.
+    let image = Image::open(fixture("photo_420_tiles.avif")).unwrap();
+    let ours = image
+        .output(Format::Raw, EncodeOptions::default())
+        .bytes()
+        .unwrap();
+    let theirs = std::fs::read(fixture("photo_420_tiles.raw")).unwrap();
+    assert_eq!(ours.len(), 256 * 192 * 3);
+    assert_eq!(ours.len(), theirs.len());
+    for (index, (a, b)) in ours.iter().zip(&theirs).enumerate() {
+        assert!(a.abs_diff(*b) <= 2, "byte {index}: {a} vs {b}");
+    }
+}
+
+#[test]
 fn an_avif_with_per_superblock_deltas_matches_libavif() {
     // photo_420_deltaq: avifenc's key-frame visual-quality mode varies the
     // quantizer and the deblocking strength per superblock (delta_q and

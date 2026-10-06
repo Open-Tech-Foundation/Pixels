@@ -15,7 +15,8 @@
 //! When CDEF is disabled the two frames are identical and the distinction is
 //! moot. With super-resolution both frames arrive already upscaled (§7.16), so
 //! this module only ever sees `UpscaledWidth`. Chroma planes use their own
-//! (subsampled) unit grid and stripe offsets. This is the single-tile path.
+//! (subsampled) unit grid and stripe offsets. Like every in-loop filter it
+//! runs over the whole frame, across tile boundaries.
 //!
 //! Like the transform DSP and CDEF, the filters are transcribed straight from
 //! the spec's indexed working arrays and constant tables, so the module opts into
