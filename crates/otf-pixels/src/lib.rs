@@ -91,7 +91,7 @@ pub use otf_pixels_codec_tiff::{TiffCodec, TiffDecoder, TiffEncoder, TiffLayout}
 pub use otf_pixels_codec_webp::{WebPCodec, WebPDecoder, WebPEncoder};
 
 #[cfg(feature = "avif")]
-pub use otf_pixels_codec_avif::{AvifCodec, AvifDecoder};
+pub use otf_pixels_codec_avif::{AvifCodec, AvifDecoder, AvifEncoder};
 
 /// How [`Image::open_with`] and [`Image::from_stream_with`] read an image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -852,6 +852,8 @@ fn encoder_for(format: Format, options: EncodeOptions) -> Result<Box<dyn Encoder
         Format::Tiff => Ok(Box::new(TiffEncoder::from_options(&options))),
         #[cfg(feature = "webp")]
         Format::WebP => Ok(Box::new(WebPEncoder::from_options(&options))),
+        #[cfg(feature = "avif")]
+        Format::Avif => Ok(Box::new(AvifEncoder::from_options(&options))),
         #[cfg(not(feature = "raw"))]
         Format::Raw => Err(PixelsError::unsupported(
             "raw encoding requires the `raw` feature of otf-pixels",
@@ -931,11 +933,12 @@ mod tests {
         assert_eq!((cropped.width, cropped.height), (3, 2));
     }
 
+    /// Every format encodes once its feature is on (each checked by its own
+    /// round-trip tests); a build without a format's feature must fail
+    /// cleanly rather than produce something.
+    #[cfg(not(feature = "avif"))]
     #[test]
-    fn unimplemented_formats_are_catchable_errors() {
-        // Png, Gif, Jpeg, Tiff and WebP are absent: they encode as of M3, M5
-        // and M6, and are checked by their round-trip tests instead. Every
-        // remaining format must fail cleanly rather than producing something.
+    fn a_format_built_out_is_a_catchable_error() {
         let format = Format::Avif;
         let err = ramp(2, 2)
             .output(format, EncodeOptions::default())

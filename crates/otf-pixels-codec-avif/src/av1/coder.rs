@@ -46,7 +46,6 @@ pub(crate) enum Site {
 
 /// What the encoder needs to code one transform block's coefficients: where
 /// it is and what the decoder predicted for it.
-#[allow(dead_code, reason = "read by the encoder's coder, which lands next")]
 pub(crate) struct CoeffJob<'a> {
     /// Plane index: 0 luma, 1 U, 2 V.
     pub plane: usize,

@@ -7,6 +7,9 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The last column of an odd-width 4:2:0 or 4:2:2 AVIF was filtered toward
+  its left chroma neighbour, where libavif (through libyuv) copies its own
+  chroma sample. On sharp chroma this differed by up to 35. It now matches.
 - An AVIF whose coded frame repeated its header in an
   `OBU_REDUNDANT_FRAME_HEADER` after the tile data lost that tile data. A
   redundant copy now only stands in for a header that never arrived.
@@ -146,6 +149,14 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- AVIF encoding: `Format::Avif` output through `AvifEncoder`, at
+  `EncodeOptions::quality`. Colour is coded as 8-bit 4:2:0 BT.601 full-range
+  YUV (monochrome for grey input), and transparency as an auxiliary alpha
+  item; an opaque alpha channel is dropped. Lossless AVIF is refused as
+  `Unsupported`. `scripts/check-avif-interop.sh` checks that libaom, dav1d and
+  libgav1 (through `avifdec`) decode every emitted file to our pixels. On a
+  768x512 photo the files are about 15-20% larger than `avifenc -s 6` at
+  equal PSNR.
 - An AV1 key-frame encoder for AVIF stills (8-bit, 4:2:0 or monochrome),
   built as the tile decoder driven by decisions: every symbol site asks a
   `TileCoder`, which either reads the stream or decides and writes it, so the

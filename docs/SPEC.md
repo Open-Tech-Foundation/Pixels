@@ -14,7 +14,7 @@ implementation detail and may change without notice.
 | JPEG (baseline) | ✅ | ✅ | own | yes |
 | JPEG (progressive) | ✅ | ❌ (v2) | wrapped | internal buffer |
 | WebP | ✅ | ✅ lossy and lossless | own (ADR-0014) | internal buffer |
-| AVIF | ✅ | ✅ | own | internal buffer |
+| AVIF | ✅ | ✅ lossy, 8-bit 4:2:0 | own | internal buffer |
 
 - Format detection is by magic bytes only; extensions and MIME are ignored.
 - Raw pixel contract: caller supplies width, height, pixel format, stride.
@@ -39,6 +39,12 @@ implementation detail and may change without notice.
   lands a file using a part not yet implemented is refused as `Unsupported`,
   never decoded wrong. The codec crate's `tests/unsupported.rs` lists what is
   still refused.
+  Encode writes one 8-bit 4:2:0 key frame (monochrome for grey input) at
+  `EncodeOptions::quality`, BT.601 full range with sRGB `colr`, and
+  transparency as an auxiliary alpha item; opaque alpha is dropped. Lossless
+  AVIF and deeper or 4:4:4 encoding are `Unsupported`. libaom, dav1d and
+  libgav1 must decode every emitted file to our decoder's pixels
+  (`scripts/check-avif-interop.sh`).
 
 ## Pixel formats
 

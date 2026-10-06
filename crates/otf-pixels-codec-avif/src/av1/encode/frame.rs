@@ -31,6 +31,8 @@ pub(crate) struct Picture<'a> {
 /// A coded still: the sequence header OBU (for `av1C`) and the full temporal
 /// unit (for the item's data).
 pub(crate) struct CodedStill {
+    /// `seq_level_idx[0]`, which `av1C` repeats.
+    pub level: u8,
     pub sequence_header_obu: Vec<u8>,
     pub data: Vec<u8>,
 }
@@ -154,6 +156,7 @@ pub(crate) fn encode_still(picture: &Picture<'_>, qindex: u8) -> Result<CodedSti
     let mut data = sequence_header_obu.clone();
     data.extend_from_slice(&obu(OBU_FRAME, &payload));
     Ok(CodedStill {
+        level: seq_params.level(),
         sequence_header_obu,
         data,
     })

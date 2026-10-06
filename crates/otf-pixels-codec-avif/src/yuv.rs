@@ -163,6 +163,7 @@ pub(crate) fn yuv_to_rgb(planes: &[Plane], layout: Layout, matrix: &YuvMatrix) -
         return Err(PixelsError::malformed("avif", "a colour plane is missing"));
     };
     let chroma = Chroma {
+        luma_width: layout.width,
         width: (layout.width + layout.subsampling_x) >> layout.subsampling_x,
         height: (layout.height + layout.subsampling_y) >> layout.subsampling_y,
         sub_x: layout.subsampling_x,
@@ -253,6 +254,8 @@ fn samples<const N: usize>(layout: Layout, pixel: impl Fn(usize, usize) -> [u16;
 
 /// The displayed chroma plane's size and subsampling, for upsampling.
 struct Chroma {
+    /// The picture's luma width, for libyuv's right-edge rule.
+    luma_width: usize,
     width: usize,
     height: usize,
     sub_x: usize,
@@ -280,9 +283,18 @@ impl Chroma {
             [(near.min(len - 1), 3), (far, 1)]
         };
         let sample = |cx: usize, cy: usize| i32::from(plane.get(cx, cy).unwrap_or(0));
+        // libyuv, which libavif converts with, copies the last chroma sample
+        // into the last column rather than filtering it when the width is odd
+        // (its rows end `dst[w - 1] = src[(w - 1) / 2]`); rows have no such
+        // rule. Matching it keeps an odd-width image's right edge identical.
+        let x_taps = if self.sub_x == 1 && x + 1 == self.luma_width && x & 1 == 0 {
+            [(x >> 1, 4), (x >> 1, 0)]
+        } else {
+            taps(x, self.sub_x, self.width)
+        };
         let mut sum = 0;
         for (cy, wy) in taps(y, self.sub_y, self.height) {
-            for (cx, wx) in taps(x, self.sub_x, self.width) {
+            for (cx, wx) in x_taps {
                 sum += wy * wx * sample(cx, cy);
             }
         }
@@ -472,6 +484,7 @@ mod tests {
         let mut plane = Plane::new(2, 1);
         plane.set(1, 0, 64);
         let chroma = Chroma {
+            luma_width: 4,
             width: 2,
             height: 1,
             sub_x: 1,
@@ -479,5 +492,28 @@ mod tests {
         };
         let at = |x| chroma.upsample(&plane, x, 0) >> CHROMA_BITS;
         assert_eq!([at(0), at(1), at(2), at(3)], [0, 16, 48, 64]);
+    }
+
+    #[test]
+    fn an_odd_widths_last_column_copies_its_chroma_as_libyuv_does() {
+        // Width 3: chroma 0, 64. Column 2 is centred on chroma 1 with no
+        // partner to its right; libyuv copies it, 64, rather than filtering
+        // toward chroma 0 (48). Rows keep the filter at an odd height.
+        let mut plane = Plane::new(2, 2);
+        plane.set(1, 0, 64);
+        plane.set(0, 1, 64);
+        plane.set(1, 1, 64);
+        let chroma = Chroma {
+            luma_width: 3,
+            width: 2,
+            height: 2,
+            sub_x: 1,
+            sub_y: 1,
+        };
+        let at = |x, y| chroma.upsample(&plane, x, y) >> CHROMA_BITS;
+        assert_eq!([at(0, 0), at(1, 0), at(2, 0)], [0, 16, 64]);
+        // Row 2 (the last of an odd height) still filters: 3*64 + 64, /4 = 64
+        // at column 2, and (3*64 + 0)/4 = 48 at column 0 from chroma rows 1, 0.
+        assert_eq!([at(0, 2), at(2, 2)], [48, 64]);
     }
 }

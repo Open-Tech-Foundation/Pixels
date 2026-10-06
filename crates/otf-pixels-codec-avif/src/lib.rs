@@ -14,6 +14,14 @@
 //! per ROADMAP §v2; a sequence decodes its primary item and nothing else,
 //! matching what GIF and WebP already do.
 //!
+//! # Encoding
+//!
+//! [`AvifEncoder`] writes an 8-bit 4:2:0 (or monochrome) key frame, with an
+//! auxiliary alpha item for transparency. It is the tile decoder driven by
+//! decisions: every symbol site asks a coder, which either reads the stream
+//! or decides and writes it, so prediction, reconstruction and probability
+//! adaptation are the decoder's own and cannot drift from it.
+//!
 //! # Memory
 //!
 //! Internally buffered, as SPEC §Formats says. The container addresses its
@@ -34,6 +42,7 @@
 mod av1;
 mod boxes;
 mod decoder;
+mod encoder;
 mod meta;
 mod props;
 mod yuv;
@@ -53,6 +62,7 @@ pub use av1::{
 };
 pub use boxes::{BoxHeader, FourCc, Reader};
 pub use decoder::{AvifCodec, AvifDecoder, AvifInfo, probe};
+pub use encoder::AvifEncoder;
 pub use meta::{Construction, Extent, Item, Meta, Reference, URN_ALPHA, URN_ALPHA_LEGACY};
 pub use props::{
     Association, Av1Config, Colour, Extents, PixelInfo, Properties, Property, Subsampling,

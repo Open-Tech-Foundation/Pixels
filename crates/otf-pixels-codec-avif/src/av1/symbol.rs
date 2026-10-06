@@ -166,10 +166,6 @@ impl<'a> SymbolDecoder<'a> {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "used by the AVIF encoder, whose driver lands next"
-)]
 /// The multi-symbol arithmetic encoder: libaom's `od_ec_enc`, the exact
 /// inverse of [`SymbolDecoder`]. Symbols are coded against the same CDFs,
 /// adapted the same way, so a stream it writes decodes symbol for symbol.
@@ -185,10 +181,6 @@ pub struct SymbolEncoder {
     disable_cdf_update: bool,
 }
 
-#[allow(
-    dead_code,
-    reason = "used by the AVIF encoder, whose driver lands next"
-)]
 impl SymbolEncoder {
     /// A fresh encoder for one tile.
     #[must_use]
