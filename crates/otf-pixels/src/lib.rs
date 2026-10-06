@@ -1072,7 +1072,7 @@ mod tests {
     #[test]
     fn webp_round_trips_through_the_facade() {
         let bytes = ramp(20, 12)
-            .output(Format::WebP, EncodeOptions::default())
+            .output(Format::WebP, EncodeOptions::default().with_lossless(true))
             .bytes()
             .unwrap();
         let image = Image::from_stream(std::io::Cursor::new(bytes)).unwrap();
@@ -1106,7 +1106,7 @@ mod tests {
             .collect();
         let bytes = Image::from_raw(descriptor, pixels.clone())
             .unwrap()
-            .output(Format::WebP, EncodeOptions::default())
+            .output(Format::WebP, EncodeOptions::default().with_lossless(true))
             .bytes()
             .unwrap();
 
@@ -1117,6 +1117,49 @@ mod tests {
             .bytes()
             .unwrap();
         assert_eq!(decoded, pixels);
+    }
+
+    /// WebP output is lossy by default, at the requested quality: close to
+    /// the source, smaller as the quality drops, and with its alpha intact,
+    /// since WebP codes alpha losslessly even in a lossy file.
+    #[cfg(feature = "webp")]
+    #[test]
+    fn webp_is_lossy_by_default_and_keeps_alpha_exact() {
+        let (w, h) = (48_u32, 32_u32);
+        let descriptor = ImageDescriptor::new(w, h, PixelFormat::Rgba8).unwrap();
+        let pixels: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = (i % w, i / w);
+                [(x * 5) as u8, (y * 7) as u8, 120, (x * 3 + y) as u8]
+            })
+            .collect();
+        let encode = |options: EncodeOptions| {
+            Image::from_raw(descriptor, pixels.clone())
+                .unwrap()
+                .output(Format::WebP, options)
+                .bytes()
+                .unwrap()
+        };
+        let good = encode(EncodeOptions::default());
+        let rough = encode(EncodeOptions::with_quality(10).unwrap());
+        assert!(
+            rough.len() < good.len(),
+            "{} vs {}",
+            rough.len(),
+            good.len()
+        );
+
+        let decoded = Image::from_stream(std::io::Cursor::new(good))
+            .unwrap()
+            .output(Format::Raw, EncodeOptions::default())
+            .bytes()
+            .unwrap();
+        for (ours, source) in decoded.chunks_exact(4).zip(pixels.chunks_exact(4)) {
+            assert_eq!(ours[3], source[3], "alpha changed");
+            for c in 0..3 {
+                assert!(ours[c].abs_diff(source[c]) <= 12, "{ours:?} vs {source:?}");
+            }
+        }
     }
 
     /// A progressive JPEG reaches the wrapped decoder through the same

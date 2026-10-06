@@ -23,6 +23,7 @@
 )]
 
 mod bool_decoder;
+pub(crate) mod encode;
 mod filter;
 mod predict;
 mod transform;
@@ -61,7 +62,7 @@ pub struct Frame {
 }
 
 /// `kf_y_mode_tree` (§11.2).
-const KF_Y_MODE_TREE: [i8; 8] = [
+pub(crate) const KF_Y_MODE_TREE: [i8; 8] = [
     -(B_PRED as i8),
     2,
     4,
@@ -72,7 +73,7 @@ const KF_Y_MODE_TREE: [i8; 8] = [
     -(TM_PRED as i8),
 ];
 /// `uv_mode_tree` (§11.4).
-const UV_MODE_TREE: [i8; 6] = [
+pub(crate) const UV_MODE_TREE: [i8; 6] = [
     -(DC_PRED as i8),
     2,
     -(V_PRED as i8),
@@ -81,7 +82,7 @@ const UV_MODE_TREE: [i8; 6] = [
     -(TM_PRED as i8),
 ];
 /// `b_mode_tree` (§11.3).
-const B_MODE_TREE: [i8; 18] = [
+pub(crate) const B_MODE_TREE: [i8; 18] = [
     -(b::DC as i8),
     2,
     -(b::TM as i8),
@@ -101,13 +102,13 @@ const B_MODE_TREE: [i8; 18] = [
     -(b::HD as i8),
     -(b::HU as i8),
 ];
-const KF_Y_MODE_PROBS: [u8; 4] = tables::KF_Y_MODE_PROBS;
-const KF_UV_MODE_PROBS: [u8; 3] = tables::KF_UV_MODE_PROBS;
+pub(crate) const KF_Y_MODE_PROBS: [u8; 4] = tables::KF_Y_MODE_PROBS;
+pub(crate) const KF_UV_MODE_PROBS: [u8; 3] = tables::KF_UV_MODE_PROBS;
 
 /// Coefficient positions in scan order (§13).
-const ZIGZAG: [usize; 16] = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
+pub(crate) const ZIGZAG: [usize; 16] = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
 /// The probability band of each scan position.
-const BANDS: [usize; 17] = [0, 1, 2, 3, 6, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 7, 0];
+pub(crate) const BANDS: [usize; 17] = [0, 1, 2, 3, 6, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 7, 0];
 /// `DCT_VAL_CATEGORY1..6`: base value and extra-bit probabilities (§13.2).
 const CATEGORIES: [(i32, &[u8]); 6] = [
     (5, &[159]),
@@ -119,7 +120,7 @@ const CATEGORIES: [(i32, &[u8]); 6] = [
 ];
 
 /// Token probabilities: `[block type][band][context][node]`.
-type CoeffProbs = [[[[u8; 11]; 3]; 8]; 4];
+pub(crate) type CoeffProbs = [[[[u8; 11]; 3]; 8]; 4];
 
 /// Dequantization factors for one segment: `[block kind][dc, ac]`, block
 /// kinds Y (after Y2), Y2, and chroma.
@@ -538,7 +539,7 @@ impl FrameDecoder {
         if y_mode == B_PRED {
             for i in 0..16 {
                 let (bx, by) = (i & 3, i >> 2);
-                let edges = self.sub_edges(mx, my, bx, by);
+                let edges = sub_edges(&self.y, self.mb_cols, mx, my, bx, by);
                 let mut block = predict::predict_subblock(modes[i], &edges);
                 transform::idct_add(&coeffs[i], &mut block);
                 for (r, row) in block.iter().enumerate() {
@@ -584,58 +585,6 @@ impl FrameDecoder {
                 let at = (my * 8 + r) * uv_stride + mx * 8;
                 plane[at..at + 8].copy_from_slice(row);
             }
-        }
-    }
-
-    /// Edges for luma subblock `(bx, by)` of macroblock `(mx, my)`, with the
-    /// frame-border rules of the reference decoder: 127 above the frame, 129
-    /// left of it, the corner 127 on the first row and 129 down the left; and
-    /// above-right samples taken from the macroblock above-right — repeated
-    /// from the last sample of the row past the last column — for the whole
-    /// right-hand column of subblocks, not just the top one.
-    fn sub_edges(&self, mx: usize, my: usize, bx: usize, by: usize) -> SubEdges {
-        let stride = self.mb_cols * 16;
-        let (x0, y0) = (mx * 16 + bx * 4, my * 16 + by * 4);
-        let px = |x: usize, y: usize| self.y[y * stride + x];
-        let mut above = [127_u8; 8];
-        if y0 > 0 {
-            for (k, a) in above.iter_mut().take(4).enumerate() {
-                *a = px(x0 + k, y0 - 1);
-            }
-        }
-        if bx < 3 {
-            if y0 > 0 {
-                for k in 4..8 {
-                    above[k] = px(x0 + k, y0 - 1);
-                }
-            }
-        } else if my > 0 {
-            let row = my * 16 - 1;
-            for k in 4..8 {
-                above[k] = if mx + 1 < self.mb_cols {
-                    px(x0 + k, row)
-                } else {
-                    px(stride - 1, row)
-                };
-            }
-        }
-        let mut left = [129_u8; 4];
-        if x0 > 0 {
-            for (k, l) in left.iter_mut().enumerate() {
-                *l = px(x0 - 1, y0 + k);
-            }
-        }
-        let corner = if y0 == 0 {
-            127
-        } else if x0 == 0 {
-            129
-        } else {
-            px(x0 - 1, y0 - 1)
-        };
-        SubEdges {
-            above,
-            left,
-            corner,
         }
     }
 
@@ -717,9 +666,73 @@ impl FrameDecoder {
     }
 }
 
+/// Edges for luma subblock `(bx, by)` of macroblock `(mx, my)`, with the
+/// frame-border rules of the reference decoder: 127 above the frame, 129
+/// left of it, the corner 127 on the first row and 129 down the left; and
+/// above-right samples taken from the macroblock above-right — repeated
+/// from the last sample of the row past the last column — for the whole
+/// right-hand column of subblocks, not just the top one.
+pub(crate) fn sub_edges(
+    y: &[u8],
+    mb_cols: usize,
+    mx: usize,
+    my: usize,
+    bx: usize,
+    by: usize,
+) -> SubEdges {
+    let stride = mb_cols * 16;
+    let (x0, y0) = (mx * 16 + bx * 4, my * 16 + by * 4);
+    let px = |x: usize, row: usize| y[row * stride + x];
+    let mut above = [127_u8; 8];
+    if y0 > 0 {
+        for (k, a) in above.iter_mut().take(4).enumerate() {
+            *a = px(x0 + k, y0 - 1);
+        }
+    }
+    if bx < 3 {
+        if y0 > 0 {
+            for k in 4..8 {
+                above[k] = px(x0 + k, y0 - 1);
+            }
+        }
+    } else if my > 0 {
+        let row = my * 16 - 1;
+        for k in 4..8 {
+            above[k] = if mx + 1 < mb_cols {
+                px(x0 + k, row)
+            } else {
+                px(stride - 1, row)
+            };
+        }
+    }
+    let mut left = [129_u8; 4];
+    if x0 > 0 {
+        for (k, l) in left.iter_mut().enumerate() {
+            *l = px(x0 - 1, y0 + k);
+        }
+    }
+    let corner = if y0 == 0 {
+        127
+    } else if x0 == 0 {
+        129
+    } else {
+        px(x0 - 1, y0 - 1)
+    };
+    SubEdges {
+        above,
+        left,
+        corner,
+    }
+}
+
 /// Edges for an `N`x`N` macroblock-level prediction of macroblock
 /// `(mx, my)` in a plane of `N`-sample macroblocks.
-fn block_edges<const N: usize>(plane: &[u8], stride: usize, mx: usize, my: usize) -> Edges<N> {
+pub(crate) fn block_edges<const N: usize>(
+    plane: &[u8],
+    stride: usize,
+    mx: usize,
+    my: usize,
+) -> Edges<N> {
     let (x0, y0) = (mx * N, my * N);
     let mut above = [127_u8; N];
     if my > 0 {

@@ -140,9 +140,116 @@ pub fn to_rgb(
     out
 }
 
+/// libwebp's `VP8RGBToY`, with its rounding.
+const fn rgb_to_y(r: i32, g: i32, b: i32) -> u8 {
+    ((16839 * r + 33059 * g + 6420 * b + (1 << 15) + (16 << 16)) >> 16) as u8
+}
+
+/// libwebp's `VP8RGBToU`/`VP8RGBToV` over a sum of four samples.
+const fn clip_uv(v: i32) -> u8 {
+    let v = (v + (1 << 17) + (128 << 18)) >> 18;
+    if v & !0xff == 0 {
+        v as u8
+    } else if v < 0 {
+        0
+    } else {
+        255
+    }
+}
+
+/// Convert interleaved 8-bit samples (`channels` of 1 grey, 2 grey+alpha,
+/// 3 RGB, 4 RGBA) to YUV 4:2:0 planes padded to whole macroblocks, as
+/// libwebp's encoder does: Y per pixel, U and V from each 2x2 block's sum
+/// (an odd edge sample counted twice), and the padding a copy of the last
+/// row and column. Returns the alpha plane too when the input has one.
+#[allow(
+    clippy::many_single_char_names,
+    reason = "the conventional channel names"
+)]
+pub fn from_rgb(
+    pixels: &[u8],
+    channels: usize,
+    width: usize,
+    height: usize,
+) -> (crate::vp8::encode::Planes, Option<Vec<u8>>) {
+    let rgb = |x: usize, y: usize| -> [i32; 3] {
+        let at = (y * width + x) * channels;
+        match channels {
+            1 | 2 => {
+                let g = i32::from(pixels[at]);
+                [g, g, g]
+            }
+            _ => [
+                i32::from(pixels[at]),
+                i32::from(pixels[at + 1]),
+                i32::from(pixels[at + 2]),
+            ],
+        }
+    };
+    let (mb_w, mb_h) = (width.div_ceil(16) * 16, height.div_ceil(16) * 16);
+    let (uv_w, uv_h) = (mb_w / 2, mb_h / 2);
+    let mut y_plane = vec![0_u8; mb_w * mb_h];
+    let mut u_plane = vec![0_u8; uv_w * uv_h];
+    let mut v_plane = vec![0_u8; uv_w * uv_h];
+    for y in 0..mb_h {
+        for x in 0..mb_w {
+            let [r, g, b] = rgb(x.min(width - 1), y.min(height - 1));
+            y_plane[y * mb_w + x] = rgb_to_y(r, g, b);
+        }
+    }
+    let (cw, ch) = (width.div_ceil(2), height.div_ceil(2));
+    for cy in 0..uv_h {
+        for cx in 0..uv_w {
+            let (sx, sy) = (cx.min(cw - 1), cy.min(ch - 1));
+            let mut sum = [0_i32; 3];
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let px = rgb((2 * sx + dx).min(width - 1), (2 * sy + dy).min(height - 1));
+                    for (s, v) in sum.iter_mut().zip(px) {
+                        *s += v;
+                    }
+                }
+            }
+            let [r, g, b] = sum;
+            u_plane[cy * uv_w + cx] = clip_uv(-9719 * r - 19081 * g + 28800 * b);
+            v_plane[cy * uv_w + cx] = clip_uv(28800 * r - 24116 * g - 4684 * b);
+        }
+    }
+    let alpha = matches!(channels, 2 | 4).then(|| {
+        (0..width * height)
+            .map(|i| pixels[i * channels + channels - 1])
+            .collect()
+    });
+    let planes = crate::vp8::encode::Planes {
+        y: y_plane,
+        u: u_plane,
+        v: v_plane,
+        width,
+        height,
+    };
+    (planes, alpha)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rgb_to_yuv_and_back_lands_within_a_step_or_two() {
+        for &(r, g, b) in &[(0, 0, 0), (255, 255, 255), (200, 30, 90), (12, 180, 240)] {
+            let y = rgb_to_y(r, g, b);
+            let u = clip_uv(4 * (-9719 * r - 19081 * g + 28800 * b));
+            let v = clip_uv(4 * (28800 * r - 24116 * g - 4684 * b));
+            let back = yuv_to_rgb(y, u, v);
+            for (a, b) in back.iter().zip([r, g, b]) {
+                assert!(
+                    (i32::from(*a) - b).abs() <= 3,
+                    "{:?} -> {back:?}",
+                    (r, g, b)
+                );
+            }
+        }
+    }
 
     #[test]
     fn studio_range_extremes_map_to_black_and_white() {

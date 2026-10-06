@@ -13,7 +13,7 @@ implementation detail and may change without notice.
 | TIFF | ✅ | ✅ | own | yes; tiled TIFF = region random access |
 | JPEG (baseline) | ✅ | ✅ | own | yes |
 | JPEG (progressive) | ✅ | ❌ (v2) | wrapped | internal buffer |
-| WebP | ✅ | ✅ lossless only | wrapped | internal buffer |
+| WebP | ✅ | ✅ lossy and lossless | own (ADR-0014) | internal buffer |
 | AVIF | ✅ | ✅ | own | internal buffer |
 
 - Format detection is by magic bytes only; extensions and MIME are ignored.
@@ -22,10 +22,13 @@ implementation detail and may change without notice.
   skipped, not errors.
 - GIF v1 scope: full decode (all frames, disposal handled); encode is
   single-frame + palette quantization. Animation pipelines are v2.
-- WebP v1 scope: decode covers lossy and lossless; **encode is lossless
-  only**, because the wrapped encoder exposes no quality control, so
-  `EncodeOptions::quality` is ignored for WebP. Greyscale has no native WebP
-  mode and returns as RGB. Animation decodes to the first frame.
+- WebP v1 scope: decode covers lossy, lossless and alpha, owned and matching
+  libwebp exactly (colour conversion included). Encode is **lossy by default**
+  at `EncodeOptions::quality`, mapped to the quantizer as libwebp maps it,
+  and lossless with `EncodeOptions::lossless`; alpha is always coded
+  losslessly, even in a lossy file. Greyscale has no native WebP mode and
+  returns as RGB. Animation decodes to the first frame, placed on its canvas
+  as libwebp's animation decoder does.
 - AVIF v1 scope: owned outright, container and AV1 bitstream both (ADR-0013).
   Still images only — an AVIF still is an AV1 **key frame**, so inter-coded
   content is out of scope. Image *sequences* (the `avis` brand) are animation

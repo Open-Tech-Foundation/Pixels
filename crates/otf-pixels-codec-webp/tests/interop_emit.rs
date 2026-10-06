@@ -1,13 +1,14 @@
 //! Emits our own WebP files so libwebp can verify them.
 //!
-//! Our decoder cannot validate our encoder — both sit on the same wrapped
-//! crate, so a fault in it would round-trip perfectly and still produce a file
-//! nothing else reads. `tests/reference.rs` checks the decode direction
-//! against libwebp; this checks the encode direction, by handing libwebp our
-//! files.
+//! Our decoder cannot validate our encoder: a misreading of the format shared
+//! by both would round-trip perfectly and still produce files nothing else
+//! reads. So libwebp gets the last word, in two ways:
 //!
-//! The encoder is lossless, so the comparison is exact. That is the whole
-//! value of testing this direction here: there is no tolerance to hide behind.
+//! - Lossless files must decode, in libwebp, to exactly the pixels we put in.
+//! - Lossy files must decode, in libwebp, to exactly what our own decoder
+//!   makes of them — VP8 decoding is exact by specification, so any
+//!   difference is a bitstream one of us misreads — and their alpha, which
+//!   is coded losslessly, must come back exact.
 //!
 //! Inert unless `OTF_EMIT_DIR` is set, so an ordinary `cargo test` is
 //! unaffected. `scripts/check-webp-interop.sh` drives it.
@@ -20,8 +21,29 @@
     reason = "tests operate on known-good values and assert shapes directly"
 )]
 
-use otf_pixels_codec_webp::WebPEncoder;
-use otf_pixels_core::{Encoder, ImageDescriptor, PixelFormat};
+use otf_pixels_codec_webp::{WebPDecoder, WebPEncoder};
+use otf_pixels_core::{Decoder, EncodeOptions, Encoder, ImageDescriptor, Limits, PixelFormat};
+
+fn encode(descriptor: &ImageDescriptor, raster: &[u8], options: EncodeOptions) -> Vec<u8> {
+    let mut encoder = WebPEncoder::from_options(&options);
+    let mut webp: Vec<u8> = Vec::new();
+    encoder.write_header(descriptor, &mut webp).unwrap();
+    for row in raster.chunks_exact(descriptor.row_bytes()) {
+        encoder.write_row(row, &mut webp).unwrap();
+    }
+    encoder.finish(&mut webp).unwrap();
+    webp
+}
+
+fn decode(webp: &[u8]) -> Vec<u8> {
+    let mut decoder = WebPDecoder::new(webp, Limits::default()).unwrap();
+    let descriptor = decoder.descriptor();
+    let mut out = vec![0_u8; descriptor.row_bytes() * descriptor.height as usize];
+    for row in out.chunks_mut(descriptor.row_bytes()) {
+        decoder.read_row(row).unwrap();
+    }
+    out
+}
 
 #[test]
 fn emit_webp_for_external_verification() {
@@ -54,19 +76,36 @@ fn emit_webp_for_external_verification() {
             let descriptor = ImageDescriptor::new(width, height, format).unwrap();
             let raster = source_image(width, height, format);
 
-            let mut encoder = WebPEncoder::new();
-            let mut webp: Vec<u8> = Vec::new();
-            encoder.write_header(&descriptor, &mut webp).unwrap();
-            for row in raster.chunks_exact(descriptor.row_bytes()) {
-                encoder.write_row(row, &mut webp).unwrap();
-            }
-            encoder.finish(&mut webp).unwrap();
+            let lossless = EncodeOptions::default().with_lossless(true);
+            let webp = encode(&descriptor, &raster, lossless);
 
             let name = format!("{dir}/{width}x{height}_{kind}");
             std::fs::write(format!("{name}.webp"), &webp).unwrap();
             std::fs::write(format!("{name}.raw"), &raster).unwrap();
+
+            for quality in [10_u8, 80] {
+                let options = EncodeOptions::with_quality(quality).unwrap();
+                let raster = with_varying_alpha(raster.clone(), format);
+                let webp = encode(&descriptor, &raster, options);
+                let name = format!("{dir}/{width}x{height}_{kind}_lossy_q{quality}");
+                std::fs::write(format!("{name}.webp"), &webp).unwrap();
+                std::fs::write(format!("{name}.raw"), &raster).unwrap();
+                std::fs::write(format!("{name}.ours"), decode(&webp)).unwrap();
+            }
         }
     }
+}
+
+/// The same image with a gradient in its alpha channel, if it has one, so
+/// lossy files carry a real `ALPH` chunk rather than an opaque one dropped.
+fn with_varying_alpha(mut raster: Vec<u8>, format: PixelFormat) -> Vec<u8> {
+    let channels = format.channels();
+    if channels % 2 == 0 {
+        for (i, pixel) in raster.chunks_exact_mut(channels).enumerate() {
+            pixel[channels - 1] = (i * 7 % 256) as u8;
+        }
+    }
+    raster
 }
 
 /// A deterministic image with both flat runs and per-pixel variation, so the

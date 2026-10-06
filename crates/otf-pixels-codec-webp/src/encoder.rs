@@ -1,19 +1,27 @@
-//! The WebP encoder, wrapping `image-webp`.
+//! The WebP encoder.
 //!
-//! Lossless only — see the crate docs. [`EncodeOptions::quality`] is accepted
-//! and ignored, which is stated rather than hidden: silently producing a
-//! lossless file for a caller who asked for quality 60 is surprising, and the
-//! surprise belongs in the documentation rather than in the file size.
+//! Lossy by default, through the owned VP8 encoder at
+//! [`EncodeOptions::quality`]; [`EncodeOptions::lossless`] selects lossless,
+//! which still goes through `image-webp` until the owned VP8L encoder lands
+//! (ADR-0014). Either way the whole image is gathered first: both bitstreams
+//! make decisions over the whole picture before the first byte is final.
 
 use otf_pixels_core::{
     EncodeOptions, Encoder, ImageDescriptor, PixelFormat, PixelsError, Result, Sink,
 };
 
-/// Encodes a lossless WebP stream.
-#[derive(Debug, Default)]
+/// Encodes a WebP stream.
+#[derive(Debug)]
 pub struct WebPEncoder {
     /// Set by `write_header`; its presence means the header was written.
     state: Option<State>,
+    options: EncodeOptions,
+}
+
+impl Default for WebPEncoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Everything fixed once the descriptor is known.
@@ -28,19 +36,20 @@ struct State {
 }
 
 impl WebPEncoder {
-    /// An encoder with default settings.
+    /// An encoder with default settings: lossy at the default quality.
     #[must_use]
-    pub const fn new() -> Self {
-        Self { state: None }
+    pub fn new() -> Self {
+        Self::from_options(&EncodeOptions::default())
     }
 
-    /// An encoder configured from generic encode options.
-    ///
-    /// `options` carries only a quality, which lossless WebP has no notion of,
-    /// so nothing here reads it.
+    /// An encoder configured from generic encode options: lossy at
+    /// `quality`, or lossless when `lossless` is set.
     #[must_use]
-    pub const fn from_options(_options: &EncodeOptions) -> Self {
-        Self::new()
+    pub const fn from_options(options: &EncodeOptions) -> Self {
+        Self {
+            state: None,
+            options: *options,
+        }
     }
 }
 
@@ -132,18 +141,79 @@ impl Encoder for WebPEncoder {
             ));
         }
 
-        let mut bytes = Vec::new();
-        image_webp::WebPEncoder::new(&mut bytes)
-            .encode(
-                &state.pixels,
-                state.descriptor.width,
-                state.descriptor.height,
-                state.colour,
-            )
-            .map_err(encode_error)?;
+        let bytes = if self.options.lossless {
+            let mut bytes = Vec::new();
+            image_webp::WebPEncoder::new(&mut bytes)
+                .encode(
+                    &state.pixels,
+                    state.descriptor.width,
+                    state.descriptor.height,
+                    state.colour,
+                )
+                .map_err(encode_error)?;
+            bytes
+        } else {
+            encode_lossy(state, self.options.quality)?
+        };
         sink.write_all(&bytes)?;
         sink.flush()
     }
+}
+
+/// A RIFF chunk: FourCC, little-endian size, payload, pad to even.
+fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], payload: &[u8]) {
+    out.extend_from_slice(kind);
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(payload);
+    if payload.len() % 2 == 1 {
+        out.push(0);
+    }
+}
+
+/// Wrap chunks in the `RIFF`/`WEBP` header.
+fn riff(body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(body.len() + 12);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(body.len() as u32 + 4).to_le_bytes());
+    out.extend_from_slice(b"WEBP");
+    out.extend_from_slice(body);
+    out
+}
+
+/// Lossy WebP: a `VP8 ` frame, and when the image has any transparency, an
+/// extended file with an `ALPH` chunk ahead of it.
+fn encode_lossy(state: &State, quality: u8) -> Result<Vec<u8>> {
+    let (width, height) = (
+        state.descriptor.width as usize,
+        state.descriptor.height as usize,
+    );
+    let channels = state.descriptor.pixel.channels();
+    let (planes, alpha) = crate::yuv::from_rgb(&state.pixels, channels, width, height);
+    let vp8 = crate::vp8::encode::encode(
+        &planes,
+        crate::vp8::encode::Params::with_quality(quality.clamp(1, 100)),
+    )?;
+    // An opaque alpha channel is dropped: a simple file says the same thing
+    // in fewer bytes and every reader handles it.
+    let alpha = alpha.filter(|a| a.iter().any(|&v| v != 255));
+    let mut body = Vec::new();
+    match alpha {
+        None => chunk(&mut body, b"VP8 ", &vp8),
+        Some(alpha) => {
+            let mut vp8x = vec![0x10, 0, 0, 0];
+            vp8x.extend_from_slice(&(width as u32 - 1).to_le_bytes()[..3]);
+            vp8x.extend_from_slice(&(height as u32 - 1).to_le_bytes()[..3]);
+            chunk(&mut body, b"VP8X", &vp8x);
+            // Raw alpha, unfiltered; the owned lossless encoder will compress
+            // it once it lands.
+            let mut alph = Vec::with_capacity(alpha.len() + 1);
+            alph.push(0);
+            alph.extend_from_slice(&alpha);
+            chunk(&mut body, b"ALPH", &alph);
+            chunk(&mut body, b"VP8 ", &vp8);
+        }
+    }
+    Ok(riff(&body))
 }
 
 /// Translate the wrapped encoder's failure into this crate's error type.

@@ -120,8 +120,13 @@ impl Metadata {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct EncodeOptions {
-    /// Lossy quality, 1–100. Ignored by lossless formats.
+    /// Lossy quality, 1–100. Ignored by lossless formats, and by a format
+    /// with both modes when `lossless` is set.
     pub quality: u8,
+    /// For a format that has both a lossy and a lossless mode (WebP), choose
+    /// lossless. Off by default: such a format encodes lossy at `quality`,
+    /// as `cwebp` and sharp do. Formats with one mode ignore it.
+    pub lossless: bool,
 }
 
 impl EncodeOptions {
@@ -140,7 +145,17 @@ impl EncodeOptions {
                 format!("must be in 1..=100, got {quality}"),
             ));
         }
-        Ok(Self { quality })
+        Ok(Self {
+            quality,
+            ..Self::default()
+        })
+    }
+
+    /// These options with `lossless` replaced.
+    #[must_use]
+    pub const fn with_lossless(mut self, lossless: bool) -> Self {
+        self.lossless = lossless;
+        self
     }
 }
 
@@ -148,6 +163,7 @@ impl Default for EncodeOptions {
     fn default() -> Self {
         Self {
             quality: Self::DEFAULT_QUALITY,
+            lossless: false,
         }
     }
 }

@@ -39,6 +39,9 @@ versioning: [SemVer](https://semver.org/).
   with it rather than failing to build.
 
 ### Changed
+- WebP output is now **lossy by default**, at `EncodeOptions::quality`
+  (default 80), as with `cwebp` and sharp; set `EncodeOptions::lossless` for
+  the lossless output that was previously the only kind.
 - `otf-pixels-codec-avif`: `StillPicture` records every tile group
   (`tile_groups`, `tile_group_data`) in place of one `tile_data_offset`/
   `tile_data_len` range, and `decode_still` takes the tile groups' bytes.
@@ -143,6 +146,18 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- Lossy WebP output. An owned VP8 encoder writes WebP at
+  `EncodeOptions::quality`, mapped to the quantizer as libwebp maps it,
+  choosing 16x16 or 4x4 prediction and chroma modes per macroblock by
+  rate-distortion cost and rewriting the coefficient probabilities for what
+  it chose. Alpha goes in an `ALPH` chunk, losslessly. Every file is checked
+  by libwebp, which must decode it to exactly what our decoder does; size and
+  PSNR are on par with libwebp's own encoder at equal quality on the test
+  images. Encoder options (token partitions, simple filter, sharpness,
+  segments, filter deltas) also put the decoder's remaining paths under
+  libwebp's check.
+- `EncodeOptions::lossless` (and `with_lossless`): for a format with both
+  modes, choose lossless.
 - `otf-pixels-codec-webp`: animated files decode their first frame through
   the owned decoders, placed on the canvas as libwebp's animation decoder
   does (a transparent-black canvas, the key frame written unblended), so
