@@ -143,6 +143,16 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- `otf-pixels-codec-webp`: an owned VP8 (lossy) key-frame decoder, `ALPH`
+  alpha decoding, and libwebp's YUV-to-RGB conversion (its "fancy" chroma
+  upsampler and fixed-point BT.601 matrix), so lossy stills now decode
+  through owned code and match libwebp byte for byte rather than within a
+  tolerance. The VP8 probability and quantizer tables are generated from the
+  reference decoder attached to RFC 6386 (`scripts/generate-vp8-tables.py`)
+  and checked in CI. A 19-file lossy corpus — qualities 0 to 100, every
+  segment map, 4x4 and 16x16 prediction, loop-filter levels 0 to 63,
+  quantized and lossless alpha, 1x1 and one-pixel-wide images — decodes
+  exactly as libwebp does. Only animations still go through `image-webp`.
 - ADR-0014: own WebP, lossy and lossless, decode and encode, and remove
   `image-webp`. The wrapped encoder can only write lossless WebP, and lossy
   WebP output with quality control is one of the things an image API is

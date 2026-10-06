@@ -149,6 +149,76 @@ LOSSLESS = {
 }
 
 
+def flat(width: int, height: int, alpha: bool) -> Image.Image:
+    """Two solid colour fields and one small checkerboard in a corner, so most
+    macroblocks have nothing to code."""
+    mode = "RGBA" if alpha else "RGB"
+    image = Image.new(mode, (width, height), (90, 140, 200, 255) if alpha else (90, 140, 200))
+    pixels = image.load()
+    for y in range(height):
+        for x in range(width):
+            if x >= width // 2:
+                pixels[x, y] = (200, 120, 40, 128) if alpha else (200, 120, 40)
+            if x < 12 and y < 12 and (x // 3 + y // 3) % 2 == 0:
+                pixels[x, y] = (10, 10, 10, 255) if alpha else (10, 10, 10)
+    return image
+
+
+# Lossy decode corpus: name -> (image, quality, method, alpha_quality). The
+# quality sweep moves libwebp's loop-filter level, segment quantizers and
+# skip decisions; the methods change its mode search (16x16 versus 4x4
+# prediction); alpha quality moves the ALPH chunk between lossless-coded and
+# quantized. The reference is libwebp's own decode, to RGB through its fancy
+# upsampler, and ours must match it exactly.
+LOSSY = {
+    "smooth_q0": (noise(96, 64, 30, smooth=True), 0, 4, 100),
+    "smooth_q30": (noise(96, 64, 31, smooth=True), 30, 4, 100),
+    "smooth_q75_m0": (noise(96, 64, 32, smooth=True), 75, 0, 100),
+    "smooth_q95_m6": (noise(96, 64, 33, smooth=True), 95, 6, 100),
+    "noise_q50": (noise(64, 48, 34), 50, 4, 100),
+    "noise_q100": (noise(64, 48, 35), 100, 6, 100),
+    "blocks_q60": (blocks(80, 56, False), 60, 4, 100),
+    "palette_q85": (palette_image(70, 50, 16, 36), 85, 4, 100),
+    "odd_q70": (noise(37, 23, 37, smooth=True), 70, 4, 100),
+    "pixel_q50": (noise(1, 1, 38), 50, 4, 100),
+    "column_q50": (noise(1, 41, 39, smooth=True), 50, 4, 100),
+    "row_q50": (noise(41, 1, 40, smooth=True), 50, 4, 100),
+    "large_q80": (Image.composite(noise(384, 256, 41, smooth=True), noise(384, 256, 42),
+                                  palette_image(384, 256, 2, 43).convert("L")), 80, 4, 100),
+    "alpha_q80_a100": (noise(80, 50, 44, alpha=True, smooth=True), 80, 4, 100),
+    "alpha_q80_a50": (noise(80, 50, 45, alpha=True, smooth=True), 80, 4, 50),
+    "alpha_q40_a0": (noise(45, 31, 46, alpha=True, smooth=True), 40, 6, 0),
+    "alpha_blocks_q70": (blocks(45, 29, True), 70, 2, 90),
+    # Large flat areas, where libwebp codes most macroblocks as skipped.
+    "flat_q50": (flat(160, 112, False), 50, 4, 100),
+    "flat_alpha_q75": (flat(96, 80, True), 75, 6, 100),
+}
+
+
+def write_lossy(fixtures: str) -> None:
+    directory = os.path.join(fixtures, "lossy")
+    os.makedirs(directory, exist_ok=True)
+    manifest = [
+        "# Regenerate with scripts/regenerate-webp-reference.py",
+        "# name width height channels",
+    ]
+    for name, (image, quality, method, alpha_quality) in sorted(LOSSY.items()):
+        path = os.path.join(directory, f"{name}.webp")
+        image.save(path, "WEBP", quality=quality, method=method, alpha_quality=alpha_quality)
+        with Image.open(path) as decoded:
+            decoded.load()
+            mode = decoded.mode
+            raster = decoded.tobytes()
+            width, height = decoded.size
+        channels = {"RGB": 3, "RGBA": 4}[mode]
+        with open(os.path.join(directory, f"{name}.raw"), "wb") as out:
+            out.write(raster)
+        manifest.append(f"{name} {width} {height} {channels}")
+        print(f"lossy/{name}: {width}x{height}x{channels}, {os.path.getsize(path)} bytes")
+    with open(os.path.join(directory, "REFERENCE"), "w") as out:
+        out.write("\n".join(manifest) + "\n")
+
+
 def write_lossless(fixtures: str) -> None:
     directory = os.path.join(fixtures, "lossless")
     os.makedirs(directory, exist_ok=True)
@@ -208,6 +278,7 @@ def main() -> int:
     with open(os.path.join(args.fixtures, "REFERENCE"), "w") as out:
         out.write("\n".join(manifest) + "\n")
     write_lossless(args.fixtures)
+    write_lossy(args.fixtures)
     return 0
 
 

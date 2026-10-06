@@ -58,6 +58,13 @@ jobs:
           python3 scripts/generate-av1-qm-tables.py
           git diff --exit-code -- crates/otf-pixels-codec-avif/src/av1/qm_tables.rs
 
+      # The VP8 probability and quantizer tables are generated from the
+      # reference decoder source attached to RFC 6386.
+      - name: generated VP8 tables are current
+        run: |
+          python3 scripts/generate-vp8-tables.py
+          git diff --exit-code -- crates/otf-pixels-codec-webp/src/vp8/tables.rs
+
   docs:
     name: docs
     runs-on: ubuntu-latest

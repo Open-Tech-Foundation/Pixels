@@ -1,8 +1,9 @@
 //! The WebP decoder.
 //!
-//! The container is parsed here (`riff`) and lossless stills decode through
-//! the owned VP8L decoder (`vp8l`). Lossy and animated images still go
-//! through `image-webp` until their owned layers land (ADR-0014).
+//! The container is parsed here (`riff`); still images decode through the
+//! owned VP8L (`vp8l`) and VP8 (`vp8`) decoders, with `ALPH` alpha (`alpha`)
+//! and libwebp's YUV-to-RGB conversion (`yuv`). Animations still go through
+//! `image-webp` until their first-frame compositing is owned (ADR-0014).
 
 use otf_pixels_core::{
     Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, Orientation, PixelFormat,
@@ -69,10 +70,15 @@ impl WebPDecoder {
             .exif
             .and_then(Orientation::from_exif_block)
             .unwrap_or_default();
-        if let (crate::riff::Bitstream::Lossless(stream), false) =
-            (container.bitstream, container.animated)
-        {
-            return Self::lossless(stream, &container, orientation, &limits);
+        if !container.animated {
+            return match container.bitstream {
+                crate::riff::Bitstream::Lossless(stream) => {
+                    Self::lossless(stream, &container, orientation, &limits)
+                }
+                crate::riff::Bitstream::Lossy { vp8, alpha } => {
+                    Self::lossy(vp8, alpha, &container, orientation, &limits)
+                }
+            };
         }
 
         let mut decoder =
@@ -138,6 +144,57 @@ impl WebPDecoder {
             let [blue, green, red, alpha] = p.to_le_bytes();
             pixels.extend_from_slice([red, green, blue, alpha].get(..channels).unwrap_or(&[]));
         }
+        Ok(Self {
+            descriptor,
+            pixels,
+            row: 0,
+            orientation,
+        })
+    }
+}
+
+impl WebPDecoder {
+    /// A lossy still, through the owned VP8 decoder and `ALPH` alpha.
+    fn lossy(
+        vp8: &[u8],
+        alpha: Option<&[u8]>,
+        container: &crate::riff::Container<'_>,
+        orientation: Orientation,
+        limits: &Limits,
+    ) -> Result<Self> {
+        let pixel = if container.has_alpha {
+            PixelFormat::Rgba8
+        } else {
+            PixelFormat::Rgb8
+        };
+        // Enforced before any plane is allocated (SPEC §Safety).
+        let descriptor =
+            ImageDescriptor::with_limits(container.width, container.height, pixel, limits)?;
+        let (width, height) = (container.width as usize, container.height as usize);
+        let frame = crate::vp8::decode(vp8)?;
+        if (frame.width, frame.height) != (width, height) {
+            return Err(PixelsError::malformed(
+                "webp",
+                "the VP8 frame's size differs from the container's",
+            ));
+        }
+        // An extended file may declare alpha without an ALPH chunk; it is
+        // then opaque, as libwebp reports it.
+        let alpha = match (container.has_alpha, alpha) {
+            (false, _) => None,
+            (true, Some(chunk)) => Some(crate::alpha::decode(chunk, width, height)?),
+            (true, None) => Some(vec![255; width * height]),
+        };
+        let pixels = crate::yuv::to_rgb(
+            &frame.y,
+            frame.y_stride,
+            &frame.u,
+            &frame.v,
+            frame.uv_stride,
+            width,
+            height,
+            alpha.as_deref(),
+        );
         Ok(Self {
             descriptor,
             pixels,
