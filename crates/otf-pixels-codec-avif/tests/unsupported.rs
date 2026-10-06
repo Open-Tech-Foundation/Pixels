@@ -23,7 +23,6 @@ use otf_pixels_core::{Decoder, ErrorCode, Limits};
 
 /// `(fixture, fragment the refusal must mention)`.
 const CASES: &[(&str, &str)] = &[
-    ("delta_q", "delta_q"),
     ("qmatrix", "quantizer matrices"),
     ("premultiplied", "premultiplied alpha"),
     ("ycgco", "colour matrix 8"),

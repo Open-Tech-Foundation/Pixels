@@ -18,6 +18,7 @@
 
 use super::frame::LoopFilter;
 use super::plane::Plane;
+use super::tile::FRAME_LF_COUNT;
 use super::transform::TxSize;
 
 /// `MI_SIZE` (§3): the side of the smallest coded block, in samples.
@@ -51,13 +52,19 @@ pub struct Deblock<'a> {
     /// index) reconstructed at each 4x4 unit of the plane, one grid per plane,
     /// each `mi_cols` wide.
     pub lf_tx_sizes: &'a [Vec<u8>],
+    /// `DeltaLFs[row][col]`: the per-block loop-filter deltas, all zero unless
+    /// `delta_lf_present`.
+    pub delta_lfs: &'a [[i8; FRAME_LF_COUNT]],
+    /// `delta_lf_multi`: one delta per filter level rather than one shared.
+    pub delta_lf_multi: bool,
 }
 
 // A full inter-capable filter would also read `Skips`, `MiSizes` (for the block
-// edge test) and `YModes`/`RefFrames`/`SegmentIds`/`DeltaLFs` (for the strength
-// derivation). In this all-intra 4:4:4 subset those collapse to constants:
+// edge test) and `YModes`/`RefFrames`/`SegmentIds` (for the strength
+// derivation). In this all-intra subset those collapse to constants:
 // `applyFilter` is just the transform-edge test and the strength comes from the
-// frame `loop_filter` level plus the intra reference delta, so they are omitted.
+// frame `loop_filter` level, the block's `DeltaLFs` and the intra reference
+// delta, so they are omitted.
 
 impl Deblock<'_> {
     /// Apply the loop filter to every plane (§7.14.1): all vertical boundaries,
@@ -210,20 +217,31 @@ impl Deblock<'_> {
         }
     }
 
-    /// Adaptive filter strength process (§7.14.4/§7.14.5). Segment id and the
-    /// per-block loop-filter delta are always zero in this subset, and every
-    /// block is intra, so the strength comes from `loop_filter_level` plus the
+    /// Adaptive filter strength process (§7.14.4/§7.14.5). Segment id is
+    /// always zero in this subset and every block is intra, so the strength
+    /// comes from `loop_filter_level`, the block's `DeltaLFs` entry and the
     /// intra reference delta.
     fn filter_strength(
         &self,
-        _row: usize,
-        _col: usize,
+        row: usize,
+        col: usize,
         plane: usize,
         pass: usize,
     ) -> (i32, i32, i32, i32) {
         let i = if plane == 0 { pass } else { plane + 1 };
         let base = self.loop_filter.level.get(i).copied().unwrap_or(0);
-        let mut lvl = i32::from(base).clamp(0, MAX_LOOP_FILTER);
+        let deltas = row
+            .checked_mul(self.mi_cols)
+            .and_then(|at| at.checked_add(col))
+            .and_then(|at| self.delta_lfs.get(at))
+            .copied()
+            .unwrap_or_default();
+        let delta = if self.delta_lf_multi {
+            deltas.get(i).copied().unwrap_or(0)
+        } else {
+            deltas.first().copied().unwrap_or(0)
+        };
+        let mut lvl = (i32::from(base) + i32::from(delta)).clamp(0, MAX_LOOP_FILTER);
         if self.loop_filter.delta_enabled {
             // ref == INTRA_FRAME (0) for every block; the mode delta applies only
             // to inter modes, so it never contributes here.
@@ -517,6 +535,8 @@ mod tests {
             frame_width: w,
             frame_height: h,
             lf_tx_sizes: std::slice::from_ref(&grid),
+            delta_lfs: &[],
+            delta_lf_multi: false,
         }
         .run();
         assert_eq!(planes[0].row(0), before.row(0));
@@ -552,6 +572,8 @@ mod tests {
             frame_width: w,
             frame_height: h,
             lf_tx_sizes: std::slice::from_ref(&grid),
+            delta_lfs: &[],
+            delta_lf_multi: false,
         }
         .run();
         assert_eq!(planes[0].row(0), before.row(0));
@@ -592,12 +614,71 @@ mod tests {
             frame_width: w,
             frame_height: h,
             lf_tx_sizes: &grids,
+            delta_lfs: &[],
+            delta_lf_multi: false,
         }
         .run();
         let u = planes[1].row(5).unwrap();
         assert!(u[7] > 100 && u[8] < 140, "edge on the tx grid: {u:?}");
         let v = planes[2].row(5).unwrap();
         assert_eq!((v[3], v[4]), (100, 140), "edge inside a transform: {v:?}");
+    }
+
+    /// Filter a vertical step edge at x = 8 with every 4x4 unit carrying
+    /// `deltas`, and report whether the edge moved.
+    fn step_edge_filtered(deltas: [i8; FRAME_LF_COUNT], multi: bool) -> bool {
+        let (w, h) = (16, 16);
+        let mut plane = Plane::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                plane.set(x, y, if x < 8 { 100 } else { 140 });
+            }
+        }
+        let grid = vec![1_u8; (w / MI_SIZE) * (h / MI_SIZE)];
+        let delta_lfs = vec![deltas; (w / MI_SIZE) * (h / MI_SIZE)];
+        // No reference delta, so a level the block delta zeroes stays zero.
+        let loop_filter = LoopFilter {
+            delta_enabled: false,
+            ..lf([32, 32, 0, 0])
+        };
+        let mut planes = [plane];
+        Deblock {
+            planes: &mut planes,
+            loop_filter: &loop_filter,
+            bit_depth: 8,
+            num_planes: 1,
+            subsampling_x: 0,
+            subsampling_y: 0,
+            mi_rows: h / MI_SIZE,
+            mi_cols: w / MI_SIZE,
+            frame_width: w,
+            frame_height: h,
+            lf_tx_sizes: std::slice::from_ref(&grid),
+            delta_lfs: &delta_lfs,
+            delta_lf_multi: multi,
+        }
+        .run();
+        let row = planes[0].row(4).unwrap();
+        (row[7], row[8]) != (100, 140)
+    }
+
+    #[test]
+    fn a_block_delta_moves_the_filter_level() {
+        assert!(step_edge_filtered([0; FRAME_LF_COUNT], false));
+        // -32 cancels the frame level of 32 exactly.
+        assert!(!step_edge_filtered([-32, 0, 0, 0], false));
+        // A positive delta past the maximum is clipped, not wrapped.
+        assert!(step_edge_filtered([63, 0, 0, 0], false));
+    }
+
+    #[test]
+    fn delta_lf_multi_picks_the_delta_for_the_edge_direction() {
+        // A vertical edge is filtered in the first (vertical) pass, so with
+        // `delta_lf_multi` only DeltaLF[0] reaches it.
+        assert!(!step_edge_filtered([-32, 0, 0, 0], true));
+        assert!(step_edge_filtered([0, -32, 0, 0], true));
+        // Without it, DeltaLF[0] is shared and the others are never read.
+        assert!(step_edge_filtered([0, -32, -32, -32], false));
     }
 
     #[test]
@@ -623,6 +704,8 @@ mod tests {
             frame_width: w,
             frame_height: h,
             lf_tx_sizes: std::slice::from_ref(&grid),
+            delta_lfs: &[],
+            delta_lf_multi: false,
         }
         .run();
         // The last "left" sample rose and the first "right" sample fell.

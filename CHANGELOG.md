@@ -137,6 +137,13 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- AVIF per-superblock quantizer and loop-filter deltas (`delta_q`,
+  `delta_lf`). libaom's key-frame visual-quality mode (`deltaq-mode=3`) sets
+  them, so files that were refused as `Unsupported` now decode. `CurrentQIndex`
+  drives dequantisation block by block, and each block's `DeltaLF` moves its
+  deblocking strength, singly or per filter level with `delta_lf_multi`. Four
+  plane fixtures (4:2:0, 10-bit 4:4:4, monochrome) match libaom exactly, and a
+  4:2:0 photo matches libavif's RGB through the facade.
 - Auto-orientation, on by default as SPEC always said it was. `Image::open`
   and `Image::from_stream` turn an image upright as its metadata declares
   before any op runs: EXIF `Orientation` in JPEG, TIFF, PNG (`eXIf`) and WebP,

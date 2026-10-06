@@ -175,6 +175,9 @@ FIXTURES = {
     "photo_444": (mixed(96, 64, 3), False, 0, "", 1),
     "photo_420_bt709_studio": (mixed(96, 64, 3), False, 0, "", 5),
     "photo_420_bt2020": (mixed(96, 64, 3), False, 0, "", 2),
+    # Per-superblock quantizer and loop-filter deltas, end to end; large enough
+    # that the encoder actually varies the quantizer.
+    "photo_420_deltaq": (mixed(256, 192, 3), False, 0, "", 2),
     # 10- and 12-bit: decoded to 16-bit RGB over the full 0..=65535 range.
     # Here libavif converts in floating point rather than through libyuv, and
     # we agree on 99% of samples and within one 16-bit step on the rest — the
@@ -232,6 +235,10 @@ PHOTO_ARGS = {
     "photo_444": ["-y", "444", "-q", "60"],
     "photo_420_bt709_studio": ["-y", "420", "-q", "60", "--cicp", "1/13/1", "-r", "limited"],
     "photo_420_bt2020": ["-y", "420", "-q", "60", "--cicp", "9/16/9"],
+    "photo_420_deltaq": [
+        "-y", "420", "-q", "60",
+        "-a", "deltaq-mode=3", "-a", "enable-tpl-model=0", "-a", "delta-lf-mode=1",
+    ],
     "photo_420_10bit": ["-d", "10", "-y", "420", "-q", "60"],
     "photo_420_10bit_studio": ["-d", "10", "-y", "420", "-q", "60", "--cicp", "1/13/1", "-r", "limited"],
     "photo_444_12bit": ["-d", "12", "-y", "444", "-q", "60"],
@@ -637,9 +644,13 @@ FILTERS_OFF = [
     "-a", "enable-cdef=0", "-a", "enable-restoration=0", "-a", "loopfilter-control=0",
     "-a", "deltaq-mode=0", "-a", "enable-tpl-model=0",
 ]
-# Every in-loop filter left at the encoder's default (on); only the per-block
-# quantizer deltas the decoder does not implement are turned off.
+# Every in-loop filter left at the encoder's default (on), and per-superblock
+# quantizer deltas off so the fixtures below isolate them.
 FILTERS_ON = ["-a", "deltaq-mode=0", "-a", "enable-tpl-model=0"]
+# Per-superblock quantizer deltas (key-frame visual quality mode), with every
+# in-loop filter on; DELTA_LF adds the per-superblock loop-filter deltas.
+DELTA_Q = ["-a", "deltaq-mode=3", "-a", "enable-tpl-model=0"]
+DELTA_LF = [*DELTA_Q, "-a", "delta-lf-mode=1"]
 PLANES = {
     # 4:2:0 with every filter off, then with them all on (speed 4 also reaches
     # restoration and the 4x16/16x4 shapes); the odd sizes put blocks — and a
@@ -667,6 +678,15 @@ PLANES = {
     "blocks_420_10bit_palette": (blocks(90, 70), ["-d", "10", "-y", "420", "-q", "40", "-s", "6", *FILTERS_ON]),
     # 128x128 superblocks holding 128-wide blocks: the 64x64 residual chunks.
     "soft_420_sb128": (soft(136, 72), ["-y", "420", "-q", "5", "-s", "4", "-a", "sb-size=128", *FILTERS_ON]),
+    # delta_q moves the quantizer per superblock; delta_lf moves the deblocking
+    # strength per superblock, which the loop filter then reads per block.
+    "mixed_420_deltaq": (mixed(256, 192, 3), ["-y", "420", "-q", "50", "-s", "4", *DELTA_Q]),
+    "mixed_420_deltalf": (mixed(256, 192, 3), ["-y", "420", "-q", "50", "-s", "4", *DELTA_LF]),
+    "textured_444_10bit_deltalf": (
+        textured(99, 70),
+        ["-d", "10", "-y", "444", "-q", "40", "-s", "4", *DELTA_LF],
+    ),
+    "textured_400_deltalf": (textured(128, 96), ["-y", "400", "-q", "50", "-s", "4", *DELTA_LF]),
 }
 
 
@@ -723,7 +743,6 @@ def write_planes(fixtures: str) -> None:
 # the identity matrix unless the tool under test is the colour format itself.
 IDENTITY_444 = ["-y", "444", "-r", "full", "--cicp", "1/13/0", "-q", "60"]
 UNSUPPORTED = {
-    "delta_q": (mixed(128, 64, 3), [*IDENTITY_444, "-a", "deltaq-mode=3"]),
     "qmatrix": (textured(64, 64), [*IDENTITY_444, "-a", "enable-qm=1"]),
     "premultiplied": (with_alpha(textured(32, 32)), ["-q", "60", "--premultiply"]),
     "ycgco": (textured(32, 32), ["-y", "444", "-q", "60", "--cicp", "1/13/8"]),

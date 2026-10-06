@@ -42,6 +42,22 @@ const CASES: &[(&str, (u8, u8))] = &[
     // Monochrome signals 4:2:0 subsampling but codes no chroma planes.
     ("textured_odd_400", (1, 1)),
     ("blocks_400_palette", (1, 1)),
+    // Per-superblock quantizer and loop-filter deltas.
+    ("mixed_420_deltaq", (1, 1)),
+    ("mixed_420_deltalf", (1, 1)),
+    ("textured_444_10bit_deltalf", (0, 0)),
+    ("textured_400_deltalf", (1, 1)),
+];
+
+/// Fixtures that exist to exercise a frame-header tool, with the
+/// `(delta_q_present, delta_lf_present)` each must actually carry: an encoder
+/// that stopped emitting the tool would otherwise leave the case passing on
+/// easier ground.
+const DELTA_TOOLS: &[(&str, (bool, bool))] = &[
+    ("mixed_420_deltaq", (true, false)),
+    ("mixed_420_deltalf", (true, true)),
+    ("textured_444_10bit_deltalf", (true, true)),
+    ("textured_400_deltalf", (true, true)),
 ];
 
 fn fixture_dir() -> String {
@@ -115,6 +131,20 @@ fn decoded_planes_match_libaom() {
             offset * bytes,
             theirs.len(),
             "{name}: reference plane sizes"
+        );
+    }
+}
+
+#[test]
+fn delta_fixtures_carry_the_tools_they_test() {
+    for &(name, expected) in DELTA_TOOLS {
+        let file = std::fs::read(format!("{}/{name}.avif", fixture_dir())).unwrap();
+        let (frame_data, config_obus) = primary_frame(&file);
+        let still = StillPicture::parse(&config_obus, &frame_data).unwrap();
+        assert_eq!(
+            (still.frame.delta_q_present, still.frame.delta_lf_present),
+            expected,
+            "{name}"
         );
     }
 }

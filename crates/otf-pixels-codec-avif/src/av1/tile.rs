@@ -50,6 +50,13 @@ use otf_pixels_core::{PixelsError, Result};
 
 /// `MI_SIZE` (§3): the side of the smallest coded block, in samples.
 const MI_SIZE: usize = 4;
+/// `FRAME_LF_COUNT` (§3): loop-filter levels — two luma directions, U, V.
+pub const FRAME_LF_COUNT: usize = 4;
+/// `DELTA_Q_SMALL` and `DELTA_LF_SMALL` (§3), which are equal: the symbol
+/// value that escapes to an explicitly sized literal.
+const DELTA_SMALL: i32 = 3;
+/// `MAX_LOOP_FILTER` (§3).
+const MAX_LOOP_FILTER: i32 = 63;
 /// `DC_PRED` mode index.
 const DC_PRED: usize = 0;
 /// `UV_CFL_PRED`: the chroma-from-luma UV mode, one past the intra modes.
@@ -143,16 +150,11 @@ fn unimplemented_filters_off(frame: &FrameHeader) -> bool {
 
 /// The first coding tool `frame` switches on that the tile decoder does not
 /// implement, if any. Each of these changes what is *coded* — extra symbols
-/// (`segment_id`, `delta_qindex`, `delta_lf`) or a different dequantisation
-/// (quantizer matrices) — so decoding past one without it produces a wrong
-/// image with no error.
+/// (`segment_id`) or a different dequantisation (quantizer matrices) — so
+/// decoding past one without it produces a wrong image with no error.
 fn unimplemented_tool(frame: &FrameHeader) -> Option<&'static str> {
     if frame.segmentation.enabled {
         Some("segmentation")
-    } else if frame.delta_q_present {
-        Some("per-superblock quantizer deltas (delta_q)")
-    } else if frame.delta_lf_present {
-        Some("per-superblock loop-filter deltas (delta_lf)")
     } else if frame.quantization.using_qmatrix {
         Some("quantizer matrices")
     } else {
@@ -230,6 +232,10 @@ struct FrameCdfs {
     restoration_type: [u16; 4],
     use_wiener: [u16; 3],
     use_sgrproj: [u16; 3],
+    delta_q: [u16; 5],
+    delta_lf: [u16; 5],
+    /// `DeltaLFMultiCdf[i]`, one per loop-filter level when `delta_lf_multi`.
+    delta_lf_multi: [[u16; 5]; FRAME_LF_COUNT],
 }
 
 /// The seven palette colour-index CDFs, one per palette size 2..=8.
@@ -303,6 +309,9 @@ impl FrameCdfs {
             restoration_type: cdf::DEFAULT_RESTORATION_TYPE_CDF,
             use_wiener: cdf::DEFAULT_USE_WIENER_CDF,
             use_sgrproj: cdf::DEFAULT_USE_SGRPROJ_CDF,
+            delta_q: cdf::DEFAULT_DELTA_Q_CDF,
+            delta_lf: cdf::DEFAULT_DELTA_LF_CDF,
+            delta_lf_multi: [cdf::DEFAULT_DELTA_LF_CDF; FRAME_LF_COUNT],
         }
     }
 }
@@ -337,10 +346,28 @@ struct TileState {
     lossless: bool,
     /// The frame transform mode (`ONLY_4X4` / `LARGEST` / `SELECT`).
     tx_mode: TxMode,
-    /// Per-plane DC quantiser index (`base_q_idx + delta`, unclamped).
+    /// Per-plane DC quantiser offset from the block's qindex (`DeltaQYDc`,
+    /// `DeltaQUDc`, `DeltaQVDc`).
     q_dc: [i32; 3],
-    /// Per-plane AC quantiser index.
+    /// Per-plane AC quantiser offset (zero for luma).
     q_ac: [i32; 3],
+    /// `CurrentQIndex` (§5.11.12): `base_q_idx`, moved by each `delta_qindex`
+    /// when `delta_q_present`. Never 0 once moved, so never lossless.
+    current_qindex: i32,
+    /// `delta_q_present`, `delta_q_res` (§5.9.17).
+    delta_q_present: bool,
+    delta_q_res: u32,
+    /// `delta_lf_present`, `delta_lf_res`, `delta_lf_multi` (§5.9.18).
+    delta_lf_present: bool,
+    delta_lf_res: u32,
+    delta_lf_multi: bool,
+    /// `ReadDeltas`: set at each superblock, cleared by its first block.
+    read_deltas: bool,
+    /// `DeltaLF[i]`: the running loop-filter deltas, reset per tile.
+    delta_lf: [i8; FRAME_LF_COUNT],
+    /// `DeltaLFs[r][c]`: each 4x4 unit's `DeltaLF` when its block was decoded,
+    /// which the deblocking filter reads for the strength (§7.14.4).
+    delta_lfs: Vec<[i8; FRAME_LF_COUNT]>,
     /// `InterTxSizes[r][c]`: the luma transform size (a `TxSize` index) chosen
     /// for each 4x4 unit, for the `tx_depth` neighbour context under `SELECT`.
     tx_sizes: Vec<u8>,
@@ -471,12 +498,17 @@ impl TileState {
             qindex_positive: frame.quantization.base_q_idx > 0,
             lossless: frame.coded_lossless,
             tx_mode: frame.tx_mode,
-            q_dc: [
-                base_q + q.delta_q_y_dc,
-                base_q + q.delta_q_u_dc,
-                base_q + q.delta_q_v_dc,
-            ],
-            q_ac: [base_q, base_q + q.delta_q_u_ac, base_q + q.delta_q_v_ac],
+            q_dc: [q.delta_q_y_dc, q.delta_q_u_dc, q.delta_q_v_dc],
+            q_ac: [0, q.delta_q_u_ac, q.delta_q_v_ac],
+            current_qindex: base_q,
+            delta_q_present: frame.delta_q_present,
+            delta_q_res: frame.delta_q_res,
+            delta_lf_present: frame.delta_lf_present,
+            delta_lf_res: frame.delta_lf_res,
+            delta_lf_multi: frame.delta_lf_multi,
+            read_deltas: false,
+            delta_lf: [0; FRAME_LF_COUNT],
+            delta_lfs: vec![[0; FRAME_LF_COUNT]; mi_cols * mi_rows],
             tx_sizes: vec![0; mi_cols * mi_rows],
             lf_tx_sizes: [
                 vec![0; mi_cols * mi_rows],
@@ -529,6 +561,7 @@ impl TileState {
             self.reset_left_context();
             let mut sb_col = 0;
             while sb_col < self.mi_cols {
+                self.read_deltas = self.delta_q_present;
                 self.clear_block_decoded(sb_row, sb_col);
                 self.read_lr(&mut dec, sb_row, sb_col)?;
                 self.decode_partition(&mut dec, sb_row, sb_col, sb_size4)?;
@@ -584,6 +617,8 @@ impl TileState {
             frame_width: self.frame_width,
             frame_height: self.frame_height,
             lf_tx_sizes: &self.lf_tx_sizes,
+            delta_lfs: &self.delta_lfs,
+            delta_lf_multi: self.delta_lf_multi,
         }
         .run();
     }
@@ -934,10 +969,20 @@ impl TileState {
         // --- intra_frame_mode_info (lossless key-frame subset) ---
         let skip = self.read_skip(dec, r, c, avail_u, avail_l)?;
 
-        // read_cdef (§5.11.56) sits right after read_skip; segment id and the
-        // delta-q/delta-lf reads that surround it in the spec are all absent in
-        // this subset.
+        // read_cdef (§5.11.56) sits right after read_skip, then the
+        // superblock's quantizer and loop-filter deltas; segment id is absent
+        // in this subset.
         self.read_cdef(dec, r, c, bw4, bh4, skip)?;
+        self.read_delta_qindex(dec, bw4, bh4, skip)?;
+        self.read_delta_lf(dec, bw4, bh4, skip)?;
+        self.read_deltas = false;
+        for row in r..(r + bh4).min(self.mi_rows) {
+            for col in c..(c + bw4).min(self.mi_cols) {
+                if let Some(slot) = self.delta_lfs.get_mut(row * self.mi_cols + col) {
+                    *slot = self.delta_lf;
+                }
+            }
+        }
 
         let y_mode = self.read_intra_frame_y_mode(dec, r, c, avail_u, avail_l)?;
         let y_delta = self.read_angle_delta(dec, y_mode, bw4, bh4)?;
@@ -1076,6 +1121,66 @@ impl TileState {
                 j += cdef_size4;
             }
             i += cdef_size4;
+        }
+        Ok(())
+    }
+
+    /// `read_delta_qindex` (§5.11.12): the first block of a superblock may move
+    /// `CurrentQIndex`, unless it covers the whole superblock and is skipped
+    /// (it then has no coefficients for a quantizer to matter to).
+    fn read_delta_qindex(
+        &mut self,
+        dec: &mut SymbolDecoder<'_>,
+        bw4: usize,
+        bh4: usize,
+        skip: bool,
+    ) -> Result<()> {
+        if (bw4 == self.sb_size4 && bh4 == self.sb_size4 && skip) || !self.read_deltas {
+            return Ok(());
+        }
+        let delta = read_delta(dec, &mut self.cdfs.delta_q)?;
+        if delta != 0 {
+            self.current_qindex = (self.current_qindex + (delta << self.delta_q_res)).clamp(1, 255);
+        }
+        Ok(())
+    }
+
+    /// `read_delta_lf` (§5.11.13): likewise for the loop-filter deltas — one,
+    /// or with `delta_lf_multi` one per filter level (two luma directions and,
+    /// with chroma, U and V).
+    fn read_delta_lf(
+        &mut self,
+        dec: &mut SymbolDecoder<'_>,
+        bw4: usize,
+        bh4: usize,
+        skip: bool,
+    ) -> Result<()> {
+        if (bw4 == self.sb_size4 && bh4 == self.sb_size4 && skip)
+            || !self.read_deltas
+            || !self.delta_lf_present
+        {
+            return Ok(());
+        }
+        let count = if !self.delta_lf_multi {
+            1
+        } else if self.num_planes > 1 {
+            FRAME_LF_COUNT
+        } else {
+            FRAME_LF_COUNT - 2
+        };
+        for i in 0..count {
+            let cdf = if self.delta_lf_multi {
+                get_mut(&mut self.cdfs.delta_lf_multi, i)?
+            } else {
+                &mut self.cdfs.delta_lf
+            };
+            let delta = read_delta(dec, cdf)?;
+            if delta != 0 {
+                let slot = get_mut(&mut self.delta_lf, i)?;
+                let level = (i32::from(*slot) + (delta << self.delta_lf_res))
+                    .clamp(-MAX_LOOP_FILTER, MAX_LOOP_FILTER);
+                *slot = level as i8;
+            }
         }
         Ok(())
     }
@@ -1941,8 +2046,18 @@ impl TileState {
             )?;
             self.update_level_context(plane, x4, y4, w4, h4, block.cul_level, block.dc_category);
             if block.eob > 0 {
-                let dc = dc_q(self.bit_depth, self.q_dc.get(plane).copied().unwrap_or(0));
-                let ac = ac_q(self.bit_depth, self.q_ac.get(plane).copied().unwrap_or(0));
+                // get_dc_quant / get_ac_quant (§7.12.2) over get_qidx, which is
+                // CurrentQIndex whenever delta_q is present and base_q_idx
+                // otherwise — the two never differ when it is absent.
+                let qindex = self.current_qindex;
+                let dc = dc_q(
+                    self.bit_depth,
+                    qindex + self.q_dc.get(plane).copied().unwrap_or(0),
+                );
+                let ac = ac_q(
+                    self.bit_depth,
+                    qindex + self.q_ac.get(plane).copied().unwrap_or(0),
+                );
                 let dequant = dequantize(&block.quant, tx_size, dc, ac, self.bit_depth);
                 let residual = inverse_transform_2d(
                     &dequant,
@@ -2582,6 +2697,22 @@ struct PaletteView<'a> {
 /// `get_tx_size` for a chroma plane (§5.11.37), given the block's residual size
 /// on that plane: its largest rectangular transform, with any 64-sample side
 /// reduced to 32 (chroma codes no 64-wide/high transform).
+/// The magnitude-and-sign coding shared by `delta_qindex` and `delta_lf`: a
+/// symbol up to `DELTA_Q_SMALL` (= `DELTA_LF_SMALL` = 3), escaping to a
+/// literal-length literal, then a sign bit when nonzero.
+fn read_delta(dec: &mut SymbolDecoder<'_>, cdf: &mut [u16]) -> Result<i32> {
+    let mut abs = dec.read_symbol(cdf)? as i32;
+    if abs == DELTA_SMALL {
+        let rem_bits = dec.read_literal(3)? + 1;
+        let abs_bits = dec.read_literal(rem_bits)? as i32;
+        abs = abs_bits + (1 << rem_bits) + 1;
+    }
+    if abs != 0 && dec.read_literal(1)? == 1 {
+        abs = -abs;
+    }
+    Ok(abs)
+}
+
 fn chroma_tx_size(block: usize) -> TxSize {
     match max_tx_size_rect(block) {
         TxSize::Tx64x64 | TxSize::Tx32x64 | TxSize::Tx64x32 => TxSize::Tx32x32,
