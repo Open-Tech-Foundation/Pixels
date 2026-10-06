@@ -7,6 +7,9 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- Clippy 1.99, which CI runs, rejected two new lints (`byte_char_slices` in
+  the JPEG decoder, manual slice filling in the AV1 tile decoder). Both are
+  rewritten; behaviour is unchanged.
 - The JPEG codec built without its `progressive` feature warned about three
   unused stream-replay methods, which CI's `-D warnings` turned into a
   failure of every feature combination but the defaults. They are now

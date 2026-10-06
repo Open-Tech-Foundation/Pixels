@@ -914,12 +914,8 @@ impl TileState {
 
     fn reset_left_context(&mut self) {
         for c in &mut self.ctx {
-            for v in &mut c.left_level {
-                *v = 0;
-            }
-            for v in &mut c.left_dc {
-                *v = 0;
-            }
+            c.left_level.fill(0);
+            c.left_dc.fill(0);
         }
     }
 

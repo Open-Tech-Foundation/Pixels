@@ -884,7 +884,7 @@ fn colour_model(frame: &Frame, adobe: Option<AdobeTransform>) -> Result<Colour> 
         3 => {
             // Component ids 'R', 'G', 'B' are the other way a JPEG says it is
             // not YCbCr, and predate Adobe's marker.
-            let labelled_rgb = frame.components.iter().map(|c| c.id).eq([b'R', b'G', b'B']);
+            let labelled_rgb = frame.components.iter().map(|c| c.id).eq(*b"RGB");
             Ok(if adobe == Some(AdobeTransform::None) || labelled_rgb {
                 Colour::Rgb
             } else {
