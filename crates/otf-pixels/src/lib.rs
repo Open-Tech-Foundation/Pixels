@@ -64,12 +64,13 @@ use std::sync::Arc;
 pub use otf_pixels_core::{
     AccessPattern, Animation, ChannelLayout, Codec, ColorModel, Decoder, EncodeOptions, Encoder,
     ErrorCode, Format, ImageDescriptor, Limit, Limits, Metadata, Orientation, PixelFormat,
-    PixelsError, PlanOptions, Region, Result, RunStats, SchedulerOptions, Sink, Source, TileShape,
-    evaluate as evaluate_reference,
+    PixelsError, PlanOptions, Region, Result, RunStats, SampleKind, SchedulerOptions, Sink, Source,
+    TileShape, evaluate as evaluate_reference,
 };
 pub use otf_pixels_ops::{
-    Blend, Composite, Conversion, Convolve, Crop, ExtractChannel, Filter, Fit, Flatten, Flip, Flop,
-    Kernel, Modulate, Quarter, Resize, ResizeOptions, Rotate, ToSrgb, Unconvertible,
+    Blend, Composite, Conversion, ConvertFormat, Convolve, Crop, ExtractChannel, Filter, Fit,
+    Flatten, Flip, Flop, Kernel, Modulate, Quarter, Resize, ResizeOptions, Rotate, ToSrgb,
+    Unconvertible,
 };
 
 #[cfg(feature = "raw")]
@@ -639,6 +640,43 @@ impl Image {
         }
     }
 
+    /// Convert to `pixel`: depth (8-bit, 16-bit, float) and layout (grey,
+    /// grey with alpha, RGB, RGBA). Grey widens to RGB by repetition and RGB
+    /// narrows to grey by BT.601 luma; alpha is added opaque or dropped
+    /// (use [`Image::flatten`] to composite against a colour instead).
+    ///
+    /// Outputs need not ask for this: [`Image::output`] narrows to what the
+    /// format holds by itself.
+    #[must_use]
+    pub fn to_pixel_format(self, pixel: PixelFormat) -> Self {
+        match self.descriptor() {
+            Ok(descriptor) if descriptor.pixel == pixel => self,
+            _ => self.apply(Arc::new(ConvertFormat::to(pixel))),
+        }
+    }
+
+    /// This image in a pixel format `format`'s encoder accepts: 8 bits for
+    /// JPEG, WebP, AVIF and GIF, and integers for PNG and TIFF. A 16-bit PNG
+    /// written as WebP is thereby narrowed rather than refused.
+    fn encodable_as(self, format: Format) -> Self {
+        let Ok(descriptor) = self.descriptor() else {
+            return self;
+        };
+        let pixel = descriptor.pixel;
+        let kind = match (format, pixel.sample_kind()) {
+            (
+                Format::Jpeg | Format::WebP | Format::Avif | Format::Gif,
+                SampleKind::U16 | SampleKind::F32,
+            ) => SampleKind::U8,
+            (Format::Png | Format::Tiff, SampleKind::F32) => SampleKind::U16,
+            _ => return self,
+        };
+        match PixelFormat::from_parts(pixel.layout(), kind) {
+            Some(target) => self.to_pixel_format(target),
+            None => self,
+        }
+    }
+
     /// Declare the ICC profile the pixels are in, or with `None` drop it and
     /// call them sRGB. Only the label changes, never a pixel.
     #[must_use]
@@ -788,7 +826,8 @@ impl Output {
     pub fn write_with_stats(self, mut sink: impl Sink) -> Result<RunStats> {
         // Rewritten before an evaluator is chosen, so the scheduler and the
         // reference evaluator are handed the same graph and keep agreeing.
-        let (image, reduction) = otf_pixels_core::shrink_on_load(self.image.graph()?)?;
+        let encodable = self.image.clone().encodable_as(self.format);
+        let (image, reduction) = otf_pixels_core::shrink_on_load(encodable.graph()?)?;
         let descriptor = image.descriptor();
         let mut encoder = encoder_for(self.format, self.options)?;
         encoder.set_icc_profile(self.image.icc.as_deref())?;
@@ -826,7 +865,8 @@ impl Output {
         // The same rewrite the scheduled path applies. Without it the oracle
         // would evaluate a different graph and the two would disagree wherever
         // shrink-on-load fired — which would look like a scheduler bug.
-        let (image, _) = otf_pixels_core::shrink_on_load(self.image.graph()?)?;
+        let encodable = self.image.clone().encodable_as(self.format);
+        let (image, _) = otf_pixels_core::shrink_on_load(encodable.graph()?)?;
         let descriptor = image.descriptor();
         let mut encoder = encoder_for(self.format, self.options)?;
         encoder.set_icc_profile(self.image.icc.as_deref())?;

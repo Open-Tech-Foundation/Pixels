@@ -49,6 +49,7 @@
 //! even while the evaluator only ever asks for whole images.
 
 mod composite;
+mod convert;
 mod convolve;
 mod filter;
 mod geometry;
@@ -59,6 +60,7 @@ mod resize;
 mod rotate;
 
 pub use composite::{Blend, Composite};
+pub use convert::ConvertFormat;
 pub use convolve::{Convolve, Kernel};
 pub use filter::{Filter, Run, Weights};
 pub use geometry::{Crop, Flip, Flop};

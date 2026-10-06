@@ -134,6 +134,24 @@ impl PixelFormat {
         }
     }
 
+    /// The format with `layout` channels of `kind` samples, if v1 has one
+    /// (there is no grey float, nor 16-bit grey with alpha).
+    #[must_use]
+    pub const fn from_parts(layout: ChannelLayout, kind: SampleKind) -> Option<Self> {
+        match (layout, kind) {
+            (ChannelLayout::Gray, SampleKind::U8) => Some(Self::Gray8),
+            (ChannelLayout::Gray, SampleKind::U16) => Some(Self::Gray16),
+            (ChannelLayout::GrayAlpha, SampleKind::U8) => Some(Self::GrayA8),
+            (ChannelLayout::Rgb, SampleKind::U8) => Some(Self::Rgb8),
+            (ChannelLayout::Rgb, SampleKind::U16) => Some(Self::Rgb16),
+            (ChannelLayout::Rgb, SampleKind::F32) => Some(Self::RgbF32),
+            (ChannelLayout::Rgba, SampleKind::U8) => Some(Self::Rgba8),
+            (ChannelLayout::Rgba, SampleKind::U16) => Some(Self::Rgba16),
+            (ChannelLayout::Rgba, SampleKind::F32) => Some(Self::RgbaF32),
+            _ => None,
+        }
+    }
+
     /// The sample type of this format.
     #[must_use]
     pub const fn sample_kind(self) -> SampleKind {

@@ -169,7 +169,7 @@ fn tiny_and_odd_sizes_encode() {
 }
 
 #[test]
-fn lossless_and_sixteen_bit_are_refused() {
+fn lossless_is_refused_and_sixteen_bit_is_narrowed() {
     let descriptor = ImageDescriptor::new(2, 2, PixelFormat::Rgb8).unwrap();
     let error = Image::from_raw(descriptor, vec![0; 12])
         .unwrap()
@@ -177,11 +177,12 @@ fn lossless_and_sixteen_bit_are_refused() {
         .bytes()
         .unwrap_err();
     assert_eq!(error.code(), ErrorCode::Unsupported);
+    // 16-bit pixels are narrowed to the 8 bits the encoder codes.
     let descriptor = ImageDescriptor::new(2, 2, PixelFormat::Rgb16).unwrap();
-    let error = Image::from_raw(descriptor, vec![0; 24])
+    let avif = Image::from_raw(descriptor, vec![0x80; 24])
         .unwrap()
         .output(Format::Avif, EncodeOptions::default())
         .bytes()
-        .unwrap_err();
-    assert_eq!(error.code(), ErrorCode::Unsupported);
+        .unwrap();
+    assert_eq!(decode(avif).0.pixel, PixelFormat::Rgb8);
 }

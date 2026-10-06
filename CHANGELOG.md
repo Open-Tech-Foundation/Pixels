@@ -7,6 +7,11 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- Output no longer refuses a pixel format its encoder cannot hold. A
+  16-bit PNG, TIFF or 10/12-bit AVIF written as JPEG, WebP, AVIF or GIF
+  failed with `Unsupported`, and float pixels could not be written at all.
+  `output()` now narrows to what the format holds: 8 bits for those four,
+  16 bits for PNG and TIFF.
 - The last column of an odd-width 4:2:0 or 4:2:2 AVIF was filtered toward
   its left chroma neighbour, where libavif (through libyuv) copies its own
   chroma sample. On sharp chroma this differed by up to 35. It now matches.
@@ -151,6 +156,9 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- `Image::to_pixel_format` and the `ConvertFormat` op: depth (8-bit,
+  16-bit, float) and layout (grey, grey with alpha, RGB, RGBA) conversion.
+  `PixelFormat::from_parts` names a format by layout and depth.
 - All five of sharp's fit modes. `Fit::Cover` (scale to cover, crop the
   overflow centred), `Fit::Contain` (scale inside, pad centred with
   `ResizeOptions::background`, opaque black by default) and `Fit::Outside`
