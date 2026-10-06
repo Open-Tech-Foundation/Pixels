@@ -47,6 +47,11 @@ versioning: [SemVer](https://semver.org/).
   with it rather than failing to build.
 
 ### Changed
+- Published crates leave out their test fixtures (only `cargo test` reads
+  them), so dependents no longer download them: the AVIF crate drops from
+  3.2 MiB to 282 KiB compressed and the WebP crate from 2.6 MiB to 68 KiB.
+- Version 0.1.0, the first release candidate. All crates package and verify
+  with `cargo package --workspace`.
 - `Fit`, `Blend`, `Filter`, `Conversion` and `Unconvertible` are
   `#[non_exhaustive]`, so later modes can be added without breaking callers.
 - WebP output is now **lossy by default**, at `EncodeOptions::quality`
@@ -156,6 +161,14 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- `Output::with_scheduler`: run on a `Scheduler` shared across pipelines.
+  Without it every run spawns and joins a thread per core, which a server
+  or runtime pays on every request. Many pipelines may share one scheduler
+  concurrently. `Scheduler` is re-exported from the facade.
+- docs/EMBEDDING.md: putting the engine behind a runtime or server API
+  (threading, per-request limits, error codes, the sharp option mapping,
+  animation, memory). The crate docs now describe the v1 scope, with a
+  serving example.
 - `Image::to_pixel_format` and the `ConvertFormat` op: depth (8-bit,
   16-bit, float) and layout (grey, grey with alpha, RGB, RGBA) conversion.
   `PixelFormat::from_parts` names a format by layout and depth.

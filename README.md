@@ -9,12 +9,16 @@ library designed to be embedded — in runtimes, servers, and CLIs — behind a
 small, synchronous, streaming API.
 
 ```rust
-let out = Image::open(source)?
-    .resize(800, 600, Fit::Inside)
-    .modulate(Modulate { saturation: 0.0, ..Default::default() })
-    .output(Format::WebP, EncodeOptions { quality: 80, ..Default::default() })
-    .write(sink)?;
+use otf_pixels::{EncodeOptions, Fit, Format, Image, Modulate, ResizeOptions};
+
+let webp = Image::open("photo.jpg")?
+    .resize_with(800, 600, ResizeOptions::default().with_fit(Fit::Cover))
+    .modulate(Modulate::identity().with_saturation(0.0)?)
+    .output(Format::WebP, EncodeOptions::with_quality(80)?)
+    .bytes()?;
 ```
+
+Embedding it in a runtime or server: see [docs/EMBEDDING.md](docs/EMBEDDING.md).
 
 ## Why another image library
 
@@ -48,6 +52,7 @@ OS-backend gaps.
 |---|---|
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design: layers, graph, scheduler, backends |
 | [SPEC.md](docs/SPEC.md) | API contracts, formats, guarantees, safety limits |
+| [EMBEDDING.md](docs/EMBEDDING.md) | Putting it behind a runtime or server API: threading, limits, errors, sharp mapping |
 | [ROADMAP.md](docs/ROADMAP.md) | v1/v2 scope and milestone plan |
 | [docs/adr/](docs/adr/) | Architecture Decision Records — one per decision, append-only |
 | [CHANGELOG.md](CHANGELOG.md) | Keep a Changelog format |

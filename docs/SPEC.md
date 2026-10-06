@@ -43,10 +43,9 @@ implementation detail and may change without notice.
   when a `prem` reference marks it premultiplied), through the BT.601/709/2020
   matrices or YCgCo at either range; grid-derived
   images give region random access, the payoff owning the container buys.
-  This row is the v1 target; M6.5 is in progress (ROADMAP), and until it
-  lands a file using a part not yet implemented is refused as `Unsupported`,
-  never decoded wrong. The codec crate's `tests/unsupported.rs` lists what is
-  still refused.
+  Every intra coding tool encoders use for stills decodes; the few that do
+  not (film grain, intra block copy) are refused as `Unsupported`, never
+  decoded wrong, and the codec crate's `tests/unsupported.rs` lists them.
   Encode writes one 8-bit 4:2:0 key frame (monochrome for grey input) at
   `EncodeOptions::quality`, BT.601 full range with sRGB `colr`, and
   transparency as an auxiliary alpha item; opaque alpha is dropped. Lossless

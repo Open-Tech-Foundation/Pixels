@@ -68,8 +68,12 @@ Estimates deliberately omitted — scope, not dates, is the commitment.
   AVIFs decode region-by-region; libavif/dav1d read our encoder output.
 
 ### M7 — Release hardening
-- Embedding guide for host bindings; API docs; benchmark suite vs
-  Bun.Image/sharp/libvips published in README.
+- Embedding guide for host bindings (docs/EMBEDDING.md, done); API docs
+  (done; built with warnings denied); benchmark suite vs Bun.Image/sharp/
+  libvips published in README (pending).
+- First release: 0.1.0, packaged and verified with `cargo package
+  --workspace`; the API is 0.x until the multi-frame pipeline and the
+  benchmarks land.
 - **Exit**: `otf-pixels` 1.0 on crates.io.
 
 ## v2

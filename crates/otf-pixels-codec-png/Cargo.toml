@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 categories.workspace = true
+# Test data stays in the repository: it is only read by `cargo test`, and
+# shipping it would make every dependent download it.
+exclude = ["tests/fixtures"]
 keywords.workspace = true
 
 [dependencies]

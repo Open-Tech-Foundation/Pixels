@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 categories.workspace = true
+# Test data stays in the repository: it is only read by `cargo test`, and
+# shipping it would make every dependent download it.
+exclude = ["tests/fixtures"]
 keywords.workspace = true
 readme = "../../README.md"
 
@@ -41,11 +44,12 @@ jpeg = ["dep:otf-pixels-codec-jpeg"]
 jpeg-progressive = ["jpeg", "otf-pixels-codec-jpeg?/progressive"]
 # TIFF codec. The only v1 format with region random access.
 tiff = ["dep:otf-pixels-codec-tiff"]
-# WebP, wrapped rather than owned (ADR-0004). Decode is lossy and lossless;
-# encode is lossless only, so `quality` is ignored for it.
+# WebP, owned outright (ADR-0014): lossy and lossless, decode and encode.
+# Encode is lossy at `quality` by default, lossless with `lossless`.
 webp = ["dep:otf-pixels-codec-webp"]
 # AVIF, owned outright — container and AV1 bitstream both (ADR-0013, reversing
-# ADR-0004). Still images only; image sequences (`avis`) report `Unsupported`.
+# ADR-0004). Still images, decode and lossy encode; image sequences (`avis`)
+# report `Unsupported`.
 avif = ["dep:otf-pixels-codec-avif"]
 
 [dev-dependencies]

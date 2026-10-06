@@ -49,23 +49,76 @@
 //! intermediate in full, but it is obviously correct, so it is the oracle the
 //! scheduler is verified against.
 //!
-//! # Current scope
+//! # Serving images
 //!
-//! Through ROADMAP M3. Notably **not** here yet:
+//! What an image endpoint or a runtime's image API does: bytes in, a
+//! thumbnail out. Opening identifies the format from its bytes, turns the
+//! image upright, converts its colours to sRGB and enforces input limits;
+//! nothing is decoded until the output is pulled, and a JPEG source decodes
+//! at a reduced scale when the thumbnail allows it.
 //!
-//! - `resize`, `rotate`, `modulate`, `convolve`, `composite` and the channel
-//!   ops (M4).
-//! - Every format but PNG and raw. [`Image::open`] reports an unsupported
-//!   format for bytes it cannot identify rather than guessing.
+#![cfg_attr(all(feature = "png", feature = "webp"), doc = "```")]
+#![cfg_attr(not(all(feature = "png", feature = "webp")), doc = "```ignore")]
+//! use otf_pixels::{
+//!     EncodeOptions, Fit, Format, Image, Limits, OpenOptions, ResizeOptions,
+//! };
+//!
+//! # fn main() -> Result<(), otf_pixels::PixelsError> {
+//! # let upload = Image::from_raw(
+//! #     otf_pixels::ImageDescriptor::new(64, 48, otf_pixels::PixelFormat::Rgb8)?,
+//! #     vec![90; 64 * 48 * 3],
+//! # )?
+//! # .output(Format::Png, EncodeOptions::default())
+//! # .bytes()?;
+//! // Per request: bound what an untrusted upload may allocate.
+//! let options = OpenOptions::default()
+//!     .with_limits(Limits::default().with_max_pixels(50_000_000));
+//! let image = Image::from_stream_with(std::io::Cursor::new(upload), options)?;
+//!
+//! let meta = image.metadata()?; // free: no pixels decoded
+//! assert_eq!((meta.width, meta.height), (64, 48));
+//! if let Some(animation) = image.animation() {
+//!     // v1 processes the first frame; the caller decides whether that is
+//!     // acceptable for this animation.
+//!     let _ = animation.frame_count;
+//! }
+//!
+//! let webp = image
+//!     .resize_with(32, 32, ResizeOptions::default().with_fit(Fit::Cover))
+//!     .output(Format::WebP, EncodeOptions::with_quality(80)?)
+//!     .bytes()?;
+//! assert_eq!(&webp[8..12], b"WEBP");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Scope (v1)
+//!
+//! - **Formats**, all implemented in this workspace and checked against
+//!   their reference implementations: PNG, GIF, baseline JPEG (progressive
+//!   decode is wrapped), TIFF, WebP (lossy and lossless) and AVIF, read and
+//!   written, plus raw pixels.
+//! - **Ops**: crop, flip/flop, quarter-turn rotation and orientation,
+//!   resize with sharp's five fit modes, modulate, convolve/blur/sharpen,
+//!   composite, flatten, channel extraction, pixel-format and sRGB
+//!   conversion.
+//! - **Metadata**: EXIF/HEIF orientation applied on open; ICC profiles
+//!   converted to sRGB or carried to the output; animation reported, with
+//!   the first frame processed. Other metadata (EXIF, XMP) is not written
+//!   out, which also strips location data from uploads.
+//!
+//! Not yet: multi-frame (animated) pipelines, arbitrary-angle rotation and
+//! progressive JPEG output. Each will arrive as an addition, not a change:
+//! [`OpenOptions::animated`] is already reserved for the first.
 
-use otf_pixels_core::{BufferSource, Op, Prefixed, Producer, Scheduler, TileBuf};
+use otf_pixels_core::{BufferSource, Op, Prefixed, Producer, TileBuf};
 use std::sync::Arc;
 
 pub use otf_pixels_core::{
     AccessPattern, Animation, ChannelLayout, Codec, ColorModel, Decoder, EncodeOptions, Encoder,
     ErrorCode, Format, ImageDescriptor, Limit, Limits, Metadata, Orientation, PixelFormat,
-    PixelsError, PlanOptions, Region, Result, RunStats, SampleKind, SchedulerOptions, Sink, Source,
-    TileShape, evaluate as evaluate_reference,
+    PixelsError, PlanOptions, Region, Result, RunStats, SampleKind, Scheduler, SchedulerOptions,
+    Sink, Source, TileShape, evaluate as evaluate_reference,
 };
 pub use otf_pixels_ops::{
     Blend, Composite, Conversion, ConvertFormat, Convolve, Crop, ExtractChannel, Filter, Fit,
@@ -714,6 +767,7 @@ impl Image {
             format,
             options,
             scheduler: SchedulerOptions::default(),
+            shared: None,
         }
     }
 
@@ -763,6 +817,8 @@ pub struct Output {
     format: Format,
     options: EncodeOptions,
     scheduler: SchedulerOptions,
+    /// A scheduler shared with other pipelines, if the caller supplied one.
+    shared: Option<Arc<Scheduler>>,
 }
 
 impl Output {
@@ -786,6 +842,22 @@ impl Output {
     #[must_use]
     pub const fn threads(mut self, threads: usize) -> Self {
         self.scheduler.threads = threads;
+        self
+    }
+
+    /// Run on `scheduler`, shared with other pipelines, instead of a pool of
+    /// this run's own.
+    ///
+    /// A server or a runtime should build one [`Scheduler`] at startup and
+    /// pass it to every output: otherwise each run spawns a thread per core
+    /// and joins them when it ends, and concurrent requests each bring their
+    /// own, oversubscribing the machine. Many pipelines may run on one
+    /// scheduler at once, from any threads. [`Output::threads`] and
+    /// [`Output::scheduler_options`] are ignored when one is set: the
+    /// scheduler was configured when it was built.
+    #[must_use]
+    pub fn with_scheduler(mut self, scheduler: Arc<Scheduler>) -> Self {
+        self.shared = Some(scheduler);
         self
     }
 
@@ -834,7 +906,16 @@ impl Output {
         encoder.write_header(&descriptor, &mut sink)?;
 
         // The scheduler delivers tiles; an encoder wants whole rows in order.
-        let scheduler = Scheduler::new(self.scheduler)?;
+        // A shared scheduler's threads are reused; otherwise this run gets
+        // its own pool, torn down when it finishes.
+        let owned;
+        let scheduler = match &self.shared {
+            Some(shared) => shared.as_ref(),
+            None => {
+                owned = Scheduler::new(self.scheduler)?;
+                &owned
+            }
+        };
         let mut rows = RowAssembler::new(descriptor);
         let mut stats = scheduler.run(&image, |region, tile| {
             rows.accept(region, tile, &mut |row| encoder.write_row(row, &mut sink))
@@ -1737,3 +1818,14 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::Malformed, "{error}");
     }
 }
+
+/// The handles an embedder shares across threads must stay shareable: a
+/// runtime builds a pipeline on one thread and runs it on a worker.
+const _: () = {
+    const fn shareable<T: Send + Sync>() {}
+    shareable::<Image>();
+    shareable::<Output>();
+    shareable::<OpenOptions>();
+    shareable::<PixelsError>();
+    shareable::<Scheduler>();
+};
