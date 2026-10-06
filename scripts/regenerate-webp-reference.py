@@ -219,6 +219,84 @@ def write_lossy(fixtures: str) -> None:
         out.write("\n".join(manifest) + "\n")
 
 
+def riff_chunk(kind: bytes, payload: bytes) -> bytes:
+    pad = b"\0" if len(payload) % 2 else b""
+    return kind + len(payload).to_bytes(4, "little") + payload + pad
+
+
+def image_chunks(image: Image.Image, lossless: bool) -> bytes:
+    """The ALPH/VP8/VP8L chunks of `image` as libwebp encodes it alone."""
+    import io
+    buffer = io.BytesIO()
+    image.save(buffer, "WEBP", lossless=lossless, quality=80, exact=True)
+    data = buffer.getvalue()[12:]
+    out = b""
+    while data:
+        kind, size = data[:4], int.from_bytes(data[4:8], "little")
+        if kind in (b"ALPH", b"VP8 ", b"VP8L"):
+            out += data[: 8 + size + (size & 1)]
+        data = data[8 + size + (size & 1):]
+    return out
+
+
+def offset_animation(path: str, frame: Image.Image, canvas: tuple, at: tuple, alpha: bool, lossless: bool) -> None:
+    """A two-frame animation whose first frame sits at `at` on a larger
+    canvas, which Pillow's encoder never writes but the format allows."""
+    width, height = canvas
+    flags = 0x02 | (0x10 if alpha else 0)
+    vp8x = bytes([flags, 0, 0, 0]) + (width - 1).to_bytes(3, "little") + (height - 1).to_bytes(3, "little")
+    anim = bytes([0, 0, 0, 0, 0, 0])
+    frames = b""
+    for _ in range(2):
+        header = (at[0] // 2).to_bytes(3, "little") + (at[1] // 2).to_bytes(3, "little")
+        header += (frame.width - 1).to_bytes(3, "little") + (frame.height - 1).to_bytes(3, "little")
+        header += (100).to_bytes(3, "little") + bytes([0x02])  # no blend
+        frames += riff_chunk(b"ANMF", header + image_chunks(frame, lossless))
+    body = b"WEBP" + riff_chunk(b"VP8X", vp8x) + riff_chunk(b"ANIM", anim) + frames
+    with open(path, "wb") as out:
+        out.write(b"RIFF" + len(body).to_bytes(4, "little") + body)
+
+
+# Animations decode to their first frame on its canvas: name -> writer.
+ANIMATED = {
+    "anim_lossless": lambda p: noise(40, 30, 50, smooth=True).save(
+        p, "WEBP", save_all=True, lossless=True,
+        append_images=[noise(40, 30, 51, smooth=True)], duration=100),
+    "anim_lossy_alpha": lambda p: noise(40, 30, 52, alpha=True, smooth=True).save(
+        p, "WEBP", save_all=True, quality=70,
+        append_images=[noise(40, 30, 53, alpha=True, smooth=True)], duration=100),
+    "anim_offset_lossless": lambda p: offset_animation(
+        p, noise(14, 10, 54, smooth=True), (40, 30), (6, 8), False, True),
+    "anim_offset_lossy_alpha": lambda p: offset_animation(
+        p, noise(16, 12, 55, alpha=True, smooth=True), (37, 29), (10, 4), True, False),
+}
+
+
+def write_animated(fixtures: str) -> None:
+    directory = os.path.join(fixtures, "animated")
+    os.makedirs(directory, exist_ok=True)
+    manifest = [
+        "# Regenerate with scripts/regenerate-webp-reference.py",
+        "# name width height channels",
+    ]
+    for name, write in sorted(ANIMATED.items()):
+        path = os.path.join(directory, f"{name}.webp")
+        write(path)
+        with Image.open(path) as decoded:
+            decoded.seek(0)
+            decoded.load()
+            mode = decoded.mode
+            raster = decoded.tobytes()
+            width, height = decoded.size
+        channels = {"RGB": 3, "RGBA": 4}[mode]
+        with open(os.path.join(directory, f"{name}.raw"), "wb") as out:
+            out.write(raster)
+        manifest.append(f"{name} {width} {height} {channels}")
+        print(f"animated/{name}: {width}x{height}x{channels}, {os.path.getsize(path)} bytes")
+    with open(os.path.join(directory, "REFERENCE"), "w") as out:
+        out.write("\n".join(manifest) + "\n")
+
+
 def write_lossless(fixtures: str) -> None:
     directory = os.path.join(fixtures, "lossless")
     os.makedirs(directory, exist_ok=True)
@@ -279,6 +357,7 @@ def main() -> int:
         out.write("\n".join(manifest) + "\n")
     write_lossless(args.fixtures)
     write_lossy(args.fixtures)
+    write_animated(args.fixtures)
     return 0
 
 

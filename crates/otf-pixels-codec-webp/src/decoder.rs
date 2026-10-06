@@ -1,9 +1,9 @@
 //! The WebP decoder.
 //!
-//! The container is parsed here (`riff`); still images decode through the
-//! owned VP8L (`vp8l`) and VP8 (`vp8`) decoders, with `ALPH` alpha (`alpha`)
-//! and libwebp's YUV-to-RGB conversion (`yuv`). Animations still go through
-//! `image-webp` until their first-frame compositing is owned (ADR-0014).
+//! The container is parsed here (`riff`); the image decodes through the owned
+//! VP8L (`vp8l`) or VP8 (`vp8`) decoder, with `ALPH` alpha (`alpha`) and
+//! libwebp's YUV-to-RGB conversion (`yuv`). An animation decodes to its first
+//! frame, placed on its canvas as libwebp's animation decoder does.
 
 use otf_pixels_core::{
     Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, Orientation, PixelFormat,
@@ -12,9 +12,8 @@ use otf_pixels_core::{
 
 /// The most compressed bytes read before a file is called hostile.
 ///
-/// The wrapped decoder needs to seek within the container, so the stream is
-/// held in memory and there is no bound from the image dimensions: a small
-/// header can be followed by unlimited chunk data. `max_pixels` bounds the
+/// The whole file is held in memory, and nothing about the image bounds how
+/// much chunk data may follow a small header. `max_pixels` bounds the
 /// output; this bounds the input.
 const MAX_COMPRESSED: usize = 256 * 1024 * 1024;
 
@@ -33,9 +32,9 @@ pub struct WebPDecoder {
 impl WebPDecoder {
     /// Read the container and decode the image.
     ///
-    /// Unlike the streaming codecs this decodes eagerly, because the wrapped
-    /// decoder seeks within the RIFF container and a WebP has no prefix that
-    /// yields a finished row.
+    /// This decodes eagerly: chunks may come in any order the container
+    /// allows, and neither bitstream yields finished rows from a prefix of
+    /// the file without the decoder holding its whole working state.
     ///
     /// # Errors
     ///
@@ -70,64 +69,6 @@ impl WebPDecoder {
             .exif
             .and_then(Orientation::from_exif_block)
             .unwrap_or_default();
-        if !container.animated {
-            return match container.bitstream {
-                crate::riff::Bitstream::Lossless(stream) => {
-                    Self::lossless(stream, &container, orientation, &limits)
-                }
-                crate::riff::Bitstream::Lossy { vp8, alpha } => {
-                    Self::lossy(vp8, alpha, &container, orientation, &limits)
-                }
-            };
-        }
-
-        let mut decoder =
-            image_webp::WebPDecoder::new(std::io::Cursor::new(bytes)).map_err(decode_error)?;
-        let (width, height) = decoder.dimensions();
-        // An animation decodes to its first frame, matching what GIF does:
-        // ordinary pipelines then work unchanged, and animation pipelines are
-        // v2 (SPEC §Formats).
-        let pixel = if decoder.has_alpha() {
-            PixelFormat::Rgba8
-        } else {
-            PixelFormat::Rgb8
-        };
-        // Enforced before the pixel buffer is allocated (SPEC §Safety).
-        let descriptor = ImageDescriptor::with_limits(width, height, pixel, &limits)?;
-
-        let wanted = descriptor
-            .byte_len()
-            .ok_or_else(|| PixelsError::malformed("webp", "image size overflows"))?;
-        let reported = decoder
-            .output_buffer_size()
-            .ok_or_else(|| PixelsError::malformed("webp", "image size overflows"))?;
-        if reported != wanted {
-            return Err(PixelsError::malformed(
-                "webp",
-                format!("decoder wants {reported} bytes for a {descriptor} image needing {wanted}"),
-            ));
-        }
-
-        let mut pixels = vec![0_u8; wanted];
-        decoder.read_image(&mut pixels).map_err(decode_error)?;
-
-        Ok(Self {
-            descriptor,
-            pixels,
-            row: 0,
-            orientation,
-        })
-    }
-}
-
-impl WebPDecoder {
-    /// A lossless still, through the owned VP8L decoder.
-    fn lossless(
-        stream: &[u8],
-        container: &crate::riff::Container<'_>,
-        orientation: Orientation,
-        limits: &Limits,
-    ) -> Result<Self> {
         let pixel = if container.has_alpha {
             PixelFormat::Rgba8
         } else {
@@ -135,14 +76,36 @@ impl WebPDecoder {
         };
         // Enforced before any pixel buffer exists (SPEC §Safety).
         let descriptor =
-            ImageDescriptor::with_limits(container.width, container.height, pixel, limits)?;
-        let argb =
-            crate::vp8l::decode(stream, container.width as usize, container.height as usize)?;
-        let channels = if container.has_alpha { 4 } else { 3 };
-        let mut pixels = Vec::with_capacity(argb.len() * channels);
-        for p in argb {
-            let [blue, green, red, alpha] = p.to_le_bytes();
-            pixels.extend_from_slice([red, green, blue, alpha].get(..channels).unwrap_or(&[]));
+            ImageDescriptor::with_limits(container.width, container.height, pixel, &limits)?;
+        let frame = container.frame;
+        let rgba = decode_rgba(
+            container.bitstream,
+            frame.width as usize,
+            frame.height as usize,
+        )?;
+
+        // The frame onto its canvas: a still fills it; an animation's first
+        // frame is written into a transparent-black canvas without blending,
+        // as libwebp's animation decoder starts every key frame.
+        let channels = pixel.channels();
+        let (canvas_width, frame_width) = (container.width as usize, frame.width as usize);
+        let mut pixels =
+            vec![0_u8; container.width as usize * container.height as usize * channels];
+        for (y, source) in rgba.chunks_exact(frame_width * 4).enumerate() {
+            let row = (frame.y as usize + y) * canvas_width + frame.x as usize;
+            let Some(target) = pixels.get_mut(row * channels..(row + frame_width) * channels)
+            else {
+                return Err(PixelsError::malformed(
+                    "webp",
+                    "a frame overruns its canvas",
+                ));
+            };
+            for (out, sample) in target
+                .chunks_exact_mut(channels)
+                .zip(source.chunks_exact(4))
+            {
+                out.copy_from_slice(sample.get(..channels).unwrap_or(&[]));
+            }
         }
         Ok(Self {
             descriptor,
@@ -153,72 +116,47 @@ impl WebPDecoder {
     }
 }
 
-impl WebPDecoder {
-    /// A lossy still, through the owned VP8 decoder and `ALPH` alpha.
-    fn lossy(
-        vp8: &[u8],
-        alpha: Option<&[u8]>,
-        container: &crate::riff::Container<'_>,
-        orientation: Orientation,
-        limits: &Limits,
-    ) -> Result<Self> {
-        let pixel = if container.has_alpha {
-            PixelFormat::Rgba8
-        } else {
-            PixelFormat::Rgb8
-        };
-        // Enforced before any plane is allocated (SPEC §Safety).
-        let descriptor =
-            ImageDescriptor::with_limits(container.width, container.height, pixel, limits)?;
-        let (width, height) = (container.width as usize, container.height as usize);
-        let frame = crate::vp8::decode(vp8)?;
-        if (frame.width, frame.height) != (width, height) {
-            return Err(PixelsError::malformed(
-                "webp",
-                "the VP8 frame's size differs from the container's",
-            ));
+/// Decode one coded image of `width` x `height` to RGBA.
+fn decode_rgba(
+    bitstream: crate::riff::Bitstream<'_>,
+    width: usize,
+    height: usize,
+) -> Result<Vec<u8>> {
+    match bitstream {
+        crate::riff::Bitstream::Lossless(stream) => {
+            let argb = crate::vp8l::decode(stream, width, height)?;
+            Ok(argb
+                .into_iter()
+                .flat_map(|p| {
+                    let [blue, green, red, alpha] = p.to_le_bytes();
+                    [red, green, blue, alpha]
+                })
+                .collect())
         }
-        // An extended file may declare alpha without an ALPH chunk; it is
-        // then opaque, as libwebp reports it.
-        let alpha = match (container.has_alpha, alpha) {
-            (false, _) => None,
-            (true, Some(chunk)) => Some(crate::alpha::decode(chunk, width, height)?),
-            (true, None) => Some(vec![255; width * height]),
-        };
-        let pixels = crate::yuv::to_rgb(
-            &frame.y,
-            frame.y_stride,
-            &frame.u,
-            &frame.v,
-            frame.uv_stride,
-            width,
-            height,
-            alpha.as_deref(),
-        );
-        Ok(Self {
-            descriptor,
-            pixels,
-            row: 0,
-            orientation,
-        })
-    }
-}
-
-/// Translate the wrapped decoder's failure into this crate's error type.
-///
-/// The split matters: a caller routes on [`PixelsError::Unsupported`] versus
-/// [`PixelsError::Malformed`], and collapsing both into "broken image" would
-/// send someone hunting for a corrupt file that merely uses a feature this
-/// build does not decode.
-fn decode_error(error: image_webp::DecodingError) -> PixelsError {
-    match error {
-        image_webp::DecodingError::IoError(error) => {
-            PixelsError::io("decoding a WebP image", error)
+        crate::riff::Bitstream::Lossy { vp8, alpha } => {
+            let frame = crate::vp8::decode(vp8)?;
+            if (frame.width, frame.height) != (width, height) {
+                return Err(PixelsError::malformed(
+                    "webp",
+                    "the VP8 frame's size differs from the container's",
+                ));
+            }
+            // No ALPH chunk means opaque, as libwebp reports it.
+            let alpha = match alpha {
+                Some(chunk) => crate::alpha::decode(chunk, width, height)?,
+                None => vec![255; width * height],
+            };
+            Ok(crate::yuv::to_rgb(
+                &frame.y,
+                frame.y_stride,
+                &frame.u,
+                &frame.v,
+                frame.uv_stride,
+                width,
+                height,
+                Some(&alpha),
+            ))
         }
-        image_webp::DecodingError::UnsupportedFeature(detail) => {
-            PixelsError::unsupported(format!("webp: {detail}"))
-        }
-        other => PixelsError::malformed("webp", other.to_string()),
     }
 }
 

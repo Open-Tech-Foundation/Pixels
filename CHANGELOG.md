@@ -143,6 +143,12 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- `otf-pixels-codec-webp`: animated files decode their first frame through
+  the owned decoders, placed on the canvas as libwebp's animation decoder
+  does (a transparent-black canvas, the key frame written unblended), so
+  decoding no longer uses `image-webp` at all. Checked against libwebp on
+  Pillow-written animations and on hand-assembled ones whose first frame
+  sits at an offset on a larger canvas.
 - `otf-pixels-codec-webp`: an owned VP8 (lossy) key-frame decoder, `ALPH`
   alpha decoding, and libwebp's YUV-to-RGB conversion (its "fancy" chroma
   upsampler and fixed-point BT.601 matrix), so lossy stills now decode
