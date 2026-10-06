@@ -23,7 +23,7 @@
 
 use otf_pixels_compress::LzwDecoder;
 use otf_pixels_core::{
-    Codec, DecodeCapability, Decoder, Format, ImageDescriptor as CoreDescriptor, Limits,
+    Animation, Codec, DecodeCapability, Decoder, Format, ImageDescriptor as CoreDescriptor, Limits,
     PixelFormat, PixelsError, Result, Source,
 };
 
@@ -37,6 +37,11 @@ use crate::format::{
 /// LZW output is bounded separately by the frame's pixel count; this bounds
 /// the *compressed* side, which a length-prefixed chain does not bound itself.
 const MAX_COMPRESSED: usize = 64 * 1024 * 1024;
+
+/// The largest GIF stream accepted. The stream is buffered to count its
+/// frames, so this bounds that buffer; a real GIF this size is a very long
+/// animation, and anything larger is refused rather than read into memory.
+const MAX_STREAM: usize = 512 * 1024 * 1024;
 
 /// The largest extension payload retained. Comments and application blocks are
 /// skipped rather than kept, so this only bounds the ones we read.
@@ -66,7 +71,13 @@ pub struct Frame {
 pub struct GifDecoder<S: Source> {
     descriptor: CoreDescriptor,
     screen: Screen,
-    source: Option<S>,
+    /// The stream after the global colour table, read whole at construction
+    /// so its frames can be counted before the first is decoded.
+    source: Option<Bytes>,
+    /// Frame count and timing, when there is more than one frame.
+    animation: Option<Animation>,
+    /// The caller's source type, consumed in [`GifDecoder::new`].
+    _source: std::marker::PhantomData<fn() -> S>,
     /// The global colour table, if the stream carries one.
     global: Vec<[u8; 3]>,
     /// The canvas, RGBA8, persisting across frames.
@@ -128,6 +139,25 @@ impl<S: Source> GifDecoder<S> {
             global = read_table(&mut source, screen.global_table_size)?;
         }
 
+        // The rest of the stream, buffered: a GIF's compressed data is small
+        // beside its RGBA canvas, and counting frames means reading past the
+        // first, which a forward-only source cannot give back.
+        let mut rest = Vec::new();
+        let mut chunk = [0_u8; 64 * 1024];
+        loop {
+            match source.read(&mut chunk)? {
+                0 => break,
+                n => rest.extend_from_slice(chunk.get(..n).unwrap_or_default()),
+            }
+            if rest.len() > MAX_STREAM {
+                return Err(PixelsError::unsupported(format!(
+                    "gif: streams over {} MiB are not read",
+                    MAX_STREAM >> 20
+                )));
+            }
+        }
+        let animation = scan_animation(&rest);
+
         let canvas_len = descriptor
             .byte_len()
             .ok_or_else(|| PixelsError::malformed("gif", "canvas size overflows"))?;
@@ -143,7 +173,9 @@ impl<S: Source> GifDecoder<S> {
         Ok(Self {
             descriptor,
             screen,
-            source: Some(source),
+            source: Some(std::io::Cursor::new(rest)),
+            animation,
+            _source: std::marker::PhantomData,
             global,
             // A GIF canvas begins fully transparent, which is what makes a
             // first frame smaller than the canvas render correctly.
@@ -185,7 +217,7 @@ impl<S: Source> GifDecoder<S> {
     }
 
     /// The body of [`GifDecoder::next_frame`], with the source borrowed out.
-    fn decode_next(&mut self, source: &mut S) -> Result<Option<Frame>> {
+    fn decode_next(&mut self, source: &mut Bytes) -> Result<Option<Frame>> {
         // Apply the previous frame's disposal before drawing this one. It
         // happens here rather than after drawing because `Previous` needs the
         // saved rectangle, and saving it is only worth doing if a later frame
@@ -307,7 +339,7 @@ impl<S: Source> GifDecoder<S> {
     }
 
     /// Decode one image block and composite it onto the canvas.
-    fn decode_image(&mut self, source: &mut S, control: GraphicControl) -> Result<Frame> {
+    fn decode_image(&mut self, source: &mut Bytes, control: GraphicControl) -> Result<Frame> {
         let mut bytes = [0_u8; 9];
         source.read_exact(&mut bytes)?;
         let image = ImageDescriptor::parse(&bytes)?;
@@ -469,6 +501,74 @@ impl<S: Source> GifDecoder<S> {
     }
 }
 
+/// The buffered stream the frames are decoded from.
+type Bytes = std::io::Cursor<Vec<u8>>;
+
+/// Count the frames in `stream` (everything after the global colour table)
+/// and collect their delays and the `NETSCAPE2.0` loop count, skipping the
+/// pixel data. `None` for a still image. A stream that breaks off counts the
+/// frames before the break: that is a decode error, reported when pixels are
+/// read, not a reason to misreport what came before.
+fn scan_animation(stream: &[u8]) -> Option<Animation> {
+    let mut source = stream;
+    let mut delays = Vec::new();
+    let mut delay = 0_u32;
+    // No NETSCAPE2.0 block: the animation plays once.
+    let mut loop_count = 1;
+    let mut byte = [0_u8; 1];
+    while source.read_exact(&mut byte).is_ok() {
+        match byte[0] {
+            label::EXTENSION => {
+                if source.read_exact(&mut byte).is_err() {
+                    break;
+                }
+                let Ok(payload) = read_sub_blocks(&mut source, MAX_EXTENSION) else {
+                    break;
+                };
+                match byte[0] {
+                    label::GRAPHIC_CONTROL => {
+                        delay = u32::from(GraphicControl::parse(&payload).delay_centiseconds) * 10;
+                    }
+                    // The application block's identifier is its first
+                    // sub-block; the loop count is sub-block 1 of the data.
+                    0xFF if payload.starts_with(b"NETSCAPE2.0")
+                        || payload.starts_with(b"ANIMEXTS1.0") =>
+                    {
+                        if let [1, lo, hi, ..] = payload.get(11..).unwrap_or_default() {
+                            loop_count = u32::from(u16::from_le_bytes([*lo, *hi]));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            label::IMAGE => {
+                let mut bytes = [0_u8; 9];
+                if source.read_exact(&mut bytes).is_err() {
+                    break;
+                }
+                let Ok(image) = ImageDescriptor::parse(&bytes) else {
+                    break;
+                };
+                let table = image.local_table_size * 3;
+                let mut code_size = [0_u8; 1];
+                if source.len() < table + 1 {
+                    break;
+                }
+                source = source.get(table..).unwrap_or_default();
+                if source.read_exact(&mut code_size).is_err()
+                    || skip_sub_blocks(&mut source).is_err()
+                {
+                    break;
+                }
+                delays.push(delay);
+                delay = 0;
+            }
+            _ => break,
+        }
+    }
+    Animation::new(delays, loop_count)
+}
+
 /// Map a stored row index to its position in an interlaced frame.
 fn deinterlace(stored: u32, height: u32) -> Option<u32> {
     let mut seen = 0;
@@ -505,6 +605,10 @@ impl<S: Source + std::fmt::Debug> Decoder for GifDecoder<S> {
 
     fn capability(&self) -> DecodeCapability {
         DecodeCapability::Sequential
+    }
+
+    fn animation(&self) -> Option<Animation> {
+        self.animation.clone()
     }
 
     fn read_row(&mut self, out: &mut [u8]) -> Result<()> {

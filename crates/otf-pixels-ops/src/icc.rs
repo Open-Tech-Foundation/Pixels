@@ -607,7 +607,11 @@ impl Op for ToSrgb {
                             })
                         };
                         for c in 0..channels {
-                            let value = out.get(c).filter(|_| c < colour).copied().unwrap_or_else(|| sample(c));
+                            let value = out
+                                .get(c)
+                                .filter(|_| c < colour)
+                                .copied()
+                                .unwrap_or_else(|| sample(c));
                             if let Some(slot) = to.get_mut(4 * c..4 * c + 4) {
                                 slot.copy_from_slice(&value.to_ne_bytes());
                             }

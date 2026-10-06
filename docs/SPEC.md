@@ -20,6 +20,12 @@ implementation detail and may change without notice.
 - Raw pixel contract: caller supplies width, height, pixel format, stride.
 - TIFF: baseline tag set + none/LZW/deflate compression; exotic tags are
   skipped, not errors.
+- Animation (GIF, WebP): v1 processes the **first frame**, as sharp does by
+  default, and reports what the file holds through `Image::animation` (frame
+  count, loop count, per-frame durations). `OpenOptions::animated` is reserved
+  for the multi-frame pipeline: set, an animated input is refused as
+  `Unsupported` rather than flattened. Counting GIF frames reads the whole
+  stream at open; its compressed bytes are buffered (at most 512 MiB).
 - GIF v1 scope: full decode (all frames, disposal handled); encode is
   single-frame + palette quantization. Animation pipelines are v2.
 - WebP v1 scope: decode covers lossy, lossless and alpha, owned and matching
@@ -135,7 +141,8 @@ g.output(Format::Png, opts).bytes()?;        // Vec<u8>
 
 ## Safety and limits
 
-- `max_pixels` (default 268 MP, Sharp-compatible): checked at header parse,
+- `max_pixels` (default 268 MP, Sharp-compatible, per open via
+  `OpenOptions::with_limits`): checked at header parse,
   before pixel allocation. Exceeding it is an error, not a truncation.
 - `auto_orient` (default on, `OpenOptions`): the orientation the file
   declares is applied before any op — EXIF `Orientation` in JPEG, TIFF, PNG

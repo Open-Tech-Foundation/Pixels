@@ -38,7 +38,7 @@ pub struct Frame {
 }
 
 /// What the container says about the image.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Container<'a> {
     /// The canvas width: the `VP8X` canvas, or the bitstream's own size.
     pub width: u32,
@@ -59,6 +59,10 @@ pub struct Container<'a> {
     pub exif: Option<&'a [u8]>,
     /// The `ICCP` chunk's payload: the ICC profile.
     pub icc: Option<&'a [u8]>,
+    /// From `ANIM`: how many times an animation plays, 0 for forever.
+    pub loop_count: u32,
+    /// Each `ANMF` frame's duration in milliseconds; empty for a still.
+    pub frame_durations_ms: Vec<u32>,
 }
 
 /// One chunk: its FourCC and payload.
@@ -214,6 +218,8 @@ fn simple(width: u32, height: u32, has_alpha: bool, bitstream: Bitstream<'_>) ->
         },
         exif: None,
         icc: None,
+        loop_count: 0,
+        frame_durations_ms: Vec::new(),
     }
 }
 
@@ -238,11 +244,28 @@ fn extended<'a>(
     let mut alpha: Option<&'a [u8]> = None;
     let mut exif: Option<&'a [u8]> = None;
     let mut icc: Option<&'a [u8]> = None;
+    let mut loop_count = 0;
+    let mut frame_durations_ms = Vec::new();
     for chunk in chunks {
         let chunk = chunk?;
         match &chunk.kind {
             b"EXIF" => exif = exif.or(Some(chunk.payload)),
             b"ICCP" => icc = icc.or(Some(chunk.payload)),
+            // ANIM (§2.7.1): background colour, then a 16-bit loop count.
+            b"ANIM" if animated => {
+                if let [_, _, _, _, lo, hi, ..] = chunk.payload {
+                    loop_count = u32::from(u16::from_le_bytes([*lo, *hi]));
+                }
+            }
+            // Every frame's duration: bytes 12..15 of its ANMF header.
+            b"ANMF" if animated => {
+                if let Some(&[a, b, c]) = chunk.payload.get(12..15) {
+                    frame_durations_ms.push(u32::from_le_bytes([a, b, c, 0]));
+                }
+                if image.is_none() {
+                    image = Some(first_frame(chunk.payload)?);
+                }
+            }
             _ if image.is_some() => {}
             b"ALPH" if !animated => alpha = alpha.or(Some(chunk.payload)),
             b"VP8 " if !animated => {
@@ -259,7 +282,6 @@ fn extended<'a>(
                 let (w, h, _) = vp8l_size(chunk.payload)?;
                 image = Some((Bitstream::Lossless(chunk.payload), whole(w, h)));
             }
-            b"ANMF" if animated => image = Some(first_frame(chunk.payload)?),
             _ => {}
         }
     }
@@ -282,6 +304,8 @@ fn extended<'a>(
         frame,
         exif,
         icc,
+        loop_count,
+        frame_durations_ms,
     })
 }
 

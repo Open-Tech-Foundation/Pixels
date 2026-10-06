@@ -84,6 +84,44 @@ pub enum DecodeCapability {
     Regions,
 }
 
+/// How an animated image plays: its frames and their timing.
+///
+/// Reported by [`Decoder::animation`] for a file with more than one frame.
+/// The pipeline processes the first frame; this describes the source, so a
+/// caller can see it is animated and decide what to do (pass it through,
+/// refuse it, or take the still).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct Animation {
+    /// Frames in the animation, always two or more.
+    pub frame_count: u32,
+    /// How many times it plays; 0 means forever, as in GIF and WebP.
+    pub loop_count: u32,
+    /// How long each frame shows, in milliseconds, in order.
+    pub frame_durations_ms: Vec<u32>,
+}
+
+impl Animation {
+    /// An animation of the given frame durations, playing `loop_count`
+    /// times (0 for forever). `None` for fewer than two frames, which is a
+    /// still image.
+    #[must_use]
+    pub fn new(frame_durations_ms: Vec<u32>, loop_count: u32) -> Option<Self> {
+        let frame_count = u32::try_from(frame_durations_ms.len()).ok()?;
+        (frame_count >= 2).then_some(Self {
+            frame_count,
+            loop_count,
+            frame_durations_ms,
+        })
+    }
+
+    /// The total time one play-through takes, in milliseconds.
+    #[must_use]
+    pub fn duration_ms(&self) -> u64 {
+        self.frame_durations_ms.iter().map(|&d| u64::from(d)).sum()
+    }
+}
+
 /// Header-only facts about an image.
 ///
 /// Answering this must not decode pixels (SPEC §Guarantees 3).
@@ -215,6 +253,15 @@ pub trait Decoder: Send + fmt::Debug {
     /// [`Decoder::descriptor`].
     fn orientation(&self) -> Orientation {
         Orientation::Normal
+    }
+
+    /// The source's animation, if it has more than one frame.
+    ///
+    /// Reported, like [`Decoder::orientation`]: rows are always the first
+    /// frame's. Known once the decoder is constructed; a format that must
+    /// read further to count its frames does so up front.
+    fn animation(&self) -> Option<Animation> {
+        None
     }
 
     /// The embedded ICC colour profile, if the file carries one.

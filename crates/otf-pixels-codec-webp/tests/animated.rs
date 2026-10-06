@@ -76,6 +76,23 @@ fn every_animation_decodes_to_libwebps_first_frame() {
 }
 
 #[test]
+fn an_animation_reports_the_timing_libwebp_wrote() {
+    // Pillow's libwebp wrote three frames of 100, 250 and 40 ms, looping 3
+    // times (see the regeneration script).
+    let bytes = std::fs::read(format!("{}/anim_timing.webp", dir())).unwrap();
+    let decoder = WebPDecoder::new(&bytes[..], Limits::default()).unwrap();
+    let animation = otf_pixels_core::Decoder::animation(&decoder).unwrap();
+    assert_eq!(animation.frame_count, 3);
+    assert_eq!(animation.loop_count, 3);
+    assert_eq!(animation.frame_durations_ms, vec![100, 250, 40]);
+    // The other fixtures loop forever; a still has no animation.
+    let bytes = std::fs::read(format!("{}/anim_lossless.webp", dir())).unwrap();
+    let decoder = WebPDecoder::new(&bytes[..], Limits::default()).unwrap();
+    let animation = otf_pixels_core::Decoder::animation(&decoder).unwrap();
+    assert_eq!((animation.frame_count, animation.loop_count), (2, 0));
+}
+
+#[test]
 fn every_truncation_of_an_animation_is_an_error_never_a_panic() {
     for name in ["anim_offset_lossless", "anim_offset_lossy_alpha"] {
         let file = std::fs::read(format!("{}/{name}.webp", dir())).unwrap();

@@ -149,6 +149,16 @@ versioning: [SemVer](https://semver.org/).
   any post-filter active is still refused, since the reconstruct applies none.
 
 ### Added
+- Animation metadata. `Image::animation` (and `Decoder::animation`) report
+  an animated GIF's or WebP's frame count, loop count and per-frame
+  durations, matching Pillow and the timing libwebp wrote. The pipeline still
+  processes the first frame. `OpenOptions::with_animated(true)` reserves the
+  multi-frame API: until it is implemented, an animated input opened with it
+  is refused as `Unsupported` instead of being flattened. GIF now buffers its
+  compressed stream (at most 512 MiB) to count frames at open.
+- `OpenOptions::with_limits`: decode limits per open, so a runtime can bound
+  untrusted input per request. Previously the facade always used the default
+  268-megapixel limit.
 - ICC colour conversion to sRGB (ADR-0015). Opening an image converts
   matrix/TRC RGB and grey profiles (Display P3, Adobe RGB, ProPhoto,
   BT.2020, gamma, `curv` tables, every `para` curve) to sRGB and drops the

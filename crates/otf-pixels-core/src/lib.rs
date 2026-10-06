@@ -69,7 +69,9 @@ mod tile;
 pub mod testing;
 
 pub use cache::{CacheStats, TileCache, TileKey};
-pub use codec::{Codec, DecodeCapability, Decoder, EncodeOptions, Encoder, Format, Metadata};
+pub use codec::{
+    Animation, Codec, DecodeCapability, Decoder, EncodeOptions, Encoder, Format, Metadata,
+};
 pub use error::{ErrorCode, Limit, PixelsError, Result};
 pub use eval::{demand, evaluate, evaluate_rows};
 pub use geometry::{ImageDescriptor, Limits, Region};

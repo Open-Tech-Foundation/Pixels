@@ -62,9 +62,9 @@ use otf_pixels_core::{BufferSource, Op, Prefixed, Producer, Scheduler, TileBuf};
 use std::sync::Arc;
 
 pub use otf_pixels_core::{
-    AccessPattern, ChannelLayout, Codec, ColorModel, Decoder, EncodeOptions, Encoder, ErrorCode,
-    Format, ImageDescriptor, Limit, Limits, Metadata, Orientation, PixelFormat, PixelsError,
-    PlanOptions, Region, Result, RunStats, SchedulerOptions, Sink, Source, TileShape,
+    AccessPattern, Animation, ChannelLayout, Codec, ColorModel, Decoder, EncodeOptions, Encoder,
+    ErrorCode, Format, ImageDescriptor, Limit, Limits, Metadata, Orientation, PixelFormat,
+    PixelsError, PlanOptions, Region, Result, RunStats, SchedulerOptions, Sink, Source, TileShape,
     evaluate as evaluate_reference,
 };
 pub use otf_pixels_ops::{
@@ -114,6 +114,19 @@ pub struct OpenOptions {
     /// output, and [`Image::to_srgb`] converts later. A profile this cannot
     /// convert is kept either way.
     pub to_srgb: bool,
+    /// Ask for every frame of an animated image rather than the first.
+    ///
+    /// Reserved for the multi-frame pipeline, which is not implemented yet:
+    /// set, opening an animated GIF or WebP fails with
+    /// [`PixelsError::Unsupported`] rather than quietly processing one
+    /// frame, so code written against it today states its intent and starts
+    /// working when frames do. Off by default, as in sharp: the first frame
+    /// is the image, and [`Image::animation`] says what was left out.
+    pub animated: bool,
+    /// Bounds on what a file may make the decoder allocate. A runtime facing
+    /// untrusted uploads sets these per request; the default refuses images
+    /// over 268 megapixels, as sharp does.
+    pub limits: Limits,
 }
 
 impl OpenOptions {
@@ -124,6 +137,20 @@ impl OpenOptions {
     #[must_use]
     pub const fn with_auto_orient(mut self, auto_orient: bool) -> Self {
         self.auto_orient = auto_orient;
+        self
+    }
+
+    /// The defaults with `animated` replaced.
+    #[must_use]
+    pub const fn with_animated(mut self, animated: bool) -> Self {
+        self.animated = animated;
+        self
+    }
+
+    /// The defaults with `limits` replaced.
+    #[must_use]
+    pub const fn with_limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
         self
     }
 
@@ -140,6 +167,8 @@ impl Default for OpenOptions {
         Self {
             auto_orient: true,
             to_srgb: true,
+            animated: false,
+            limits: Limits::default(),
         }
     }
 }
@@ -155,6 +184,8 @@ pub struct Image {
     /// The ICC profile the pixels are in, carried to the output; `None` is
     /// sRGB, as SPEC §Pixel formats assumes.
     icc: Option<Arc<[u8]>>,
+    /// The source's animation, when it has more than one frame.
+    animation: Option<Arc<Animation>>,
 }
 
 impl Image {
@@ -289,33 +320,33 @@ impl Image {
         match codec.format() {
             #[cfg(feature = "png")]
             Format::Png => {
-                let decoder = PngDecoder::new(stream, Limits::default())?;
-                Ok(Self::decoded(Box::new(decoder), Format::Png, options))
+                let decoder = PngDecoder::new(stream, options.limits)?;
+                Self::decoded(Box::new(decoder), Format::Png, options)
             }
             #[cfg(feature = "gif")]
             Format::Gif => {
-                let decoder = GifDecoder::new(stream, Limits::default())?;
-                Ok(Self::decoded(Box::new(decoder), Format::Gif, options))
+                let decoder = GifDecoder::new(stream, options.limits)?;
+                Self::decoded(Box::new(decoder), Format::Gif, options)
             }
             #[cfg(feature = "jpeg")]
             Format::Jpeg => {
-                let decoder = JpegDecoder::new(stream, Limits::default())?;
-                Ok(Self::decoded(Box::new(decoder), Format::Jpeg, options))
+                let decoder = JpegDecoder::new(stream, options.limits)?;
+                Self::decoded(Box::new(decoder), Format::Jpeg, options)
             }
             #[cfg(feature = "tiff")]
             Format::Tiff => {
-                let decoder = TiffDecoder::new(stream, Limits::default())?;
-                Ok(Self::decoded(Box::new(decoder), Format::Tiff, options))
+                let decoder = TiffDecoder::new(stream, options.limits)?;
+                Self::decoded(Box::new(decoder), Format::Tiff, options)
             }
             #[cfg(feature = "webp")]
             Format::WebP => {
-                let decoder = WebPDecoder::new(stream, Limits::default())?;
-                Ok(Self::decoded(Box::new(decoder), Format::WebP, options))
+                let decoder = WebPDecoder::new(stream, options.limits)?;
+                Self::decoded(Box::new(decoder), Format::WebP, options)
             }
             #[cfg(feature = "avif")]
             Format::Avif => {
-                let decoder = AvifDecoder::new(stream, Limits::default())?;
-                Ok(Self::decoded(Box::new(decoder), Format::Avif, options))
+                let decoder = AvifDecoder::new(stream, options.limits)?;
+                Self::decoded(Box::new(decoder), Format::Avif, options)
             }
             other => Err(PixelsError::unsupported(format!(
                 "{other} was detected but no decoder for it is compiled in"
@@ -335,18 +366,26 @@ impl Image {
         feature = "webp",
         feature = "avif"
     ))]
-    fn decoded(decoder: Box<dyn Decoder>, format: Format, options: OpenOptions) -> Self {
+    fn decoded(decoder: Box<dyn Decoder>, format: Format, options: OpenOptions) -> Result<Self> {
         let orientation = decoder.orientation();
         let icc = decoder.icc_profile().map(Vec::from);
+        let animation = decoder.animation().map(Arc::new);
+        if options.animated && animation.is_some() {
+            return Err(PixelsError::unsupported(format!(
+                "{format}: multi-frame (animated) pipelines are not implemented yet; \
+                 open with `animated` off to process the first frame"
+            )));
+        }
         let mut image = Self::from_decoder(decoder, format).with_icc_profile(icc);
+        image.animation = animation;
         if options.to_srgb {
             image = image.to_srgb();
         }
-        if options.auto_orient {
+        Ok(if options.auto_orient {
             image.orient(orientation)
         } else {
             image
-        }
+        })
     }
 
     /// Build an image from any decoder whose header has already been parsed.
@@ -365,6 +404,7 @@ impl Image {
     pub fn from_producer(producer: Arc<dyn Producer>, format: Format) -> Self {
         Self {
             icc: None,
+            animation: None,
             inner: Ok(otf_pixels_core::Image::from_producer(producer, format)),
         }
     }
@@ -524,7 +564,7 @@ impl Image {
     pub fn composite_with(self, overlay: Self, x: i64, y: i64, blend: Blend) -> Self {
         // The base's profile describes the result; the overlay's pixels are
         // composited as they are.
-        let icc = self.icc;
+        let (icc, animation) = (self.icc, self.animation);
         let (base, over) = match (self.inner, overlay.inner) {
             (Ok(base), Ok(over)) => (base, over),
             // The first error wins, matching how a single chain behaves.
@@ -534,6 +574,7 @@ impl Image {
         Self {
             inner: otf_pixels_core::Image::combine(&[base, over], op).map_err(Arc::new),
             icc,
+            animation,
         }
     }
 
@@ -547,7 +588,19 @@ impl Image {
         Self {
             inner: Err(error),
             icc: None,
+            animation: None,
         }
+    }
+
+    /// The source file's animation, if it has more than one frame.
+    ///
+    /// The pipeline processes the first frame, so this describes what the
+    /// file holds rather than what will be written: frame count, loop count
+    /// and per-frame durations, for a caller to decide whether a still is
+    /// what it wants (see [`OpenOptions::animated`]).
+    #[must_use]
+    pub fn animation(&self) -> Option<&Animation> {
+        self.animation.as_deref()
     }
 
     /// The ICC profile this image's pixels are in, if it is not sRGB.
@@ -602,6 +655,7 @@ impl Image {
     pub fn apply(self, op: Arc<dyn Op>) -> Self {
         Self {
             icc: self.icc,
+            animation: self.animation,
             inner: match self.inner {
                 Ok(image) => image.apply(op).map_err(Arc::new),
                 // An earlier failure short-circuits: later ops never run.

@@ -139,6 +139,37 @@ fn interlaced_and_non_interlaced_decode_identically() {
 }
 
 #[test]
+fn the_animation_is_counted_as_pillow_counts_it() {
+    // Pillow: four frames of 100 ms, looping forever (NETSCAPE2.0 loop 0).
+    let bytes = read_fixture("animation");
+    let decoder = GifDecoder::new(&bytes[..], Limits::default()).unwrap();
+    let animation = otf_pixels_core::Decoder::animation(&decoder).unwrap();
+    assert_eq!(animation.frame_count, 4);
+    assert_eq!(animation.loop_count, 0);
+    assert_eq!(animation.frame_durations_ms, vec![100; 4]);
+    assert_eq!(animation.duration_ms(), 400);
+    for still in ["static", "photo", "interlaced", "checker"] {
+        let bytes = read_fixture(still);
+        let decoder = GifDecoder::new(&bytes[..], Limits::default()).unwrap();
+        assert_eq!(
+            otf_pixels_core::Decoder::animation(&decoder),
+            None,
+            "{still}"
+        );
+    }
+}
+
+#[test]
+fn a_truncated_animation_counts_the_frames_before_the_break() {
+    let bytes = read_fixture("animation");
+    // Cut inside the last frame: three whole frames remain.
+    let cut = &bytes[..bytes.len() - 20];
+    let decoder = GifDecoder::new(cut, Limits::default()).unwrap();
+    let animation = otf_pixels_core::Decoder::animation(&decoder).unwrap();
+    assert_eq!(animation.frame_count, 3);
+}
+
+#[test]
 fn an_animation_reports_its_frames_delays_and_disposal() {
     let bytes = read_fixture("animation");
     let mut decoder = GifDecoder::new(&bytes[..], Limits::default()).unwrap();

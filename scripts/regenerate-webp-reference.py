@@ -269,6 +269,12 @@ ANIMATED = {
         p, noise(14, 10, 54, smooth=True), (40, 30), (6, 8), False, True),
     "anim_offset_lossy_alpha": lambda p: offset_animation(
         p, noise(16, 12, 55, alpha=True, smooth=True), (37, 29), (10, 4), True, False),
+    # Distinct per-frame durations and a finite loop count, for the reported
+    # animation timing.
+    "anim_timing": lambda p: noise(24, 16, 56, smooth=True).save(
+        p, "WEBP", save_all=True, lossless=True,
+        append_images=[noise(24, 16, 57, smooth=True), noise(24, 16, 58, smooth=True)],
+        duration=[100, 250, 40], loop=3),
 }
 
 

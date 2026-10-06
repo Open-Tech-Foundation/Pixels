@@ -6,8 +6,8 @@
 //! frame, placed on its canvas as libwebp's animation decoder does.
 
 use otf_pixels_core::{
-    Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, Orientation, PixelFormat,
-    PixelsError, Result, Source,
+    Animation, Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, Orientation,
+    PixelFormat, PixelsError, Result, Source,
 };
 
 /// The most compressed bytes read before a file is called hostile.
@@ -29,6 +29,8 @@ pub struct WebPDecoder {
     orientation: Orientation,
     /// The `ICCP` chunk, if there is one.
     icc: Option<Vec<u8>>,
+    /// The animation's frames and timing, for an animated file.
+    animation: Option<Animation>,
 }
 
 impl WebPDecoder {
@@ -115,6 +117,7 @@ impl WebPDecoder {
             row: 0,
             orientation,
             icc: container.icc.map(<[u8]>::to_vec),
+            animation: Animation::new(container.frame_durations_ms.clone(), container.loop_count),
         })
     }
 }
@@ -174,6 +177,10 @@ impl Decoder for WebPDecoder {
 
     fn icc_profile(&self) -> Option<&[u8]> {
         self.icc.as_deref()
+    }
+
+    fn animation(&self) -> Option<Animation> {
+        self.animation.clone()
     }
 
     fn capability(&self) -> DecodeCapability {
