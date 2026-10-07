@@ -6,28 +6,29 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-10-07
-
 ### Changed
-- The README's "Why another image library" section no longer overclaims:
-  it says most fast libraries wrap libvips or OpenCV (not every one), that
-  Rust lacks a native engine rather than access to one, and that GPU compute
-  is planned for v2 rather than listing it beside shipped features.
+- The README's "Status" section, a milestone-by-milestone progress log, is
+  removed now that the v1 milestones are done; ROADMAP.md and the changelog
+  keep that history.
 
 ### Fixed
+- Every link in the README was broken on the `otf-pixels` crates.io page,
+  including the embedding guide: crates.io resolved them against the crate's
+  directory, not the repository root. They are now absolute GitHub URLs, and
+  `tsr readmes` fails on a relative link in any README a crate ships.
 - Only `otf-pixels` declared a README, so the crates.io pages of the other
   ten crates were blank. Each now has its own `README.md`, saying what it
   does and pointing to the `otf-pixels` facade, and `tsr readmes` (part of
   `tsr ci`) fails if a published crate does not ship one.
+
+## [0.1.0] - 2026-10-07
+
+### Fixed
 - The CI fuzz job failed before fuzzing anything. The prebuilt cargo-fuzz it
   installs is a static musl binary, and cargo-fuzz defaults `--target` to its
   own build triple, so it built for `x86_64-unknown-linux-musl`, which has no
   std installed and cannot use the address sanitizer. `tsr fuzz` now runs
   `scripts/fuzz.sh`, which passes the nightly toolchain's host triple.
-
-## [0.1.0] - 2026-10-07
-
-### Fixed
 - Clippy 1.99, which CI runs, rejected two new lints (`byte_char_slices` in
   the JPEG decoder, manual slice filling in the AV1 tile decoder). Both are
   rewritten; behaviour is unchanged.
@@ -78,6 +79,10 @@ versioning: [SemVer](https://semver.org/).
   with it rather than failing to build.
 
 ### Changed
+- The README's "Why another image library" section no longer overclaims:
+  it says most fast libraries wrap libvips or OpenCV (not every one), that
+  Rust lacks a native engine rather than access to one, and that GPU compute
+  is planned for v2 rather than listing it beside shipped features.
 - CI's fuzz job installs a prebuilt `cargo-fuzz` instead of compiling it on
   every run.
 - The reference-manifest check (`tsr references`) is a local task, run after

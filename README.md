@@ -18,7 +18,7 @@ let webp = Image::open("photo.jpg")?
     .bytes()?;
 ```
 
-Embedding it in a runtime or server: see [docs/EMBEDDING.md](docs/EMBEDDING.md).
+Embedding it in a runtime or server: see [docs/EMBEDDING.md](https://github.com/Open-Tech-Foundation/Pixels/blob/main/docs/EMBEDDING.md).
 
 ## Why another image library
 
@@ -32,7 +32,7 @@ Pixels brings the libvips execution model to Rust and modernizes it: typed
 kernels, memory safety and work-stealing tile scheduling. It is pure Rust, so
 it builds the same way on every platform, with no C toolchain or system
 libraries to install. Optional GPU compute is planned for v2
-([ADR-0007](docs/adr/0007-gpu-deferred-to-v2.md)).
+([ADR-0007](https://github.com/Open-Tech-Foundation/Pixels/blob/main/docs/adr/0007-gpu-deferred-to-v2.md)).
 
 ## Design pillars
 
@@ -54,83 +54,13 @@ libraries to install. Optional GPU compute is planned for v2
 
 | Doc | Purpose |
 |---|---|
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design: layers, graph, scheduler, backends |
-| [SPEC.md](docs/SPEC.md) | API contracts, formats, guarantees, safety limits |
-| [EMBEDDING.md](docs/EMBEDDING.md) | Putting it behind a runtime or server API: threading, limits, errors, sharp mapping |
-| [ROADMAP.md](docs/ROADMAP.md) | v1/v2 scope and milestone plan |
-| [docs/adr/](docs/adr/) | Architecture Decision Records — one per decision, append-only |
-| [CHANGELOG.md](CHANGELOG.md) | Keep a Changelog format |
-
-## Status
-
-**M5 — GIF + TIFF — complete.** Both from scratch, both checked against the
-reference implementations rather than against ourselves: all GIF and TIFF
-fixtures match libgif and libtiff, and those libraries read back every file we
-write (42 GIFs, 240 TIFFs).
-
-TIFF is the streaming showcase. A *tiled* TIFF is the one v1 format with
-genuine random access, so `TiffDecoder` reports `DecodeCapability::Regions`
-and the scheduler pulls regions rather than rows — a thumbnail of a huge scan
-decompresses the tiles it needs and no others. That is ADR-0001's
-demand-driven design doing the thing it was designed for, and M5 is the first
-milestone where it is observable.
-
-Compression primitives moved to `otf-pixels-compress`
-([ADR-0012](docs/adr/0012-extract-compression-crate.md)), executing the "move
-on a third consumer" clause ADR-0010 wrote for exactly this moment.
-
-**M4 — core op set + SIMD — complete.** The full v1 op set from
-[SPEC §Core ops](docs/SPEC.md) is implemented: resize with seven filters,
-rotate, flip/flop, crop, modulate, convolve, composite, and the channel ops.
-
-Performance, measured on the same machine and the same pixels
-(`cargo bench -p otf-pixels --bench ops`), 4000x3000 RGB8 → 400x300, Lanczos3:
-
-| | time | throughput | vs otf-pixels |
-|---|---|---|---|
-| otf-pixels | 43.3 ms | 277 MP/s | 1.00x |
-| `image` 0.25 | 210.2 ms | 57 MP/s | 4.85x slower |
-| `fast_image_resize` 6.0 | 29.2 ms | 412 MP/s | **1.49x faster** |
-
-Read those honestly. About 15 ms of every row is the 36 MB input copy that all
-three pay. Netting it out, our resampling kernel is roughly **2x slower than
-`fast_image_resize`**, which is hand-written SIMD with runtime dispatch, and
-roughly **5x faster than `image`**, which is scalar.
-
-[ADR-0011](docs/adr/0011-autovectorization-and-fixed-point.md) chose
-autovectorized safe Rust over intrinsics, keeping `unsafe_code = "forbid"`
-intact in every crate, and predicted a 10–30% penalty against hand-written
-SIMD. The measured penalty is larger than that. The ADR is recorded as
-predicting it, the benchmark is recorded as refuting it, and neither has been
-quietly adjusted to agree with the other.
-
-**M3 — PNG — complete.** The workspace, op graph, codec traits, raw codec,
-geometry ops, the demand-driven parallel tile scheduler and a from-scratch PNG
-codec are in place and tested; see [ROADMAP.md](docs/ROADMAP.md) for what each
-milestone adds.
-
-PNG is ours down to the DEFLATE, per [ADR-0010](docs/adr/0010-own-deflate.md):
-inflate, deflate, CRC-32, Adler-32, all five filters, Adam7, palettes, `tRNS`
-and 1/2/4/8/16-bit depths. Correctness is measured against the reference
-implementations rather than against ourselves — a shared misreading of a
-specification round-trips perfectly and is still wrong. All 86 decodable
-PngSuite files match libpng's decoding, all 14 corrupt files are rejected, and
-libpng reads back every PNG we write. `Image::open` identifies formats by
-magic bytes only; the file extension is ignored.
-
-Pipelines now stream: peak memory is bounded by tiles in flight, not by image
-size, and is verified against a ~100 MP synthetic source. The M1 whole-image
-evaluator is retained as the correctness oracle — the scheduler is diffed
-against it byte for byte across pipeline shapes, thread counts and tile sizes.
-
-Scaling is honest rather than flattering: forward-only sources are capped by
-their serial decode stage (ADR-0005), and today's ops are byte movement, so
-they saturate memory bandwidth before they saturate cores. `cargo bench
---bench scaling` prints the numbers. M4's arithmetic kernels are where that
-range should widen.
-
-All v1 architecture decisions are recorded in [docs/adr/](docs/adr/).
+| [ARCHITECTURE.md](https://github.com/Open-Tech-Foundation/Pixels/blob/main/docs/ARCHITECTURE.md) | System design: layers, graph, scheduler, backends |
+| [SPEC.md](https://github.com/Open-Tech-Foundation/Pixels/blob/main/docs/SPEC.md) | API contracts, formats, guarantees, safety limits |
+| [EMBEDDING.md](https://github.com/Open-Tech-Foundation/Pixels/blob/main/docs/EMBEDDING.md) | Putting it behind a runtime or server API: threading, limits, errors, sharp mapping |
+| [ROADMAP.md](https://github.com/Open-Tech-Foundation/Pixels/blob/main/docs/ROADMAP.md) | v1/v2 scope and milestone plan |
+| [docs/adr/](https://github.com/Open-Tech-Foundation/Pixels/tree/main/docs/adr) | Architecture Decision Records — one per decision, append-only |
+| [CHANGELOG.md](https://github.com/Open-Tech-Foundation/Pixels/blob/main/CHANGELOG.md) | Keep a Changelog format |
 
 ## License
 
-[Apache-2.0](LICENSE) — see [NOTICE](NOTICE) for details.
+[Apache-2.0](https://github.com/Open-Tech-Foundation/Pixels/blob/main/LICENSE) — see [NOTICE](https://github.com/Open-Tech-Foundation/Pixels/blob/main/NOTICE) for details.
