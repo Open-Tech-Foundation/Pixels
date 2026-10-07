@@ -117,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "otf-pixels"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fast_image_resize",
  "image",
@@ -134,14 +134,14 @@ dependencies = [
 
 [[package]]
 name = "otf-pixels-codec-avif"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "otf-pixels-core",
 ]
 
 [[package]]
 name = "otf-pixels-codec-gif"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "otf-pixels-compress",
  "otf-pixels-core",
@@ -149,7 +149,7 @@ dependencies = [
 
 [[package]]
 name = "otf-pixels-codec-jpeg"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "jpeg-decoder",
  "otf-pixels-core",
@@ -157,7 +157,7 @@ dependencies = [
 
 [[package]]
 name = "otf-pixels-codec-png"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "otf-pixels-compress",
  "otf-pixels-core",
@@ -165,14 +165,14 @@ dependencies = [
 
 [[package]]
 name = "otf-pixels-codec-raw"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "otf-pixels-core",
 ]
 
 [[package]]
 name = "otf-pixels-codec-tiff"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "otf-pixels-compress",
  "otf-pixels-core",
@@ -180,25 +180,25 @@ dependencies = [
 
 [[package]]
 name = "otf-pixels-codec-webp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "otf-pixels-core",
 ]
 
 [[package]]
 name = "otf-pixels-compress"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "otf-pixels-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossbeam-deque",
 ]
 
 [[package]]
 name = "otf-pixels-ops"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "otf-pixels-core",
 ]
