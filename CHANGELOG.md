@@ -6,6 +6,8 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-07
+
 ### Changed
 - The README's "Why another image library" section no longer overclaims:
   it says most fast libraries wrap libvips or OpenCV (not every one), that
