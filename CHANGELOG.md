@@ -7,6 +7,13 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- The README and every crate's README follow the Open Tech Foundation layout:
+  a centred title and tagline, short sections, and tables instead of long
+  paragraphs. Each crate's README says what it is for, when to use
+  `otf-pixels` instead, and shows a working example (all are compiled and
+  run against real files) with a table of its API. The main README adds a
+  comparison with libvips/sharp, ImageMagick, Pillow and the `image` crate,
+  with measured timings, and names ES-Runtime as the project built on Pixels.
 - Every output now runs on `Scheduler::global()`, one process-wide pool of
   one worker per core, unless given a scheduler of its own (ADR-0016).
   Before, each output spawned a pool for itself, so a host running 40 jobs

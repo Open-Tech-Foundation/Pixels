@@ -1,20 +1,56 @@
+<div align="center">
+
 # otf-pixels-compress
 
-Compression and checksum primitives for `otf-pixels` codecs.
+***DEFLATE, zlib, LZW and checksums, in safe Rust***
 
-zlib/DEFLATE, LZW and the checksums they need, written from scratch and
-shared by the codecs that use them: PNG needs zlib, TIFF needs zlib and LZW,
-GIF needs LZW.
+[crates.io](https://crates.io/crates/otf-pixels-compress) | [Docs](https://docs.rs/otf-pixels-compress) | [Pixels](https://github.com/Open-Tech-Foundation/Pixels)
 
-The crate knows about bit streams and byte buffers, not images, and does not
-depend on `otf-pixels-core`. That keeps it testable directly against
-reference implementations.
+</div>
+
+<div align="right">
+
+*An [Open Tech Foundation](https://opentechf.org/) project*
+
+</div>
+
+> The compression the Pixels codecs share: PNG and TIFF use zlib, GIF and TIFF
+> use LZW. Every decoder takes an output limit, so a decompression bomb is an error.
+
+## Use it
+
+```rust
+use otf_pixels_compress::{Crc32, Level, zlib_compress, zlib_decompress};
+
+let data = b"hello hello hello hello";
+let packed = zlib_compress(data, Level::new(6)?)?;
+let unpacked = zlib_decompress(&packed, 1 << 20)?; // refuses more than 1 MiB
+assert_eq!(unpacked, data);
+let checksum = Crc32::of(data);
+```
+
+## API
+
+| Item | What it does |
+| --- | --- |
+| `zlib_compress`, `deflate`, `Level` | Compress, zlib-wrapped or raw, levels 0–9 |
+| `zlib_decompress`, `inflate_to` | Decompress a whole buffer, up to a byte limit |
+| `ZlibStream`, `Inflater` | Decompress incrementally, as input arrives |
+| `LzwEncoder`, `LzwDecoder`, `BitOrder` | LZW in GIF (LSB-first) or TIFF (MSB-first) order |
+| `Crc32`, `Adler32` | The checksums PNG and zlib use |
+
+Output is checked against the reference zlib, both ways.
 
 ## Part of Pixels
 
-This crate is one piece of [Pixels](https://github.com/Open-Tech-Foundation/Pixels), a streaming, demand-driven image
-processing engine in Rust. Most users want the [`otf-pixels`](https://crates.io/crates/otf-pixels)
-facade, which chains operations, picks codecs by format and streams the
-result; codecs depend on this crate; applications rarely need it directly.
+| Crate | Role |
+| --- | --- |
+| [`otf-pixels`](https://crates.io/crates/otf-pixels) | The chainable `Image` API most users want |
+| [`otf-pixels-core`](https://crates.io/crates/otf-pixels-core) | Graph, tiles, scheduler, codec and op traits |
+| [`otf-pixels-ops`](https://crates.io/crates/otf-pixels-ops) | Image operations |
+| [`otf-pixels-compress`](https://crates.io/crates/otf-pixels-compress) | DEFLATE, zlib, LZW, checksums |
+| `otf-pixels-codec-*` | One crate per format |
 
-Licensed under [Apache-2.0](https://github.com/Open-Tech-Foundation/Pixels/blob/main/LICENSE).
+## License
+
+Apache-2.0 — see [LICENSE](https://github.com/Open-Tech-Foundation/Pixels/blob/main/LICENSE).
