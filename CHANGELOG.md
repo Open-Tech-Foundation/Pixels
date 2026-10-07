@@ -12,6 +12,13 @@ versioning: [SemVer](https://semver.org/).
   Rust lacks a native engine rather than access to one, and that GPU compute
   is planned for v2 rather than listing it beside shipped features.
 
+### Fixed
+- The CI fuzz job failed before fuzzing anything. The prebuilt cargo-fuzz it
+  installs is a static musl binary, and cargo-fuzz defaults `--target` to its
+  own build triple, so it built for `x86_64-unknown-linux-musl`, which has no
+  std installed and cannot use the address sanitizer. `tsr fuzz` now runs
+  `scripts/fuzz.sh`, which passes the nightly toolchain's host triple.
+
 ## [0.1.0] - 2026-10-07
 
 ### Fixed

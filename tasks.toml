@@ -78,11 +78,11 @@ run = "python3 scripts/regenerate-pngsuite-reference.py crates/otf-pixels-codec-
 [tasks.bench]
 run = "cargo bench -p otf-pixels --bench thumbnail && cargo bench -p otf-pixels --bench ops"
 
-# A short run per target: a regression gate, not a discovery campaign.
-# `-max_total_time` keeps it bounded; any crash fails it. Needs cargo-fuzz.
+# A short run per target: a regression gate, not a discovery campaign. Any
+# crash fails it. Needs cargo-fuzz. A script because it picks cargo-fuzz's
+# `--target`, which a task string cannot compute (see the script).
 [tasks.fuzz]
-run = "cargo +nightly fuzz run png_decode -- -max_total_time=120 && cargo +nightly fuzz run inflate -- -max_total_time=120 && cargo +nightly fuzz run png_roundtrip -- -max_total_time=120 && cargo +nightly fuzz run jpeg_decode -- -max_total_time=120 && cargo +nightly fuzz run jpeg_roundtrip -- -max_total_time=120 && cargo +nightly fuzz run avif_decode -- -max_total_time=120"
-dir = "fuzz"
+run = "./scripts/fuzz.sh"
 
 # What a pull request must pass, needing nothing beyond a Rust toolchain and
 # Python. `interop`, `msrv` and `fuzz` need extra tools and run as their own CI
