@@ -15,6 +15,10 @@ versioning: [SemVer](https://semver.org/).
   is planned for v2 rather than listing it beside shipped features.
 
 ### Fixed
+- Only `otf-pixels` declared a README, so the crates.io pages of the other
+  ten crates were blank. Each now has its own `README.md`, saying what it
+  does and pointing to the `otf-pixels` facade, and `tsr readmes` (part of
+  `tsr ci`) fails if a published crate does not ship one.
 - The CI fuzz job failed before fuzzing anything. The prebuilt cargo-fuzz it
   installs is a static musl binary, and cargo-fuzz defaults `--target` to its
   own build triple, so it built for `x86_64-unknown-linux-musl`, which has no

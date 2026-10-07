@@ -37,6 +37,7 @@ jobs:
       - run: tsr fmt
       - run: tsr clippy
       - run: tsr tables
+      - run: tsr readmes
 
   docs:
     name: docs

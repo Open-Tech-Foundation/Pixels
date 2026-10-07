@@ -44,6 +44,10 @@ env = { RUSTDOCFLAGS = "-D warnings" }
 [tasks.tables]
 run = "python3 scripts/generate-av1-cdf-tables.py && python3 scripts/generate-av1-scan-tables.py && python3 scripts/generate-av1-qm-tables.py && python3 scripts/generate-vp8-tables.py && git diff --exit-code -- crates/otf-pixels-codec-avif/src/av1/cdf.rs crates/otf-pixels-codec-avif/src/av1/scan_tables.rs crates/otf-pixels-codec-avif/src/av1/qm_tables.rs crates/otf-pixels-codec-webp/src/vp8/tables.rs"
 
+# Every published crate ships a README, so no crates.io page is blank.
+[tasks.readmes]
+run = "./scripts/check-package-readmes.sh"
+
 # Each codec is a plugin behind a feature (ARCHITECTURE §Layer 2), so every
 # combination has to build — including none of them.
 [tasks.features]
@@ -88,4 +92,4 @@ run = "./scripts/fuzz.sh"
 # Python. `interop`, `msrv` and `fuzz` need extra tools and run as their own CI
 # jobs; `references` and `bench` are local only.
 [tasks.ci]
-deps = ["fmt", "clippy", "tables", "test", "test:doc", "doc", "features"]
+deps = ["fmt", "clippy", "tables", "readmes", "test", "test:doc", "doc", "features"]
