@@ -32,7 +32,7 @@ use otf_pixels_core::{
     PixelsError, Region, Result, Source, TileMut,
 };
 
-use crate::ifd::{ByteOrder, Directory, parse_header, probe as probe_header};
+use crate::ifd::{ByteOrder, Directory, directory_chain, parse_header, probe as probe_header};
 use crate::image::{Layout, Photometric, TiffImage};
 
 /// Decodes a TIFF stream.
@@ -40,6 +40,8 @@ use crate::image::{Layout, Photometric, TiffImage};
 pub struct TiffDecoder {
     data: Vec<u8>,
     image: TiffImage,
+    /// Images in the file's directory chain, at least 1.
+    pages: u32,
     row: u32,
     /// The most recently decoded chunk, keyed by index.
     ///
@@ -50,7 +52,7 @@ pub struct TiffDecoder {
 }
 
 impl TiffDecoder {
-    /// Read and parse a TIFF.
+    /// Read and parse a TIFF, decoding its first page.
     ///
     /// # Errors
     ///
@@ -58,7 +60,22 @@ impl TiffDecoder {
     /// [`PixelsError::Unsupported`] for a layout this codec does not
     /// implement, or [`PixelsError::LimitExceeded`] if the image exceeds
     /// `limits`.
-    pub fn new<S: Source>(mut source: S, limits: Limits) -> Result<Self> {
+    pub fn new<S: Source>(source: S, limits: Limits) -> Result<Self> {
+        Self::with_page(source, limits, 0)
+    }
+
+    /// Read and parse a TIFF, decoding page `page` (0 is the first).
+    ///
+    /// A multi-page TIFF is a chain of image directories, one per page —
+    /// a stack of scans or faxes. Every page is counted when the file is
+    /// opened ([`Decoder::pages`]), reading only each directory's size and
+    /// link, and only the chosen page is parsed and decoded.
+    ///
+    /// # Errors
+    ///
+    /// As [`TiffDecoder::new`], and [`PixelsError::InvalidArgument`] if the
+    /// file has no page `page`.
+    pub fn with_page<S: Source>(mut source: S, limits: Limits, page: u32) -> Result<Self> {
         // TIFF offsets point anywhere, so the whole file is read. See the
         // module docs for what that does and does not cost.
         let mut data = Vec::new();
@@ -75,12 +92,26 @@ impl TiffDecoder {
         }
 
         let (order, first_ifd) = parse_header(&data)?;
-        let directory = Directory::parse(&data, order, first_ifd)?;
+        let chain = directory_chain(&data, order, first_ifd);
+        // The first page is parsed even when the walk could not vouch for
+        // it, so a broken first directory reports what is wrong with it.
+        let pages = u32::try_from(chain.len()).unwrap_or(u32::MAX).max(1);
+        let offset = match page {
+            0 => first_ifd,
+            _ => chain.get(page as usize).copied().ok_or_else(|| {
+                PixelsError::invalid_argument(
+                    "page",
+                    format!("page {page} was asked for; the file has {pages} (0 is the first)"),
+                )
+            })?,
+        };
+        let directory = Directory::parse(&data, order, offset)?;
         let image = TiffImage::from_directory(&directory, order, &limits)?;
 
         Ok(Self {
             data,
             image,
+            pages,
             row: 0,
             cached: None,
         })
@@ -356,6 +387,10 @@ fn write_sample(
 impl Decoder for TiffDecoder {
     fn descriptor(&self) -> ImageDescriptor {
         self.image.descriptor
+    }
+
+    fn pages(&self) -> u32 {
+        self.pages
     }
 
     fn orientation(&self) -> Orientation {

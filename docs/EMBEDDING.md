@@ -72,6 +72,7 @@ decodes nothing. What opening does by default, each switchable on
 | `auto_orient` | on | EXIF / HEIF orientation applied, so `metadata()` reports upright dimensions |
 | `to_srgb` | on | an ICC profile is converted to sRGB (matrix/TRC profiles) and dropped |
 | `animated` | off | an animation's first frame is the image; see below |
+| `page` | 0 | which page of a multi-page TIFF to open; `Image::pages()` counts them |
 | `limits` | 268 MP | images over `max_pixels` fail at the header with `LimitExceeded` |
 
 Input limits matter for untrusted uploads. A 50000×50000 PNG is 100 bytes
@@ -82,7 +83,8 @@ any allocation.
 
 | sharp | otf-pixels |
 |---|---|
-| `metadata()` | `Image::metadata()`, `Image::animation()`, `Image::icc_profile()` |
+| `metadata()` | `Image::metadata()`, `Image::animation()`, `Image::icc_profile()`; `pages` is `Image::pages()` |
+| `sharp(input, { page })` | `OpenOptions::with_page(page)`; a page past the end is `InvalidArgument` |
 | `resize(w, h, { fit, background, withoutEnlargement, kernel })` | `resize_with(w, h, ResizeOptions::default().with_fit(..).with_background(..).without_enlargement(..).with_filter(..))`, fits `Fill`/`Inside`/`Outside`/`Cover`/`Contain` |
 | `extract` | `crop` |
 | `rotate()` (auto) / `rotate(90)` | `auto_orient` / `rotate(degrees)`, multiples of 90 (other angles are `InvalidArgument` in v1) |

@@ -1,13 +1,17 @@
 # name width height source_mode fnv1a64_of_canonical_rgba
 # Canonical form: 8-bit RGBA, 16-bit samples narrowed by
 # discarding the low byte. source_mode is Pillow's mode,
-# recorded for diagnosis only.
+# recorded for diagnosis only. `name@N` is page N of a
+# multi-page file; a plain name is its first page.
 # Ground truth from libtiff via Pillow; see
 # scripts/regenerate-tiff-reference.py
 bilevel 64 48 1 aad47bfc5f1bbd1d
 gray16 32 24 I;16 922b520d85f83171
 gray_lzw 64 48 L 83c769a9771c532c
 gray_none 64 48 L 83c769a9771c532c
+multipage 48 32 RGB a9d4761ceb9a1d25
+multipage@1 24 40 L d2b6bd90c432c525
+multipage@2 16 16 P 75d3fc29ff484725
 palette 64 48 P 7d8232b2276248eb
 rgb_bigendian 40 30 RGB 846cfea51c663275
 rgb_deflate 64 48 RGB 27252768dd3dd7a5

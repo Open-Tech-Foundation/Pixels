@@ -264,6 +264,17 @@ pub trait Decoder: Send + fmt::Debug {
         None
     }
 
+    /// How many pages the source document holds, at least 1.
+    ///
+    /// A page is a separate image in one file, as in a multi-page TIFF: a
+    /// stack of scans or faxes, not the frames of an animation, which
+    /// [`Decoder::animation`] reports. Rows are always the page the decoder
+    /// was opened on. Known once the decoder is constructed, without decoding
+    /// any page.
+    fn pages(&self) -> u32 {
+        1
+    }
+
     /// The embedded ICC colour profile, if the file carries one.
     ///
     /// Reported, never applied, like [`Decoder::orientation`]: samples come

@@ -48,6 +48,7 @@ encoder.finish(&mut out)?;
 | Area | Support |
 | --- | --- |
 | Decode | Both byte orders, strips and tiles, none/LZW/Deflate/PackBits, 1/8/16-bit |
+| Pages | Counts every page at open; decodes the one you choose |
 | Encode | Strips or tiles, uncompressed or Deflate |
 | Checked against | libtiff, both directions |
 
@@ -55,7 +56,7 @@ encoder.finish(&mut out)?;
 
 | Item | What it does |
 | --- | --- |
-| `TiffDecoder` | Decoder, with region access for tiled files |
+| `TiffDecoder` | Decoder, with region access for tiled files; `with_page(source, limits, n)` picks a page, `pages()` counts them |
 | `TiffEncoder`, `TiffLayout` | Encoder and its strip/tile layout |
 | `TiffImage`, `Directory`, `tag` | The format's own structures |
 | `TiffCodec`, `probe` | Signature detection |

@@ -62,25 +62,36 @@ def main() -> int:
 
     decoded, rejected = [], []
     for path in sorted(glob.glob(os.path.join(args.fixtures, "*.tif"))):
-        name = os.path.basename(path)[:-4]
+        base = os.path.basename(path)[:-4]
         try:
-            image = Image.open(path)
-            image.load()
-            rgba = canonical_rgba(image)
+            pages = getattr(Image.open(path), "n_frames", 1)
         except Exception as error:
-            rejected.append((name, str(error)[:60]))
+            rejected.append((base, str(error)[:60]))
             continue
-        decoded.append((name, image.size, image.mode, fnv1a64(rgba)))
-        if args.dump:
-            with open(os.path.join(args.dump, name + ".rgba"), "wb") as handle:
-                handle.write(rgba)
+        # Page 0 keeps the file's name; later pages of a multi-page file are
+        # recorded as `name@page`, which the Rust test opens with that page.
+        for page in range(pages):
+            name = base if page == 0 else f"{base}@{page}"
+            try:
+                image = Image.open(path)
+                image.seek(page)
+                image.load()
+                rgba = canonical_rgba(image)
+            except Exception as error:
+                rejected.append((name, str(error)[:60]))
+                continue
+            decoded.append((name, image.size, image.mode, fnv1a64(rgba)))
+            if args.dump:
+                with open(os.path.join(args.dump, name + ".rgba"), "wb") as handle:
+                    handle.write(rgba)
 
     manifest = os.path.join(args.fixtures, "REFERENCE")
     with open(manifest, "w") as handle:
         handle.write("# name width height source_mode fnv1a64_of_canonical_rgba\n")
         handle.write("# Canonical form: 8-bit RGBA, 16-bit samples narrowed by\n")
         handle.write("# discarding the low byte. source_mode is Pillow's mode,\n")
-        handle.write("# recorded for diagnosis only.\n")
+        handle.write("# recorded for diagnosis only. `name@N` is page N of a\n")
+        handle.write("# multi-page file; a plain name is its first page.\n")
         handle.write("# Ground truth from libtiff via Pillow; see\n")
         handle.write("# scripts/regenerate-tiff-reference.py\n")
         for name, (width, height), mode, digest in decoded:

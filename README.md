@@ -111,7 +111,7 @@ Requires Rust 1.85+. Every codec is on by default; for a smaller build, use
 | **WebP** | Lossy, lossless, alpha; first frame of animations | Lossy (default) or lossless |
 | **AVIF** | Still images, 8/10/12-bit | Lossy, 8-bit |
 | **GIF** | Every frame, interlace, disposal; first frame composited | Single frame, quantized palette |
-| **TIFF** | Baseline 6.0, strips and tiles, LZW/Deflate/PackBits | Strips or tiles, Deflate |
+| **TIFF** | Baseline 6.0, strips and tiles, LZW/Deflate/PackBits; any page of a multi-page file | Strips or tiles, Deflate |
 | **Raw** | Caller-described pixels | Packed pixels |
 
 The format is identified from the file's first bytes, never from its name.

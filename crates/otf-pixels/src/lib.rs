@@ -188,6 +188,13 @@ pub struct OpenOptions {
     /// working when frames do. Off by default, as in sharp: the first frame
     /// is the image, and [`Image::animation`] says what was left out.
     pub animated: bool,
+    /// Which page of a multi-page document to open, 0 being the first.
+    ///
+    /// Only TIFF has pages; [`Image::pages`] says how many a file holds.
+    /// Any other format has exactly one, so asking it for page 1 or later
+    /// fails with [`PixelsError::InvalidArgument`], as does a page past the
+    /// end of a TIFF.
+    pub page: u32,
     /// Bounds on what a file may make the decoder allocate. A runtime facing
     /// untrusted uploads sets these per request; the default refuses images
     /// over 268 megapixels, as sharp does.
@@ -212,6 +219,14 @@ impl OpenOptions {
         self
     }
 
+    /// The defaults with `page` replaced: open that page of a multi-page
+    /// TIFF, 0 being the first.
+    #[must_use]
+    pub const fn with_page(mut self, page: u32) -> Self {
+        self.page = page;
+        self
+    }
+
     /// The defaults with `limits` replaced.
     #[must_use]
     pub const fn with_limits(mut self, limits: Limits) -> Self {
@@ -233,6 +248,7 @@ impl Default for OpenOptions {
             auto_orient: true,
             to_srgb: true,
             animated: false,
+            page: 0,
             limits: Limits::default(),
         }
     }
@@ -251,6 +267,8 @@ pub struct Image {
     icc: Option<Arc<[u8]>>,
     /// The source's animation, when it has more than one frame.
     animation: Option<Arc<Animation>>,
+    /// Pages in the source document, at least 1.
+    pages: u32,
 }
 
 impl Image {
@@ -378,6 +396,17 @@ impl Image {
             )));
         };
         let stream = Prefixed::new(prefix, source);
+        // Only TIFF has pages; everything else is a document of one.
+        if options.page > 0 && codec.format() != Format::Tiff {
+            return Err(PixelsError::invalid_argument(
+                "page",
+                format!(
+                    "page {} was asked for, but a {} has only page 0",
+                    options.page,
+                    codec.format()
+                ),
+            ));
+        }
         // Unused when no decoding codec is compiled in, which is a legitimate
         // if degenerate build rather than a mistake.
         let _ = (&stream, options);
@@ -400,7 +429,7 @@ impl Image {
             }
             #[cfg(feature = "tiff")]
             Format::Tiff => {
-                let decoder = TiffDecoder::new(stream, options.limits)?;
+                let decoder = TiffDecoder::with_page(stream, options.limits, options.page)?;
                 Self::decoded(Box::new(decoder), Format::Tiff, options)
             }
             #[cfg(feature = "webp")]
@@ -435,6 +464,7 @@ impl Image {
         let orientation = decoder.orientation();
         let icc = decoder.icc_profile().map(Vec::from);
         let animation = decoder.animation().map(Arc::new);
+        let pages = decoder.pages();
         if options.animated && animation.is_some() {
             return Err(PixelsError::unsupported(format!(
                 "{format}: multi-frame (animated) pipelines are not implemented yet; \
@@ -443,6 +473,7 @@ impl Image {
         }
         let mut image = Self::from_decoder(decoder, format).with_icc_profile(icc);
         image.animation = animation;
+        image.pages = pages;
         if options.to_srgb {
             image = image.to_srgb();
         }
@@ -470,6 +501,7 @@ impl Image {
         Self {
             icc: None,
             animation: None,
+            pages: 1,
             inner: Ok(otf_pixels_core::Image::from_producer(producer, format)),
         }
     }
@@ -629,7 +661,7 @@ impl Image {
     pub fn composite_with(self, overlay: Self, x: i64, y: i64, blend: Blend) -> Self {
         // The base's profile describes the result; the overlay's pixels are
         // composited as they are.
-        let (icc, animation) = (self.icc, self.animation);
+        let (icc, animation, pages) = (self.icc, self.animation, self.pages);
         let (base, over) = match (self.inner, overlay.inner) {
             (Ok(base), Ok(over)) => (base, over),
             // The first error wins, matching how a single chain behaves.
@@ -640,6 +672,7 @@ impl Image {
             inner: otf_pixels_core::Image::combine(&[base, over], op).map_err(Arc::new),
             icc,
             animation,
+            pages,
         }
     }
 
@@ -654,6 +687,7 @@ impl Image {
             inner: Err(error),
             icc: None,
             animation: None,
+            pages: 1,
         }
     }
 
@@ -666,6 +700,17 @@ impl Image {
     #[must_use]
     pub fn animation(&self) -> Option<&Animation> {
         self.animation.as_deref()
+    }
+
+    /// How many pages the source document holds, at least 1.
+    ///
+    /// More than one only for a multi-page TIFF. The pipeline processes the
+    /// page it was opened on, the first unless [`OpenOptions::page`] chose
+    /// another, so this says what else the file holds. Counting reads no
+    /// pixels.
+    #[must_use]
+    pub const fn pages(&self) -> u32 {
+        self.pages
     }
 
     /// The ICC profile this image's pixels are in, if it is not sRGB.
@@ -758,6 +803,7 @@ impl Image {
         Self {
             icc: self.icc,
             animation: self.animation,
+            pages: self.pages,
             inner: match self.inner {
                 Ok(image) => image.apply(op).map_err(Arc::new),
                 // An earlier failure short-circuits: later ops never run.

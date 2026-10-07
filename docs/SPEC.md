@@ -20,6 +20,11 @@ implementation detail and may change without notice.
 - Raw pixel contract: caller supplies width, height, pixel format, stride.
 - TIFF: baseline tag set + none/LZW/deflate compression; exotic tags are
   skipped, not errors.
+- Multi-page TIFF: every page is counted at open (`Image::pages`) and any one
+  can be opened (`OpenOptions::page`); a page past the end is
+  `InvalidArgument`. Counting reads each directory's size and link only, and
+  stops quietly at a broken link, a loop or 65,535 pages, so a file whose
+  first page is sound always opens. Writing multi-page files is not in v1.
 - Animation (GIF, WebP): v1 processes the **first frame**, as sharp does by
   default, and reports what the file holds through `Image::animation` (frame
   count, loop count, per-frame durations). `OpenOptions::animated` is reserved

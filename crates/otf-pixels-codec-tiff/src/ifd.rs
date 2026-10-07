@@ -344,6 +344,44 @@ impl Directory {
     }
 }
 
+/// The most pages a file is taken to hold.
+///
+/// TIFF's `PageNumber` tag is 16-bit, so no conforming document has more,
+/// and the cap bounds the walk on a file built to chain directories forever.
+pub const MAX_PAGES: usize = 65_535;
+
+/// The offsets of every directory in the chain that starts at `first`.
+///
+/// Reads only each directory's entry count and next pointer, so counting
+/// the pages of a large document costs nothing like parsing them. The walk is
+/// lenient: it stops at a pointer outside the file, a directory that would
+/// run past its end, a pointer back to one already seen, or [`MAX_PAGES`].
+/// Plenty of writers leave a bad pointer after the last page, and a file
+/// whose first page is sound must keep opening.
+#[must_use]
+pub fn directory_chain(data: &[u8], order: ByteOrder, first: usize) -> Vec<usize> {
+    let mut chain = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut offset = first;
+    while chain.len() < MAX_PAGES && seen.insert(offset) {
+        // Checked throughout: the offsets come from the file, and on a
+        // 32-bit target one near 4 GiB would overflow the sums.
+        let count = order.u16(data, offset) as usize;
+        let Some(next_at) = offset.checked_add(2 + count * 12) else {
+            break;
+        };
+        if next_at.checked_add(4).is_none_or(|end| end > data.len()) {
+            break;
+        }
+        chain.push(offset);
+        match order.u32(data, next_at) as usize {
+            0 => break,
+            next => offset = next,
+        }
+    }
+    chain
+}
+
 /// Parse the eight-byte TIFF header, returning the byte order and first IFD.
 ///
 /// # Errors
@@ -389,6 +427,45 @@ pub fn probe(prefix: &[u8]) -> bool {
 )]
 mod tests {
     use super::*;
+
+    /// A little-endian file: header, then empty directories at `offsets`,
+    /// each linking to `links[i]`.
+    fn chained(offsets: &[u32], links: &[u32]) -> Vec<u8> {
+        let mut data = b"II*\0".to_vec();
+        data.extend_from_slice(&offsets[0].to_le_bytes());
+        for (&at, &next) in offsets.iter().zip(links) {
+            data.resize(at as usize, 0);
+            data.extend_from_slice(&0_u16.to_le_bytes());
+            data.extend_from_slice(&next.to_le_bytes());
+        }
+        data
+    }
+
+    #[test]
+    fn the_chain_follows_links_and_stops_at_zero() {
+        let data = chained(&[8, 20, 40], &[20, 40, 0]);
+        assert_eq!(directory_chain(&data, ByteOrder::Little, 8), [8, 20, 40]);
+    }
+
+    #[test]
+    fn hostile_chains_end_rather_than_loop_or_overflow() {
+        // A directory that links to itself counts once.
+        let data = chained(&[8], &[8]);
+        assert_eq!(directory_chain(&data, ByteOrder::Little, 8), [8]);
+        // A link back to an earlier page ends the walk there.
+        let data = chained(&[8, 20], &[20, 8]);
+        assert_eq!(directory_chain(&data, ByteOrder::Little, 8), [8, 20]);
+        // A link past the end, or near the top of the address space, ends it.
+        for next in [1_000, u32::MAX - 1, u32::MAX] {
+            let data = chained(&[8], &[next]);
+            assert_eq!(directory_chain(&data, ByteOrder::Little, 8), [8], "{next}");
+            assert!(directory_chain(&data, ByteOrder::Little, next as usize).is_empty());
+        }
+        // An entry count that runs past the file is not a directory.
+        let mut data = chained(&[8], &[0]);
+        data[8..10].copy_from_slice(&u16::MAX.to_le_bytes());
+        assert!(directory_chain(&data, ByteOrder::Little, 8).is_empty());
+    }
 
     /// Build a minimal TIFF with the given entries, in the given byte order.
     fn build(order: ByteOrder, entries: &[(u16, FieldType, Vec<u32>)]) -> Vec<u8> {

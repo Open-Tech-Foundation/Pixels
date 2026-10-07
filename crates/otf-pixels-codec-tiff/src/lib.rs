@@ -27,7 +27,7 @@ mod image;
 
 pub use decoder::{TiffCodec, TiffDecoder, probe};
 pub use encoder::{TiffEncoder, TiffLayout};
-pub use ifd::{ByteOrder, Directory, tag};
+pub use ifd::{ByteOrder, Directory, MAX_PAGES, directory_chain, tag};
 pub use image::{Compression, Layout, Photometric, TiffImage};
 
 /// Translate a compression failure into this crate's error type.

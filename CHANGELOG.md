@@ -6,6 +6,15 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Multi-page TIFF reading. `Image::pages()` says how many pages a file holds,
+  counted at open without decoding any, and `OpenOptions::with_page(n)` opens
+  page `n` instead of the first (`TiffDecoder::with_page` underneath). Asking
+  for a page past the end, or for page 1 or later of any other format, is an
+  `InvalidArgument`. A broken link after a page ends the count rather than
+  failing the file, so every TIFF that opened before still opens.
+  `Decoder::pages` is a new trait method with a default of 1.
+
 ## [0.2.0] - 2026-10-07
 
 ### Changed

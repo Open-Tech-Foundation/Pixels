@@ -10,6 +10,8 @@
 //! - both byte orders, `II` and `MM`
 //! - greyscale at 1, 8 and 16 bits; RGB at 8; palette
 //! - both layouts: strips and tiles, at two tile sizes
+//! - a three-page file, each page a different size and colour type; the
+//!   manifest records page N as `name@N`
 //!
 //! The same image stored four ways (`rgb_none`, `rgb_lzw`, `rgb_deflate`,
 //! `rgb_packbits`) must decode identically, which localises a failure to the
@@ -24,9 +26,9 @@
     reason = "tests operate on known-good values and assert shapes directly"
 )]
 
-use otf_pixels_codec_tiff::{ByteOrder, TiffDecoder, probe};
+use otf_pixels_codec_tiff::{ByteOrder, TiffDecoder, directory_chain, probe};
 use otf_pixels_core::{
-    DecodeCapability, Decoder, ImageDescriptor, Limits, PixelFormat, Region, TileBuf,
+    DecodeCapability, Decoder, ErrorCode, ImageDescriptor, Limits, PixelFormat, Region, TileBuf,
 };
 
 fn fixture_dir() -> String {
@@ -71,9 +73,14 @@ fn references() -> Vec<Reference> {
         .collect()
 }
 
-/// Decode a whole TIFF row by row.
+/// Decode the first page of a TIFF row by row.
 fn decode(bytes: &[u8]) -> otf_pixels_core::Result<(ImageDescriptor, Vec<u8>)> {
-    let mut decoder = TiffDecoder::new(bytes, Limits::default())?;
+    decode_page(bytes, 0)
+}
+
+/// Decode page `page` of a TIFF row by row.
+fn decode_page(bytes: &[u8], page: u32) -> otf_pixels_core::Result<(ImageDescriptor, Vec<u8>)> {
+    let mut decoder = TiffDecoder::with_page(bytes, Limits::default(), page)?;
     let descriptor = decoder.descriptor();
     let mut raster = Vec::new();
     let mut row = vec![0_u8; descriptor.row_bytes()];
@@ -124,8 +131,13 @@ fn every_fixture_decodes_to_the_reference_pixels() {
     let mut failures = Vec::new();
 
     for reference in &references {
-        let bytes = read_fixture(&reference.name);
-        match decode(&bytes) {
+        // `name@N` is page N of a multi-page file.
+        let (file, page) = match reference.name.split_once('@') {
+            Some((file, page)) => (file, page.parse().unwrap()),
+            None => (reference.name.as_str(), 0),
+        };
+        let bytes = read_fixture(file);
+        match decode_page(&bytes, page) {
             Ok((descriptor, raster)) => {
                 if descriptor.width != reference.width || descriptor.height != reference.height {
                     failures.push(format!(
@@ -394,4 +406,74 @@ fn single_byte_corruption_never_panics() {
             }
         }
     }
+}
+
+#[test]
+fn a_multi_page_file_counts_its_pages_and_a_single_page_file_has_one() {
+    let multipage = TiffDecoder::new(&read_fixture("multipage")[..], Limits::default()).unwrap();
+    assert_eq!(multipage.pages(), 3);
+    // Every page reports the count, not just the first.
+    let last =
+        TiffDecoder::with_page(&read_fixture("multipage")[..], Limits::default(), 2).unwrap();
+    assert_eq!(last.pages(), 3);
+    assert_eq!(
+        (last.descriptor().width, last.descriptor().height),
+        (16, 16)
+    );
+
+    let single = TiffDecoder::new(&read_fixture("rgb_none")[..], Limits::default()).unwrap();
+    assert_eq!(single.pages(), 1);
+}
+
+#[test]
+fn a_page_past_the_end_is_an_invalid_argument() {
+    for (name, page) in [("multipage", 3), ("rgb_none", 1)] {
+        let error =
+            TiffDecoder::with_page(&read_fixture(name)[..], Limits::default(), page).unwrap_err();
+        assert_eq!(
+            error.code(),
+            ErrorCode::InvalidArgument,
+            "{name} page {page}"
+        );
+    }
+}
+
+/// The byte offset of the `next` pointer that ends page `page`'s directory.
+fn next_pointer_at(bytes: &[u8], page: usize) -> usize {
+    let order = if &bytes[..2] == b"II" {
+        ByteOrder::Little
+    } else {
+        ByteOrder::Big
+    };
+    let first = order.u32(bytes, 4) as usize;
+    let at = directory_chain(bytes, order, first)[page];
+    at + 2 + order.u16(bytes, at) as usize * 12
+}
+
+/// Overwrite the four bytes at `at` with `value`, little-endian.
+fn poke(bytes: &mut [u8], at: usize, value: u32) {
+    bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+#[test]
+fn a_broken_link_after_a_page_ends_the_count_but_not_the_file() {
+    // Writers leave junk after the last page; the pages before it must
+    // still count and decode, exactly as they did before pages existed.
+    let expected = decode(&read_fixture("multipage")).unwrap();
+
+    let mut past_the_end = read_fixture("multipage");
+    let at = next_pointer_at(&past_the_end, 0);
+    poke(&mut past_the_end, at, u32::MAX);
+    let decoder = TiffDecoder::new(&past_the_end[..], Limits::default()).unwrap();
+    assert_eq!(decoder.pages(), 1);
+    assert_eq!(decode(&past_the_end).unwrap(), expected);
+
+    // A loop back to the first page counts each page once and terminates.
+    let mut looped = read_fixture("multipage");
+    let first = u32::from_le_bytes(looped[4..8].try_into().unwrap());
+    let at = next_pointer_at(&looped, 1);
+    poke(&mut looped, at, first);
+    let decoder = TiffDecoder::new(&looped[..], Limits::default()).unwrap();
+    assert_eq!(decoder.pages(), 2);
+    assert_eq!(decode(&looped).unwrap(), expected);
 }
