@@ -6,6 +6,8 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-07
+
 ### Changed
 - The README and every crate's README follow the Open Tech Foundation layout:
   a centred title and tagline, short sections, and tables instead of long
