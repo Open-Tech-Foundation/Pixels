@@ -23,8 +23,8 @@ jobs:
       - name: Install release
         shell: bash
         env:
-          OTF_RELEASE_VERSION: v0.39.0
-        run: curl -fsSL https://raw.githubusercontent.com/Open-Tech-Foundation/release/v0.39.0/install.sh | bash
+          OTF_RELEASE_VERSION: v0.40.0
+        run: curl -fsSL https://raw.githubusercontent.com/Open-Tech-Foundation/release/v0.40.0/install.sh | bash
       - name: Expose release command
         shell: bash
         run: |
@@ -49,8 +49,8 @@ jobs:
       - name: Install release
         shell: bash
         env:
-          OTF_RELEASE_VERSION: v0.39.0
-        run: curl -fsSL https://raw.githubusercontent.com/Open-Tech-Foundation/release/v0.39.0/install.sh | bash
+          OTF_RELEASE_VERSION: v0.40.0
+        run: curl -fsSL https://raw.githubusercontent.com/Open-Tech-Foundation/release/v0.40.0/install.sh | bash
       - name: Expose release command
         shell: bash
         run: |
