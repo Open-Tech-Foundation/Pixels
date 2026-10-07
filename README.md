@@ -22,13 +22,17 @@ Embedding it in a runtime or server: see [docs/EMBEDDING.md](docs/EMBEDDING.md).
 
 ## Why another image library
 
-Every high-performance image library in every ecosystem is OpenCV or libvips
-underneath. Rust has neither: no streaming pipeline engine, no
-demand-driven evaluation. Existing crates (`image`, `zune-image`) are eager —
-whole image in memory, op by op. Pixels brings the libvips execution model to
-Rust, modernized: typed kernels, memory safety, work-stealing tile
-scheduling, and (v2) optional GPU compute — pure Rust on every platform, no
-OS-backend gaps.
+The fast image libraries in most ecosystems wrap a C/C++ engine — usually
+libvips (sharp, pyvips) or OpenCV. Rust can call both through bindings, but
+has no native engine of that kind: nothing that streams pixels through a lazy
+pipeline on demand. The pure-Rust crates (`image`, `zune-image`) are eager —
+they decode the whole image into memory and apply one operation at a time.
+
+Pixels brings the libvips execution model to Rust and modernizes it: typed
+kernels, memory safety and work-stealing tile scheduling. It is pure Rust, so
+it builds the same way on every platform, with no C toolchain or system
+libraries to install. Optional GPU compute is planned for v2
+([ADR-0007](docs/adr/0007-gpu-deferred-to-v2.md)).
 
 ## Design pillars
 

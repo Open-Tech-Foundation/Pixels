@@ -6,6 +6,12 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- The README's "Why another image library" section no longer overclaims:
+  it says most fast libraries wrap libvips or OpenCV (not every one), that
+  Rust lacks a native engine rather than access to one, and that GPU compute
+  is planned for v2 rather than listing it beside shipped features.
+
 ## [0.1.0] - 2026-10-07
 
 ### Fixed
