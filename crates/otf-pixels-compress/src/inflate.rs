@@ -42,6 +42,10 @@ use crate::checksum::Adler32;
 /// amount of already-emitted output that must stay reachable.
 const WINDOW: usize = 32 * 1024;
 
+/// How much consumed input [`BitReader::compact`] lets accumulate before
+/// dropping it.
+const COMPACT_AT: usize = 64 * 1024;
+
 /// Why a decode step stopped early.
 ///
 /// `NeedInput` is not an error: it means the step was rewound and should be
@@ -119,8 +123,11 @@ impl BitReader {
     /// Drop input that has been consumed and can never be rewound to.
     ///
     /// Safe only at a checkpoint boundary, which is where the caller calls it.
+    /// Dropping shifts every unread byte down, so it waits until the consumed
+    /// prefix is both large and at least half the buffer: done after every
+    /// symbol, that shift made decoding quadratic in the input size.
     fn compact(&mut self) {
-        if self.position > 0 {
+        if self.position >= COMPACT_AT && self.position * 2 >= self.data.len() {
             self.data.drain(..self.position);
             self.position = 0;
         }
@@ -219,21 +226,18 @@ impl BitReader {
     /// can be copied across as many feeds as it takes.
     fn take_bytes_upto(&mut self, n: usize, out: &mut Vec<u8>) -> usize {
         let mut taken = 0;
-        while taken < n {
-            // Buffered bits are consumed first, then raw input.
-            if self.count >= 8 {
-                out.push((self.bits & 0xFF) as u8);
-                self.bits >>= 8;
-                self.count -= 8;
-            } else if let Some(&byte) = self.data.get(self.position) {
-                self.position += 1;
-                out.push(byte);
-            } else {
-                break;
-            }
+        // Buffered bits are consumed first, then raw input in one run.
+        while taken < n && self.count >= 8 {
+            out.push((self.bits & 0xFF) as u8);
+            self.bits >>= 8;
+            self.count -= 8;
             taken += 1;
         }
-        taken
+        let rest = self.data.get(self.position..).unwrap_or(&[]);
+        let run = rest.get(..(n - taken).min(rest.len())).unwrap_or(&[]);
+        out.extend_from_slice(run);
+        self.position += run.len();
+        taken + run.len()
     }
 }
 
@@ -245,17 +249,25 @@ fn truncated() -> Error {
 /// The maximum code length DEFLATE permits.
 const MAX_BITS: usize = 15;
 
+/// Code lengths up to this many bits decode with one table lookup.
+const FAST_BITS: u32 = 10;
+
 /// A canonical Huffman decoding table.
 ///
-/// Decoding walks the code length by length rather than using a large lookup
-/// table: slower per symbol, but obviously correct and with no table-size
-/// arithmetic to get wrong on hostile input.
+/// Codes up to [`FAST_BITS`] long, which are nearly all of them in practice,
+/// decode with a single lookup in `fast`. Longer codes fall back to walking
+/// the code length by length, which needs no table-size arithmetic at all;
+/// `fast` is indexed by a masked peek, so every lookup is in bounds by
+/// construction.
 #[derive(Debug, Clone)]
 struct Huffman {
     /// `counts[n]` is how many codes have length `n`.
     counts: [u16; MAX_BITS + 1],
     /// Symbols ordered by code length, then by symbol value.
     symbols: Vec<u16>,
+    /// Indexed by the next [`FAST_BITS`] input bits: `symbol << 4 | length`
+    /// for a code of at most that length, or 0 for none.
+    fast: Vec<u16>,
 }
 
 impl Huffman {
@@ -320,7 +332,45 @@ impl Huffman {
             }
         }
 
-        Ok(Self { counts, symbols })
+        // Canonical codes (RFC 1951 §3.2.2): within a length, consecutive
+        // in symbol order; each length starts where the previous one ended.
+        let mut next_code = [0_u32; MAX_BITS + 1];
+        let mut code = 0_u32;
+        for length in 1..=MAX_BITS {
+            code = (code + u32::from(counts.get(length - 1).copied().unwrap_or(0))) << 1;
+            if let Some(slot) = next_code.get_mut(length) {
+                *slot = code;
+            }
+        }
+        let mut fast = vec![0_u16; 1 << FAST_BITS];
+        for (symbol, &length) in lengths.iter().enumerate() {
+            let length = u32::from(length);
+            if length == 0 || length > FAST_BITS {
+                continue;
+            }
+            let Some(slot) = next_code.get_mut(length as usize) else {
+                continue;
+            };
+            let code = *slot;
+            *slot += 1;
+            // Codes are sent most-significant bit first, but the reader
+            // peeks least-significant first, so the table is indexed by the
+            // code reversed. Every index whose low `length` bits are that
+            // code decodes to this symbol, whatever the bits above them.
+            let reversed = code.reverse_bits() >> (32 - length);
+            let entry = (symbol as u16) << 4 | length as u16;
+            for index in (reversed as usize..fast.len()).step_by(1 << length) {
+                if let Some(cell) = fast.get_mut(index) {
+                    *cell = entry;
+                }
+            }
+        }
+
+        Ok(Self {
+            counts,
+            symbols,
+            fast,
+        })
     }
 
     /// Decode one symbol from `reader`.
@@ -337,6 +387,15 @@ impl Huffman {
         let mut index = 0_i32;
         // Peek the maximum, then consume exactly the bits actually used.
         let peeked = reader.peek(MAX_BITS as u32);
+        let entry = self
+            .fast
+            .get((peeked & ((1 << FAST_BITS) - 1)) as usize)
+            .copied()
+            .unwrap_or(0);
+        if entry != 0 {
+            reader.skip(u32::from(entry & 0xF))?;
+            return Ok(entry >> 4);
+        }
         for length in 1..=MAX_BITS {
             // DEFLATE codes are stored most-significant-bit first within the
             // LSB-first bit stream, so the code is rebuilt bit by bit.
@@ -605,110 +664,151 @@ impl Inflater {
         }
     }
 
-    /// Decode one literal or back-reference from the current coded block.
+    /// Decode literals and back-references from the current coded block until
+    /// it ends or the input runs out.
+    ///
+    /// Each symbol is its own checkpoint, so a pause rewinds only the symbol
+    /// in flight: if any symbol completed this is progress and returns `Ok`,
+    /// and the next step pauses at once. Decoding a run per step, rather than
+    /// one symbol, keeps the per-step bookkeeping off the hot path.
     fn step_coded(&mut self) -> Step<()> {
+        let Self {
+            reader,
+            state,
+            window,
+            produced,
+            limit,
+            ..
+        } = self;
         let State::Coded {
             literals,
             distances,
             last,
-        } = &self.state
+        } = state
         else {
             return Ok(());
         };
-        // Cloning the table handles would fight the borrow checker for no
-        // gain; the tables are read-only, so they are taken out and put back.
-        let literals = literals.clone();
-        let distances = distances.clone();
-        let last = *last;
-
-        let symbol = literals.decode(&mut self.reader)?;
-        match symbol {
-            // A literal byte.
-            0..=255 => {
-                self.check_limit(1)?;
-                self.window.push(symbol as u8);
-                self.produced += 1;
-            }
-            // End of block.
-            256 => {
-                self.state = if last {
-                    State::Done
-                } else {
-                    State::BlockHeader
-                };
-            }
-            // A back-reference.
-            257..=285 => {
-                let index = symbol as usize - 257;
-                let base = LENGTH_BASE.get(index).copied().ok_or_else(|| {
-                    Halt::Fatal(Error::malformed("deflate", "invalid length code"))
-                })?;
-                let extra = LENGTH_EXTRA.get(index).copied().unwrap_or(0);
-                let length = base as usize + self.reader.take(u32::from(extra))? as usize;
-
-                let distance_symbol = distances.decode(&mut self.reader)? as usize;
-                let distance_base =
-                    DISTANCE_BASE.get(distance_symbol).copied().ok_or_else(|| {
-                        Halt::Fatal(Error::malformed("deflate", "invalid distance code"))
-                    })?;
-                let distance_extra = DISTANCE_EXTRA.get(distance_symbol).copied().unwrap_or(0);
-                let distance =
-                    distance_base as usize + self.reader.take(u32::from(distance_extra))? as usize;
-
-                // The reference must land inside what has already been
-                // emitted. This is the check whose absence is the classic
-                // decompressor out-of-bounds read. Comparing against the
-                // retained window rather than total output is what makes it
-                // still correct once old output has been drained away.
-                if distance == 0 || distance > self.window.len() {
-                    return Err(Halt::Fatal(Error::malformed(
-                        "deflate",
-                        format!(
-                            "back-reference of distance {distance} points before the start of \
-                             the {} bytes decoded so far",
-                            self.produced
-                        ),
-                    )));
+        let mut progressed = false;
+        loop {
+            let at = reader.checkpoint();
+            match decode_symbol(reader, literals, distances, window, produced, *limit) {
+                Ok(true) => progressed = true,
+                Ok(false) => break,
+                Err(Halt::NeedInput) => {
+                    reader.restore(at);
+                    return if progressed {
+                        Ok(())
+                    } else {
+                        Err(Halt::NeedInput)
+                    };
                 }
-                self.check_limit(length)?;
-
-                // Copied byte by byte on purpose: overlapping references are
-                // legal and are how DEFLATE encodes runs, so the source may
-                // include bytes this very loop is writing.
-                let start = self.window.len() - distance;
-                for offset in 0..length {
-                    let byte = self.window.get(start + offset).copied().ok_or_else(|| {
-                        Halt::Fatal(Error::malformed(
-                            "deflate",
-                            "back-reference read out of range",
-                        ))
-                    })?;
-                    self.window.push(byte);
-                }
-                self.produced += length;
-            }
-            _ => {
-                return Err(Halt::Fatal(Error::malformed(
-                    "deflate",
-                    format!("literal/length symbol {symbol} is out of range"),
-                )));
+                Err(fatal) => return Err(fatal),
             }
         }
+        *state = if *last {
+            State::Done
+        } else {
+            State::BlockHeader
+        };
         Ok(())
     }
 
     /// Reject output that would exceed the limit.
     fn check_limit(&self, adding: usize) -> Step<()> {
-        if self.produced.saturating_add(adding) > self.limit {
-            return Err(Halt::Fatal(Error::malformed(
-                "deflate",
-                format!(
-                    "stream expands beyond the {} byte limit implied by the image header",
-                    self.limit
-                ),
-            )));
+        check_limit(self.produced, adding, self.limit)
+    }
+}
+
+/// Reject output that would take `produced` past `limit`.
+fn check_limit(produced: usize, adding: usize, limit: usize) -> Step<()> {
+    if produced.saturating_add(adding) > limit {
+        return Err(Halt::Fatal(Error::malformed(
+            "deflate",
+            format!("stream expands beyond the {limit} byte limit implied by the image header"),
+        )));
+    }
+    Ok(())
+}
+
+/// Decode one literal or back-reference into `window`.
+///
+/// Returns `false` at the end of the block. Nothing is written until every
+/// bit of the symbol has been read, so a pause leaves `window` untouched.
+fn decode_symbol(
+    reader: &mut BitReader,
+    literals: &Huffman,
+    distances: &Huffman,
+    window: &mut Vec<u8>,
+    produced: &mut usize,
+    limit: usize,
+) -> Step<bool> {
+    let symbol = literals.decode(reader)?;
+    match symbol {
+        // A literal byte.
+        0..=255 => {
+            check_limit(*produced, 1, limit)?;
+            window.push(symbol as u8);
+            *produced += 1;
+            Ok(true)
         }
-        Ok(())
+        // End of block.
+        256 => Ok(false),
+        // A back-reference.
+        257..=285 => {
+            let index = symbol as usize - 257;
+            let base = LENGTH_BASE
+                .get(index)
+                .copied()
+                .ok_or_else(|| Halt::Fatal(Error::malformed("deflate", "invalid length code")))?;
+            let extra = LENGTH_EXTRA.get(index).copied().unwrap_or(0);
+            let length = base as usize + reader.take(u32::from(extra))? as usize;
+
+            let distance_symbol = distances.decode(reader)? as usize;
+            let distance_base = DISTANCE_BASE
+                .get(distance_symbol)
+                .copied()
+                .ok_or_else(|| Halt::Fatal(Error::malformed("deflate", "invalid distance code")))?;
+            let distance_extra = DISTANCE_EXTRA.get(distance_symbol).copied().unwrap_or(0);
+            let distance =
+                distance_base as usize + reader.take(u32::from(distance_extra))? as usize;
+
+            // The reference must land inside what has already been emitted.
+            // This is the check whose absence is the classic decompressor
+            // out-of-bounds read. Comparing against the retained window
+            // rather than total output is what makes it still correct once
+            // old output has been drained away.
+            if distance == 0 || distance > window.len() {
+                return Err(Halt::Fatal(Error::malformed(
+                    "deflate",
+                    format!(
+                        "back-reference of distance {distance} points before the start of \
+                         the {produced} bytes decoded so far"
+                    ),
+                )));
+            }
+            check_limit(*produced, length, limit)?;
+
+            // Overlapping references are legal and are how DEFLATE encodes
+            // runs: output byte `i` is byte `i - distance`, which may itself
+            // have been written by this copy. Everything from `start` on is
+            // periodic with period `distance`, so copying it from `start`
+            // again continues the run correctly — and each piece doubles, so
+            // a long run takes a handful of copies, and a reference that does
+            // not overlap takes one.
+            let start = window.len() - distance;
+            let mut remaining = length;
+            while remaining > 0 {
+                let piece = remaining.min(window.len() - start);
+                window.extend_from_within(start..start + piece);
+                remaining -= piece;
+            }
+            *produced += length;
+            Ok(true)
+        }
+        _ => Err(Halt::Fatal(Error::malformed(
+            "deflate",
+            format!("literal/length symbol {symbol} is out of range"),
+        ))),
     }
 }
 
@@ -1176,6 +1276,99 @@ mod tests {
     /// directly rather than through the zlib wrapper.
     fn deflate_body(data: &[u8], level: u8) -> Vec<u8> {
         compress(data, level).split_off(2)
+    }
+
+    /// Write `symbols` with the canonical code `lengths` defines, most
+    /// significant code bit first, into DEFLATE's LSB-first bit order.
+    fn encode_canonical(lengths: &[u8], symbols: &[usize]) -> Vec<u8> {
+        let mut codes = vec![0_u32; lengths.len()];
+        let mut code = 0_u32;
+        for length in 1..=MAX_BITS as u8 {
+            for (symbol, &l) in lengths.iter().enumerate() {
+                if l == length {
+                    codes[symbol] = code;
+                    code += 1;
+                }
+            }
+            code <<= 1;
+        }
+        let (mut out, mut bits, mut count) = (Vec::new(), 0_u64, 0_u32);
+        for &symbol in symbols {
+            let length = u32::from(lengths[symbol]);
+            let reversed = codes[symbol].reverse_bits() >> (32 - length);
+            bits |= u64::from(reversed) << count;
+            count += length;
+            while count >= 8 {
+                out.push(bits as u8);
+                bits >>= 8;
+                count -= 8;
+            }
+        }
+        if count > 0 {
+            out.push(bits as u8);
+        }
+        out
+    }
+
+    #[test]
+    fn codes_of_every_length_decode_through_table_and_walk() {
+        // Lengths 1..=15 plus a second 15: a complete code whose short codes
+        // hit the lookup table and whose long ones fall back to the walk.
+        let mut lengths: Vec<u8> = (1..=15).collect();
+        lengths.push(15);
+        let table = Huffman::new(&lengths).unwrap();
+        let symbols: Vec<usize> = (0..lengths.len()).chain((0..lengths.len()).rev()).collect();
+        let mut reader = BitReader::default();
+        reader.feed(&encode_canonical(&lengths, &symbols));
+        reader.end();
+        for &expected in &symbols {
+            assert_eq!(usize::from(table.decode(&mut reader).unwrap()), expected);
+        }
+    }
+
+    #[test]
+    fn overlapping_references_of_every_short_distance_decode() {
+        // A run is a back-reference shorter than its length; the copy must
+        // read bytes it is itself writing. Periods 1..=9 and a long one.
+        let mut original = Vec::new();
+        for period in (1..=9).chain([31, 258]) {
+            let pattern: Vec<u8> = (0..period).map(|i| (i * 37 + period) as u8).collect();
+            for _ in 0..600 / period + 3 {
+                original.extend_from_slice(&pattern);
+            }
+        }
+        for level in [1_u8, 6, 9] {
+            assert_eq!(
+                zlib_decompress(&compress(&original, level), 1 << 20).unwrap(),
+                original
+            );
+        }
+    }
+
+    #[test]
+    fn a_stream_past_the_compaction_threshold_decodes_whole_and_in_pieces() {
+        // Incompressible-ish data keeps the compressed stream well past
+        // `COMPACT_AT`, so consumed input is dropped mid-stream.
+        let mut state = 0x2545_f491_u32;
+        let original: Vec<u8> = (0..400_000)
+            .map(|i| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                if i % 5 == 0 { b'a' } else { state as u8 }
+            })
+            .collect();
+        let stream = compress(&original, 6);
+        assert!(stream.len() > 2 * COMPACT_AT);
+        assert_eq!(zlib_decompress(&stream, 1 << 20).unwrap(), original);
+
+        let mut zlib = ZlibStream::new(1 << 20);
+        let mut out = Vec::new();
+        for piece in stream.chunks(997) {
+            out.extend_from_slice(&zlib.push(piece).unwrap());
+        }
+        out.extend_from_slice(&zlib.finish().unwrap());
+        assert_eq!(out, original);
     }
 
     #[test]

@@ -685,6 +685,35 @@ const fn paeth(a: u8, b: u8, c: u8) -> u8 {
     }
 }
 
+/// Reverse Paeth a whole pixel of `N` bytes at a time.
+///
+/// Each byte predicts from the byte one pixel to its left, which was itself
+/// just reconstructed, so a byte-at-a-time loop is one long dependency chain.
+/// Carrying the left and above-left pixels in registers lets the channels of
+/// a pixel proceed independently. The caller passes a line that is a whole
+/// number of pixels; the first pixel's neighbours start at zero, as §9.2
+/// requires.
+///
+/// Returns `true`, so a caller can tell it apart from "no version for this
+/// stride".
+fn paeth_pixels<const N: usize>(current: &mut [u8], previous: &[u8]) -> bool {
+    let mut left = [0_u8; N];
+    let mut above_left = [0_u8; N];
+    for (pixel, above) in current.chunks_exact_mut(N).zip(previous.chunks_exact(N)) {
+        for (((slot, &up), left), above_left) in pixel
+            .iter_mut()
+            .zip(above)
+            .zip(left.iter_mut())
+            .zip(above_left.iter_mut())
+        {
+            *slot = slot.wrapping_add(paeth(*left, up, *above_left));
+            *left = *slot;
+            *above_left = up;
+        }
+    }
+    true
+}
+
 /// Reverse a filter, writing the reconstructed line into `current`.
 ///
 /// `previous` is the already-reconstructed line above, or zeroes for the first
@@ -700,31 +729,68 @@ pub fn unfilter(filter: Filter, current: &mut [u8], previous: &[u8], stride: usi
             "scanlines differ in length while unfiltering",
         ));
     }
-    for index in 0..current.len() {
-        let raw = current.get(index).copied().unwrap_or(0);
-        // Bytes before the first pixel are treated as zero (§9.2).
-        let left = index
-            .checked_sub(stride)
-            .and_then(|i| current.get(i).copied())
-            .unwrap_or(0);
-        let above = previous.get(index).copied().unwrap_or(0);
-        let above_left = index
-            .checked_sub(stride)
-            .and_then(|i| previous.get(i).copied())
-            .unwrap_or(0);
-        let value = match filter {
-            Filter::None => raw,
-            Filter::Sub => raw.wrapping_add(left),
-            Filter::Up => raw.wrapping_add(above),
-            Filter::Average => {
+    // The filter is chosen once per line, so each one gets its own loop
+    // rather than a `match` per byte. Bytes before the first pixel are
+    // treated as zero (§9.2), which is what the `stride` split expresses.
+    let lead = stride.min(current.len());
+    match filter {
+        Filter::None => {}
+        Filter::Sub => {
+            for index in lead..current.len() {
+                let left = current.get(index - stride).copied().unwrap_or(0);
+                if let Some(slot) = current.get_mut(index) {
+                    *slot = slot.wrapping_add(left);
+                }
+            }
+        }
+        Filter::Up => {
+            for (slot, &above) in current.iter_mut().zip(previous) {
+                *slot = slot.wrapping_add(above);
+            }
+        }
+        Filter::Average => {
+            for (slot, &above) in current.iter_mut().zip(previous).take(lead) {
+                *slot = slot.wrapping_add(above / 2);
+            }
+            for index in lead..current.len() {
+                let left = current.get(index - stride).copied().unwrap_or(0);
+                let above = previous.get(index).copied().unwrap_or(0);
                 // The average is computed in 9 bits then truncated.
                 let mean = ((u16::from(left) + u16::from(above)) / 2) as u8;
-                raw.wrapping_add(mean)
+                if let Some(slot) = current.get_mut(index) {
+                    *slot = slot.wrapping_add(mean);
+                }
             }
-            Filter::Paeth => raw.wrapping_add(paeth(left, above, above_left)),
-        };
-        if let Some(slot) = current.get_mut(index) {
-            *slot = value;
+        }
+        Filter::Paeth => {
+            // Every stride PNG can produce has a whole-pixel version, and a
+            // real scanline is always a whole number of pixels.
+            if current.len() % stride.max(1) == 0 {
+                let done = match stride {
+                    1 => paeth_pixels::<1>(current, previous),
+                    2 => paeth_pixels::<2>(current, previous),
+                    3 => paeth_pixels::<3>(current, previous),
+                    4 => paeth_pixels::<4>(current, previous),
+                    6 => paeth_pixels::<6>(current, previous),
+                    8 => paeth_pixels::<8>(current, previous),
+                    _ => false,
+                };
+                if done {
+                    return Ok(());
+                }
+            }
+            // With no left neighbours, Paeth predicts `above`.
+            for (slot, &above) in current.iter_mut().zip(previous).take(lead) {
+                *slot = slot.wrapping_add(above);
+            }
+            for index in lead..current.len() {
+                let left = current.get(index - stride).copied().unwrap_or(0);
+                let above = previous.get(index).copied().unwrap_or(0);
+                let above_left = previous.get(index - stride).copied().unwrap_or(0);
+                if let Some(slot) = current.get_mut(index) {
+                    *slot = slot.wrapping_add(paeth(left, above, above_left));
+                }
+            }
         }
     }
     Ok(())
@@ -990,6 +1056,36 @@ mod tests {
                 unfilter(filter, &mut restored, &previous, stride).unwrap();
                 assert_eq!(restored, original, "{filter:?} at stride {stride}");
             }
+        }
+    }
+
+    #[test]
+    fn whole_pixel_paeth_matches_the_byte_loop_at_every_stride() {
+        // The byte loop is the reference: it is §9.4 written out directly.
+        for stride in [1_usize, 2, 3, 4, 6, 8] {
+            let len = stride * 23;
+            let previous: Vec<u8> = (0..len).map(|i| (i * 89 % 256) as u8).collect();
+            let line: Vec<u8> = (0..len).map(|i| (i * 53 + 11) as u8).collect();
+
+            let mut expected = line.clone();
+            for index in 0..len {
+                let left = if index >= stride {
+                    expected[index - stride]
+                } else {
+                    0
+                };
+                let above_left = if index >= stride {
+                    previous[index - stride]
+                } else {
+                    0
+                };
+                expected[index] =
+                    expected[index].wrapping_add(paeth(left, previous[index], above_left));
+            }
+
+            let mut actual = line.clone();
+            unfilter(Filter::Paeth, &mut actual, &previous, stride).unwrap();
+            assert_eq!(actual, expected, "stride {stride}");
         }
     }
 

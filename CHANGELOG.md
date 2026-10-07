@@ -12,6 +12,17 @@ versioning: [SemVer](https://semver.org/).
   keep that history.
 
 ### Fixed
+- PNG decoding was about 8x slower than it should be (216 ms for a
+  1280x800 photo, now 18 ms), almost all of it in inflate, which ran some
+  360x slower than zlib. It dropped consumed input after every symbol,
+  shifting the rest of the buffer each time, so its cost grew with the square
+  of the stream; it also cloned both Huffman tables per symbol and decoded
+  codes a bit at a time. Input is now dropped only in large batches, a step
+  decodes a run of symbols, codes up to 10 bits decode with one table lookup,
+  and back-references copy in bulk. Inflate is within 1.4x of zlib. In the
+  PNG decoder, filters are chosen once per line rather than per byte, Paeth
+  reconstructs whole pixels, and 8-bit rows already in the output layout
+  are copied rather than converted pixel by pixel.
 - Every link in the README was broken on the `otf-pixels` crates.io page,
   including the embedding guide: crates.io resolved them against the crate's
   directory, not the repository root. They are now absolute GitHub URLs, and

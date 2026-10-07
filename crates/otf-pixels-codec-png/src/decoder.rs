@@ -450,6 +450,26 @@ impl<S: Source> PngDecoder<S> {
         let channels = self.header.color_type.channels();
         let max = ((1_u32 << depth) - 1) as u16;
 
+        if depth == 8 {
+            // 8-bit samples already in the output layout are the common
+            // case, and the per-pixel conversion below is the identity for
+            // them (`scale8` of an 8-bit value is that value).
+            let same_layout = matches!(
+                (self.header.color_type, format),
+                (ColorType::Rgb, PixelFormat::Rgb8)
+                    | (ColorType::Rgba, PixelFormat::Rgba8)
+                    | (ColorType::Grayscale, PixelFormat::Gray8)
+                    | (ColorType::GrayscaleAlpha, PixelFormat::GrayA8)
+            );
+            if same_layout && samples.len() == out.len() {
+                out.copy_from_slice(samples);
+                return Ok(());
+            }
+            if matches!(self.header.color_type, ColorType::Palette) {
+                return expand_palette_row(samples, format, palette, transparency, out);
+            }
+        }
+
         let mut at = 0;
         for x in 0..width {
             let mut channel = [0_u16; 4];
@@ -721,6 +741,46 @@ const fn scale8(value: u16, max: u16) -> u8 {
     ((value as u32 * 255 + max as u32 / 2) / max as u32) as u8
 }
 
+/// Expand one row of 8-bit palette indices, a byte per pixel.
+///
+/// The per-pixel path handles this too; this one looks each index up once
+/// and writes the entry whole, with the same errors.
+fn expand_palette_row(
+    indices: &[u8],
+    format: PixelFormat,
+    palette: Option<&[[u8; 3]]>,
+    transparency: Option<&Transparency>,
+    out: &mut [u8],
+) -> Result<()> {
+    let entries =
+        palette.ok_or_else(|| PixelsError::malformed("png", "palette image without a palette"))?;
+    let alphas = match transparency {
+        Some(Transparency::Palette(alphas)) => alphas.as_slice(),
+        _ => &[],
+    };
+    let channels = if format == PixelFormat::Rgba8 { 4 } else { 3 };
+    for (&index, pixel) in indices.iter().zip(out.chunks_exact_mut(channels)) {
+        let index = index as usize;
+        let rgb = entries.get(index).ok_or_else(|| {
+            PixelsError::malformed(
+                "png",
+                format!(
+                    "palette index {index} is beyond the {}-entry palette",
+                    entries.len()
+                ),
+            )
+        })?;
+        for (slot, &value) in pixel.iter_mut().zip(rgb) {
+            *slot = value;
+        }
+        if let Some(alpha) = pixel.get_mut(3) {
+            // Entries past the tRNS list are fully opaque.
+            *alpha = alphas.get(index).copied().unwrap_or(255);
+        }
+    }
+    Ok(())
+}
+
 /// Write one output pixel, converting from PNG's layout.
 #[allow(
     clippy::too_many_arguments,
@@ -987,10 +1047,15 @@ impl<S: Source + std::fmt::Debug> Decoder for PngDecoder<S> {
             return Err(PixelsError::graph("png stream vanished after starting"));
         };
         let samples = stream.next_scanline(sample_bytes, stride)?;
-        let palette = stream.palette.clone();
-        let transparency = stream.transparency.clone();
-
-        self.expand_row(&samples, palette.as_deref(), transparency.as_ref(), out)?;
+        let Some(stream) = self.stream.as_deref() else {
+            return Err(PixelsError::graph("png stream vanished after starting"));
+        };
+        self.expand_row(
+            &samples,
+            stream.palette.as_deref(),
+            stream.transparency.as_ref(),
+            out,
+        )?;
         self.row += 1;
 
         // The checksum and IEND follow the last scanline, so the stream is
