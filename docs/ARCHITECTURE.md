@@ -93,6 +93,14 @@ The engine's heart. Evaluation is pull-based:
    pool. Completed tiles satisfy their dependents until the sink's region is
    ready.
 
+One scheduler serves every pipeline in a process: an output runs on
+`Scheduler::global()`, a pool of one worker per core built on first use,
+unless the caller passes a scheduler of its own. Concurrent pipelines share
+its workers and its tile cache (tile keys carry process-unique node IDs, so
+pipelines cannot collide). A run started from inside one of its workers gets
+a private pool instead, since a run blocks its caller and would otherwise
+hold a worker the pool needs.
+
 **Tile shapes are negotiated per pipeline segment (ADR-0003).** Runs of
 `Sequential` ops (decode → pointwise → encode) move full-width strips —
 zero-copy friendly, matches how codecs naturally produce and consume rows.

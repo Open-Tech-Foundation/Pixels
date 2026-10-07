@@ -41,8 +41,19 @@
 //!
 //! Terminals run the pipeline on the demand-driven tile scheduler: output
 //! tiles are evaluated in parallel and delivered to the sink in order, with
-//! peak memory bounded by tiles in flight rather than image size. Tune it with
-//! [`Output::threads`] or [`Output::scheduler_options`].
+//! peak memory bounded by tiles in flight rather than image size.
+//!
+//! Every output runs on [`Scheduler::global`] unless told otherwise: one pool
+//! of worker threads, one per core, and one tile cache, shared by every
+//! pipeline in the process. That is the right setup for a server or a
+//! runtime handling many images at once, and it needs no code: call
+//! `output(...).bytes()` from as many threads as you like and the runs share
+//! the workers. Do not build a [`Scheduler`] per request, and do not set
+//! [`Output::threads`] or [`Output::scheduler_options`] to tune a busy host —
+//! both give that run a private pool, spawned and joined each time, which
+//! under concurrency means a pool per request competing for the same cores.
+//! [`Output::with_scheduler`] runs on a scheduler you built, for a host that
+//! wants image work confined to a fixed number of threads.
 //!
 //! [`Output::bytes_via_reference`] runs the same pipeline through the M1
 //! whole-image evaluator instead. That path is slow and holds every
@@ -766,7 +777,7 @@ impl Image {
             image: self,
             format,
             options,
-            scheduler: SchedulerOptions::default(),
+            scheduler: None,
             shared: None,
         }
     }
@@ -816,7 +827,8 @@ pub struct Output {
     image: Image,
     format: Format,
     options: EncodeOptions,
-    scheduler: SchedulerOptions,
+    /// Options for a private pool for this run, if the caller asked for one.
+    scheduler: Option<SchedulerOptions>,
     /// A scheduler shared with other pipelines, if the caller supplied one.
     shared: Option<Arc<Scheduler>>,
 }
@@ -834,37 +846,46 @@ impl Output {
         self.options
     }
 
-    /// Run this pipeline on `threads` worker threads.
+    /// Run this pipeline on a private pool of `threads` worker threads.
     ///
-    /// Zero, the default, means one per available core. Setting it to one
-    /// gives a fully deterministic serial run, which is what the differential
-    /// tests against the reference evaluator use.
+    /// Zero means one per available core. One gives a fully deterministic
+    /// serial run, which is what the differential tests against the
+    /// reference evaluator use.
+    ///
+    /// This is for tests, benchmarks and one-off tools. The pool is spawned
+    /// for this run and joined when it ends, so a host running many outputs
+    /// at once should leave this unset and let them share
+    /// [`Scheduler::global`] — or pass its own with
+    /// [`Output::with_scheduler`].
     #[must_use]
-    pub const fn threads(mut self, threads: usize) -> Self {
-        self.scheduler.threads = threads;
+    pub fn threads(mut self, threads: usize) -> Self {
+        self.scheduler = Some(self.scheduler.unwrap_or_default().with_threads(threads));
         self
     }
 
-    /// Run on `scheduler`, shared with other pipelines, instead of a pool of
-    /// this run's own.
+    /// Run on `scheduler` instead of [`Scheduler::global`].
     ///
-    /// A server or a runtime should build one [`Scheduler`] at startup and
-    /// pass it to every output: otherwise each run spawns a thread per core
-    /// and joins them when it ends, and concurrent requests each bring their
-    /// own, oversubscribing the machine. Many pipelines may run on one
-    /// scheduler at once, from any threads. [`Output::threads`] and
-    /// [`Output::scheduler_options`] are ignored when one is set: the
-    /// scheduler was configured when it was built.
+    /// For a host that wants image work on a pool it sized itself — say,
+    /// four threads on a sixteen-core machine — build one [`Scheduler`] at
+    /// startup and pass the same one to every output. Building one per
+    /// request defeats the point: each brings its own threads. Many
+    /// pipelines may run on one scheduler at once, from any threads.
+    /// [`Output::threads`] and [`Output::scheduler_options`] are ignored when
+    /// one is set: the scheduler was configured when it was built.
     #[must_use]
     pub fn with_scheduler(mut self, scheduler: Arc<Scheduler>) -> Self {
         self.shared = Some(scheduler);
         self
     }
 
-    /// Tune the scheduler directly.
+    /// Run this pipeline on a private pool tuned by `options`.
+    ///
+    /// As with [`Output::threads`], the pool exists for this run only. To
+    /// tune the pool every output shares, build a [`Scheduler`] with these
+    /// options once and pass it to [`Output::with_scheduler`].
     #[must_use]
     pub const fn scheduler_options(mut self, options: SchedulerOptions) -> Self {
-        self.scheduler = options;
+        self.scheduler = Some(options);
         self
     }
 
@@ -906,15 +927,17 @@ impl Output {
         encoder.write_header(&descriptor, &mut sink)?;
 
         // The scheduler delivers tiles; an encoder wants whole rows in order.
-        // A shared scheduler's threads are reused; otherwise this run gets
-        // its own pool, torn down when it finishes.
-        let owned;
-        let scheduler = match &self.shared {
-            Some(shared) => shared.as_ref(),
-            None => {
-                owned = Scheduler::new(self.scheduler)?;
-                &owned
+        // A run blocks its caller, so one started from inside a worker of the
+        // global pool would hold a thread that pool needs: it gets a private
+        // pool instead, as does a run whose caller asked for one.
+        // A private pool is dropped, and its workers joined, when this ends.
+        let scheduler = match (&self.shared, self.scheduler) {
+            (Some(shared), _) => Arc::clone(shared),
+            (None, Some(options)) => Arc::new(Scheduler::new(options)?),
+            (None, None) if otf_pixels_core::ThreadPool::on_worker_thread() => {
+                Arc::new(Scheduler::with_defaults()?)
             }
+            (None, None) => Scheduler::global()?,
         };
         let mut rows = RowAssembler::new(descriptor);
         let mut stats = scheduler.run(&image, |region, tile| {

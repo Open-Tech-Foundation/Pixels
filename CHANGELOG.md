@@ -7,11 +7,24 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- Every output now runs on `Scheduler::global()`, one process-wide pool of
+  one worker per core, unless given a scheduler of its own (ADR-0016).
+  Before, each output spawned a pool for itself, so a host running 40 jobs
+  at once ran 40 pools on the same cores unless it knew to pass a shared
+  scheduler, which the first host to embed Pixels did not. 40 concurrent
+  PNG-to-JPEG thumbnails run about 13% faster. `threads` and
+  `scheduler_options` still give a run a private pool, and their docs and
+  EMBEDDING.md now say to leave them unset in a concurrent host. A run
+  started on a pool worker gets a private pool, so it cannot wait on the
+  pool it is occupying. Idle workers sleep until there is work instead of
+  waking every millisecond.
 - The README's "Status" section, a milestone-by-milestone progress log, is
   removed now that the v1 milestones are done; ROADMAP.md and the changelog
   keep that history.
 
 ### Fixed
+- EMBEDDING.md recommended `with_threads(1)` on an output, which does not
+  exist; the threading section is rewritten around the new default.
 - PNG decoding was about 8x slower than it should be (216 ms for a
   1280x800 photo, now 18 ms), almost all of it in inflate, which ran some
   360x slower than zlib. It dropped consumed input after every symbol,

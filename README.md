@@ -18,7 +18,8 @@ let webp = Image::open("photo.jpg")?
     .bytes()?;
 ```
 
-Embedding it in a runtime or server: see [docs/EMBEDDING.md](https://github.com/Open-Tech-Foundation/Pixels/blob/main/docs/EMBEDDING.md).
+Calls from many threads at once share one process-wide worker pool, with no
+setup. Embedding it in a runtime or server: see [docs/EMBEDDING.md](https://github.com/Open-Tech-Foundation/Pixels/blob/main/docs/EMBEDDING.md).
 
 ## Why another image library
 

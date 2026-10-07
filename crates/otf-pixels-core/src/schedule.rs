@@ -175,6 +175,32 @@ impl Scheduler {
         Self::new(SchedulerOptions::default())
     }
 
+    /// The process-wide scheduler, built on first use with default options:
+    /// one worker per core and the default cache budget.
+    ///
+    /// This is what an output runs on unless told otherwise, so every
+    /// pipeline in a process shares one pool of threads and one tile cache
+    /// however many run at once. Concurrent runs queue their tiles on the
+    /// same workers rather than each spawning a pool of their own, which is
+    /// what keeps a server handling forty requests at a time from running
+    /// forty threads per core. Its workers sleep while there is no work and
+    /// live as long as the process.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::Io`] if the first call cannot spawn the worker
+    /// threads. A later call tries again.
+    pub fn global() -> Result<Arc<Self>> {
+        static GLOBAL: std::sync::OnceLock<Arc<Scheduler>> = std::sync::OnceLock::new();
+        if let Some(scheduler) = GLOBAL.get() {
+            return Ok(Arc::clone(scheduler));
+        }
+        // Two first calls may race to build one; the loser's pool is dropped,
+        // which joins its idle workers, and both return the winner.
+        let built = Arc::new(Self::with_defaults()?);
+        Ok(Arc::clone(GLOBAL.get_or_init(|| built)))
+    }
+
     /// The worker thread count.
     #[must_use]
     pub const fn threads(&self) -> usize {
@@ -523,6 +549,16 @@ mod tests {
         AccessPattern, BufferSource, DecodedSource, Decoder, Format, ImageDescriptor, Op,
         PixelFormat, PixelsError, TileMut, evaluate,
     };
+
+    #[test]
+    fn the_global_scheduler_is_one_instance_across_threads() {
+        let here = Scheduler::global().unwrap();
+        let there = std::thread::spawn(|| Scheduler::global().unwrap())
+            .join()
+            .unwrap();
+        assert!(Arc::ptr_eq(&here, &there));
+        assert_eq!(here.threads(), ThreadPool::default_threads());
+    }
 
     fn ramp_image(width: u32, height: u32) -> Image {
         let descriptor = ImageDescriptor::new(width, height, PixelFormat::Gray8).unwrap();

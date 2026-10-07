@@ -13,23 +13,43 @@ blocking pool the host already has. `Image`, `Output`, `OpenOptions`,
 `Scheduler` and `PixelsError` are `Send + Sync`, so a pipeline built on one
 thread runs on another.
 
-A run evaluates tiles in parallel on a scheduler's worker threads. Build
-**one** scheduler when the host starts and pass it to every output:
+**Concurrency needs no setup.** Every output runs on `Scheduler::global()`, a
+process-wide pool with one worker per core and one tile cache, built on first
+use and shared by every pipeline in the process. Forty requests at once queue
+their tiles on the same workers; they do not bring forty pools. So the whole
+integration is:
+
+```rust
+// per request, from any thread of the host's blocking pool:
+let bytes = image.resize(400, 300).output(format, options).bytes()?;
+```
+
+Do **not**, in a host that runs outputs concurrently:
+
+- build a `Scheduler` per request: each one spawns a worker per core;
+- call `Output::threads(n)` or `Output::scheduler_options(...)`: both give
+  that one run a private pool, spawned and joined each time. They exist for
+  tests, benchmarks and one-off tools.
+
+Either way, concurrent requests end up with a pool each, competing for the
+same cores.
+
+To give image work a fixed share of the machine instead of every core, build
+**one** scheduler at startup and pass that same one to every output:
 
 ```rust
 use std::sync::Arc;
 use otf_pixels::{Scheduler, SchedulerOptions};
 
-let scheduler = Arc::new(Scheduler::new(SchedulerOptions::default())?); // one per core
+// once, at startup: image work uses at most 4 threads
+let scheduler = Arc::new(Scheduler::new(SchedulerOptions::default().with_threads(4))?);
 // per request:
 let bytes = pipeline.output(format, options).with_scheduler(Arc::clone(&scheduler)).bytes()?;
 ```
 
-Without it, each run spawns a thread per core and joins them when it ends,
-and concurrent requests each bring their own pool. Many pipelines may share
-one scheduler at once, from any threads. Size it to the cores you want image
-work to use. `with_threads(1)` makes each run single-threaded, which suits a
-host that already parallelises across requests.
+The global pool's workers sleep while there is no work and live as long as
+the process. Its tile cache holds at most 64 MB, shared across all
+requests.
 
 ## Input
 

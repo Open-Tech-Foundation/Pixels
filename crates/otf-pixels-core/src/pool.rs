@@ -28,6 +28,26 @@ use std::sync::{Arc, Condvar, Mutex};
 /// A unit of work for the pool.
 type Task = Box<dyn FnOnce() + Send>;
 
+/// How long an idle worker sleeps when no task is pending anywhere.
+///
+/// Correctness does not depend on it: a worker parks only after seeing
+/// `pending == 0` under the parking lock, and a submitter raises `pending`
+/// before signalling under that same lock, so the wakeup cannot be missed. It
+/// is a backstop, long enough that an idle pool living as long as the process
+/// costs nothing measurable.
+const IDLE_PARK: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long an idle worker sleeps while tasks are pending elsewhere.
+///
+/// Work another worker has pulled into its own deque raises no signal, so a
+/// worker that might steal it polls briefly instead.
+const BUSY_PARK: std::time::Duration = std::time::Duration::from_millis(1);
+
+thread_local! {
+    /// Whether this thread is a worker of some [`ThreadPool`].
+    static ON_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Shared state every worker sees.
 struct Shared {
     /// Global queue: where non-worker threads submit work.
@@ -172,6 +192,16 @@ impl ThreadPool {
     /// As [`ThreadPool::new`].
     pub fn with_default_threads() -> Result<Self> {
         Self::new(Self::default_threads())
+    }
+
+    /// Whether the calling thread is a worker of any pool.
+    ///
+    /// A run blocks its caller until its tiles are done, so a run started
+    /// from inside a task would hold a worker of the pool it is waiting on.
+    /// Callers that would otherwise use a shared pool check this first.
+    #[must_use]
+    pub fn on_worker_thread() -> bool {
+        ON_WORKER.with(std::cell::Cell::get)
     }
 
     /// How many workers this pool runs.
@@ -325,6 +355,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 
 /// The body of each worker thread.
 fn worker_loop(shared: &Arc<Shared>, local: &Worker<Task>) {
+    ON_WORKER.with(|flag| flag.set(true));
     loop {
         if shared.shutdown.load(Ordering::SeqCst) && shared.pending.load(Ordering::SeqCst) == 0 {
             return;
@@ -335,8 +366,9 @@ fn worker_loop(shared: &Arc<Shared>, local: &Worker<Task>) {
             shared.pending.fetch_sub(1, Ordering::SeqCst);
             continue;
         }
-        // Nothing to do: park until woken, with a timeout so a missed
-        // notification costs latency rather than a hang.
+        // Nothing to do: park until woken. With nothing pending anywhere the
+        // next submission is guaranteed to signal, so the sleep is long;
+        // with work pending elsewhere, poll briefly in case it can be stolen.
         let guard = shared
             .idle
             .lock()
@@ -344,9 +376,14 @@ fn worker_loop(shared: &Arc<Shared>, local: &Worker<Task>) {
         if shared.shutdown.load(Ordering::SeqCst) {
             return;
         }
+        let park = if shared.pending.load(Ordering::SeqCst) == 0 {
+            IDLE_PARK
+        } else {
+            BUSY_PARK
+        };
         let _unused = shared
             .wake
-            .wait_timeout(guard, std::time::Duration::from_millis(1))
+            .wait_timeout(guard, park)
             .unwrap_or_else(std::sync::PoisonError::into_inner);
     }
 }
@@ -376,6 +413,36 @@ mod tests {
     /// A shared counter, the `'static` shape every pool task uses.
     fn counter() -> Arc<AtomicUsize> {
         Arc::new(AtomicUsize::new(0))
+    }
+
+    #[test]
+    fn workers_know_they_are_workers() {
+        assert!(!ThreadPool::on_worker_thread());
+        let pool = ThreadPool::new(2).unwrap();
+        let seen = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&seen);
+        pool.run_all(vec![move || {
+            flag.store(ThreadPool::on_worker_thread(), Ordering::SeqCst);
+            Ok(())
+        }])
+        .unwrap();
+        assert!(seen.load(Ordering::SeqCst));
+        assert!(!ThreadPool::on_worker_thread());
+    }
+
+    #[test]
+    fn an_idle_pool_wakes_for_new_work_rather_than_polling_for_it() {
+        // Long enough for every worker to park on `IDLE_PARK`. If submitting
+        // did not wake one, the task would wait out the full park.
+        let pool = ThreadPool::new(2).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let started = std::time::Instant::now();
+        pool.run_all(vec![|| Ok(())]).unwrap();
+        assert!(
+            started.elapsed() < IDLE_PARK / 2,
+            "an idle pool took {:?} to run one task",
+            started.elapsed()
+        );
     }
 
     #[test]
