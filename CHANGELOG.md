@@ -6,6 +6,8 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-07
+
 ### Fixed
 - Clippy 1.99, which CI runs, rejected two new lints (`byte_char_slices` in
   the JPEG decoder, manual slice filling in the AV1 tile decoder). Both are
