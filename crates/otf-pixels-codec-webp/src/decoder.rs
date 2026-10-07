@@ -21,8 +21,10 @@ const MAX_COMPRESSED: usize = 256 * 1024 * 1024;
 #[derive(Debug)]
 pub struct WebPDecoder {
     descriptor: ImageDescriptor,
-    /// The decoded image, interleaved.
-    pixels: Vec<u8>,
+    /// The whole file, until the first row is asked for.
+    bytes: Vec<u8>,
+    /// The decoded image, interleaved, once the first row is asked for.
+    pixels: Option<Vec<u8>>,
     /// Rows already served.
     row: u32,
     /// From the `EXIF` chunk, if there is one.
@@ -34,18 +36,24 @@ pub struct WebPDecoder {
 }
 
 impl WebPDecoder {
-    /// Read the container and decode the image.
+    /// Read the file and parse its container; the pixels decode when the
+    /// first row is read.
     ///
-    /// This decodes eagerly: chunks may come in any order the container
-    /// allows, and neither bitstream yields finished rows from a prefix of
-    /// the file without the decoder holding its whole working state.
+    /// The whole file is read here: chunks may come in any order the
+    /// container allows, so the size, alpha, orientation and ICC profile are
+    /// only known once every chunk has been seen. Decoding the bitstream is
+    /// what costs, and it waits, so opening a WebP to ask its size or
+    /// metadata is a header parse. The image then decodes in one piece:
+    /// neither bitstream yields finished rows from a prefix of the file
+    /// without the decoder holding its whole working state.
     ///
     /// # Errors
     ///
-    /// Returns [`PixelsError::Malformed`] for a stream the wrapped decoder
-    /// rejects, [`PixelsError::Unsupported`] for a WebP feature it does not
-    /// implement, or [`PixelsError::LimitExceeded`] if the image exceeds
-    /// `limits`.
+    /// Returns [`PixelsError::Malformed`] for a container or bitstream
+    /// header it rejects, [`PixelsError::Unsupported`] for a WebP feature it
+    /// does not implement, or [`PixelsError::LimitExceeded`] if the image
+    /// exceeds `limits`. A bitstream that is damaged past its header is
+    /// reported by the first [`Decoder::read_row`].
     pub fn new<S: Source>(mut source: S, limits: Limits) -> Result<Self> {
         let mut bytes = Vec::new();
         let mut chunk = [0_u8; 64 * 1024];
@@ -81,6 +89,22 @@ impl WebPDecoder {
         // Enforced before any pixel buffer exists (SPEC §Safety).
         let descriptor =
             ImageDescriptor::with_limits(container.width, container.height, pixel, &limits)?;
+        let icc = container.icc.map(<[u8]>::to_vec);
+        let animation = Animation::new(container.frame_durations_ms.clone(), container.loop_count);
+        Ok(Self {
+            descriptor,
+            bytes,
+            pixels: None,
+            row: 0,
+            orientation,
+            icc,
+            animation,
+        })
+    }
+
+    /// Decode the image onto its canvas, in the output pixel format.
+    fn decode_canvas(&self) -> Result<Vec<u8>> {
+        let container = crate::riff::parse(&self.bytes)?;
         let frame = container.frame;
         let rgba = decode_rgba(
             container.bitstream,
@@ -91,7 +115,7 @@ impl WebPDecoder {
         // The frame onto its canvas: a still fills it; an animation's first
         // frame is written into a transparent-black canvas without blending,
         // as libwebp's animation decoder starts every key frame.
-        let channels = pixel.channels();
+        let channels = self.descriptor.pixel.channels();
         let (canvas_width, frame_width) = (container.width as usize, frame.width as usize);
         let mut pixels =
             vec![0_u8; container.width as usize * container.height as usize * channels];
@@ -111,14 +135,7 @@ impl WebPDecoder {
                 out.copy_from_slice(sample.get(..channels).unwrap_or(&[]));
             }
         }
-        Ok(Self {
-            descriptor,
-            pixels,
-            row: 0,
-            orientation,
-            icc: container.icc.map(<[u8]>::to_vec),
-            animation: Animation::new(container.frame_durations_ms.clone(), container.loop_count),
-        })
+        Ok(pixels)
     }
 }
 
@@ -204,9 +221,16 @@ impl Decoder for WebPDecoder {
                 format!("row buffer is {} bytes, expected {row_bytes}", out.len()),
             ));
         }
+        if self.pixels.is_none() {
+            self.pixels = Some(self.decode_canvas()?);
+            // Decoded, the compressed file is no longer needed.
+            self.bytes = Vec::new();
+        }
         let start = self.row as usize * row_bytes;
         let row = self
             .pixels
+            .as_deref()
+            .unwrap_or(&[])
             .get(start..)
             .and_then(|rest| rest.get(..row_bytes))
             .ok_or_else(|| PixelsError::malformed("webp", "decoded image is short"))?;
@@ -271,6 +295,40 @@ mod tests {
         assert!(!probe(b"RIFF"));
         assert!(!probe(b""));
         assert!(!probe(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    const LOSSY: &[u8] = include_bytes!("../tests/fixtures/lossy/alpha_blocks_q70.webp");
+
+    #[test]
+    fn opening_parses_the_header_and_leaves_the_pixels_for_the_first_row() {
+        let mut decoder = WebPDecoder::new(LOSSY, Limits::default()).unwrap();
+        // Everything metadata needs is known; nothing has been decoded.
+        assert_eq!(decoder.descriptor().pixel, PixelFormat::Rgba8);
+        assert!(decoder.pixels.is_none());
+
+        let mut row = vec![0_u8; decoder.descriptor().row_bytes()];
+        decoder.read_row(&mut row).unwrap();
+        assert!(decoder.pixels.is_some());
+        assert!(decoder.bytes.is_empty(), "the compressed file is released");
+    }
+
+    #[test]
+    fn a_bitstream_damaged_past_its_header_fails_on_the_first_row() {
+        // The lossless bitstream starts at byte 20 (RIFF, WEBP, VP8L chunk
+        // header) with a 5-byte header; everything after it is wrecked, so
+        // the container and the image header still parse.
+        let mut bytes = include_bytes!("../tests/fixtures/lossless/blocks_m6.webp").to_vec();
+        for byte in bytes.iter_mut().skip(25) {
+            *byte = 0xFF;
+        }
+        let mut decoder = WebPDecoder::new(&bytes[..], Limits::default()).unwrap();
+        let mut row = vec![0_u8; decoder.descriptor().row_bytes()];
+        let error = decoder.read_row(&mut row).unwrap_err();
+        assert_eq!(
+            error.code(),
+            otf_pixels_core::ErrorCode::Malformed,
+            "{error}"
+        );
     }
 
     #[test]

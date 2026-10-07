@@ -23,6 +23,11 @@ versioning: [SemVer](https://semver.org/).
   keep that history.
 
 ### Fixed
+- Opening a WebP decoded the whole image, so asking its size or metadata
+  cost a full decode (about 30 ms for a 1280x800 photo). Opening now parses
+  only the container and the bitstream header, and the image decodes when
+  its first row is read; metadata takes microseconds. A bitstream damaged
+  past its header is now reported by the run rather than by opening.
 - EMBEDDING.md recommended `with_threads(1)` on an output, which does not
   exist; the threading section is rewritten around the new default.
 - PNG decoding was about 8x slower than it should be (216 ms for a
