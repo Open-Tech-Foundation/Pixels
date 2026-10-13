@@ -1,9 +1,10 @@
-//! Baseline JPEG codec for `otf-pixels`, implemented from scratch.
+//! JPEG codec for `otf-pixels`, implemented from scratch.
 //!
-//! "Baseline" here means what the format means by it: 8-bit samples, sequential
-//! DCT, Huffman entropy coding. Progressive JPEG is a different enough decoder
-//! that ADR-0004 puts it behind a wrapped codec instead; this crate reports it
-//! as [`PixelsError::Unsupported`] rather than half-decoding it.
+//! Baseline JPEG — 8-bit samples, sequential DCT, Huffman coding — is decoded
+//! and encoded. Progressive JPEG is decoded too (ADR-0018): its scans fill a
+//! coefficient buffer that is then turned into pixels by the same path.
+//! Arithmetic coding, lossless, 12-bit and CMYK report
+//! [`PixelsError::Unsupported`].
 //!
 //! [`PixelsError::Unsupported`]: otf_pixels_core::PixelsError::Unsupported
 //!
@@ -31,7 +32,6 @@ mod fdct;
 mod format;
 mod huffman;
 mod idct;
-#[cfg(feature = "progressive")]
 mod progressive;
 mod tables;
 

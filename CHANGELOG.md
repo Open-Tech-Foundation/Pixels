@@ -7,6 +7,16 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- Progressive JPEG is decoded by `otf-pixels-codec-jpeg` itself instead of
+  the wrapped `jpeg-decoder` (ADR-0018), so the published crates now have no
+  dependencies outside this workspace. Opening a progressive file reads only
+  its headers (metadata for a 12 MP photo: 120 ms to 0.1 ms), and
+  progressive files now decode at 1/2, 1/4 and 1/8 scale, so thumbnails
+  shrink on load (12 MP to 400 px: 160 ms to 102 ms). A full-size
+  progressive decode is slower than before (220 ms against 132 ms), which
+  the coming JPEG speed work addresses. The `jpeg-progressive` feature, and
+  the codec's `progressive` feature, are now deprecated aliases that do
+  nothing extra.
 - The worker pool no longer depends on `crossbeam-deque` (or
   `crossbeam-epoch` and `crossbeam-utils`); `otf-pixels-core` now has no
   dependencies at all (ADR-0017, superseding ADR-0008). Every task already

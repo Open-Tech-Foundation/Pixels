@@ -99,15 +99,14 @@ Requires Rust 1.85+. Every codec is on by default; for a smaller build, use
 | Feature | Format |
 | --- | --- |
 | `png`, `gif`, `tiff`, `webp`, `avif`, `raw` | Each codec on its own |
-| `jpeg` | Baseline JPEG |
-| `jpeg-progressive` | Progressive JPEG decode, the build's only third-party codec (`jpeg-decoder`) |
+| `jpeg` | JPEG, baseline and progressive |
 
 ## Formats
 
 | Format | Decode | Encode |
 | --- | --- | --- |
 | **PNG** | All bit depths, palettes, transparency, interlaced | 8/16-bit, every filter |
-| **JPEG** | Baseline, scaled (1/2, 1/4, 1/8); progressive via feature | Baseline, chroma subsampling |
+| **JPEG** | Baseline and progressive, scaled (1/2, 1/4, 1/8) | Baseline, chroma subsampling |
 | **WebP** | Lossy, lossless, alpha; first frame of animations | Lossy (default) or lossless |
 | **AVIF** | Still images, 8/10/12-bit | Lossy, 8-bit |
 | **GIF** | Every frame, interlace, disposal; first frame composited | Single frame, quantized palette |
@@ -155,7 +154,7 @@ covers limits, errors and fixed-size pools.
 | **Demand-driven tiles** | The output asks for regions, and only the tiles they need are computed, in parallel. |
 | **Streaming I/O** | Sources are readers and sinks are writers; codecs that can't stream buffer internally. |
 | **Hybrid typing** | One dynamic `Image` at the API; typed kernels inside, chosen once per tile. |
-| **Own the codecs** | Every format written from scratch except progressive JPEG decode. |
+| **Own the codecs** | Every format written from scratch; no dependencies outside the workspace. |
 
 GPU compute is planned for v2 ([ADR-0007](https://github.com/Open-Tech-Foundation/Pixels/blob/main/docs/adr/0007-gpu-deferred-to-v2.md)).
 

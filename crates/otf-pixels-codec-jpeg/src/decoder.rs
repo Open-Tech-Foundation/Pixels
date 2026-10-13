@@ -14,6 +14,14 @@
 //! one of each chroma: 16x16 pixels. Decoding a row of them fills a band of
 //! component planes, which is upsampled and colour-converted into interleaved
 //! output rows on the spot. Peak memory is that band, not the image.
+//!
+//! # Progressive frames
+//!
+//! A progressive frame (`SOF2`) is opened the same way, up to its first scan.
+//! On the first row request every scan is decoded into a whole-image buffer of
+//! coefficients (`progressive`), and bands are then built from that buffer
+//! through the same inverse DCT, upsampling and colour conversion — so a
+//! progressive file decodes at reduced scale too.
 
 use crate::entropy::Reader;
 use crate::format::{
@@ -21,6 +29,7 @@ use crate::format::{
 };
 use crate::huffman::HuffmanTable;
 use crate::idct::{self, Scale};
+use crate::progressive::{Coefficients, MAX_SCANS, Tables};
 use otf_pixels_core::{
     Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, Orientation, PixelFormat,
     PixelsError, Result, Source,
@@ -58,61 +67,31 @@ struct Plane {
     rows: Vec<u32>,
 }
 
-/// What parsing the headers turned out to find.
-enum Parsed<S: Source> {
-    /// A baseline frame, decoded by this crate.
-    Baseline(Box<Baseline<S>>),
-    /// A progressive frame, to be handed to the wrapped decoder along with the
-    /// header bytes already consumed from the stream.
-    #[cfg(feature = "progressive")]
-    Progressive {
-        /// Everything read so far, so the stream can be replayed from zero.
-        replay: Vec<u8>,
-        /// The source, positioned after `replay`.
-        source: S,
-        /// Carried across the handover so a progressive photograph reports its
-        /// orientation like a baseline one does.
-        orientation: Option<Orientation>,
-        /// Carried likewise.
-        icc: Option<Vec<u8>>,
-    },
-}
-
 /// Decodes a JPEG stream.
 ///
-/// Baseline frames are decoded by this crate, one MCU row at a time.
-/// Progressive frames are handed to a wrapped decoder (ADR-0004) and are
-/// internally buffered — the distinction is not visible through [`Decoder`],
-/// which is the point of the trait boundary.
+/// Baseline frames stream one MCU row at a time. Progressive frames decode
+/// their scans into a coefficient buffer first and are then served the same
+/// way; the distinction is not visible through [`Decoder`].
 #[derive(Debug)]
 pub struct JpegDecoder<S: Source> {
-    inner: Inner<S>,
+    inner: Box<Engine<S>>,
     /// The ICC profile from the `APP2` segments before the scan.
     icc: Option<Vec<u8>>,
-}
-
-/// Which decoder is actually running.
-#[derive(Debug)]
-enum Inner<S: Source> {
-    Baseline(Box<Baseline<S>>),
-    #[cfg(feature = "progressive")]
-    Progressive(crate::progressive::Progressive),
 }
 
 impl<S: Source> JpegDecoder<S> {
     /// Read every header up to and including the scan header.
     ///
-    /// No coefficient is decoded here for a baseline frame, so this is the
+    /// No coefficient is decoded here, baseline or progressive, so this is the
     /// `probe()`/metadata path as well as the start of a decode (SPEC
-    /// §Guarantees 3). A progressive frame is decoded in full, because it has
-    /// no prefix that yields a finished row.
+    /// §Guarantees 3).
     ///
     /// # Errors
     ///
     /// Returns [`PixelsError::Malformed`] for a stream that is not a
-    /// well-formed JPEG, [`PixelsError::Unsupported`] for a variant neither
-    /// this crate nor the wrapped decoder handles (arithmetic coding, 12-bit,
-    /// CMYK), or [`PixelsError::LimitExceeded`] if the frame exceeds `limits`.
+    /// well-formed JPEG, [`PixelsError::Unsupported`] for a variant this crate
+    /// does not handle (arithmetic coding, lossless, 12-bit, CMYK), or
+    /// [`PixelsError::LimitExceeded`] if the frame exceeds `limits`.
     pub fn new(source: S, limits: Limits) -> Result<Self> {
         Self::with_scale(source, limits, Scale::Full)
     }
@@ -128,69 +107,31 @@ impl<S: Source> JpegDecoder<S> {
     /// [`Decoder::descriptor`] reports the *scaled* size, so a caller that
     /// asks for a reduced decode is told what it will actually receive.
     ///
-    /// `scale` is ignored for a progressive frame, which the wrapped decoder
-    /// produces at full size; [`Decoder::descriptor`] then reports that size,
-    /// so the caller is never misled about what it is getting.
-    ///
     /// # Errors
     ///
     /// As [`JpegDecoder::new`].
     pub fn with_scale(source: S, limits: Limits, scale: Scale) -> Result<Self> {
-        let (inner, icc) = match Baseline::with_scale(source, limits, scale)? {
-            Parsed::Baseline(mut baseline) => {
-                let icc = baseline.icc.take();
-                (Inner::Baseline(baseline), icc)
-            }
-            #[cfg(feature = "progressive")]
-            Parsed::Progressive {
-                replay,
-                source,
-                orientation,
-                icc,
-            } => (
-                Inner::Progressive(crate::progressive::Progressive::new(
-                    replay,
-                    source,
-                    limits,
-                    orientation,
-                )?),
-                icc,
-            ),
-        };
+        let mut inner = Box::new(Engine::with_scale(source, limits, scale)?);
+        let icc = inner.icc.take();
         Ok(Self { inner, icc })
     }
 
     /// The resolution this decoder produces, as eighths of full size.
-    ///
-    /// Always [`Scale::Full`] for a progressive frame.
     #[must_use]
     pub const fn scale(&self) -> Scale {
-        match &self.inner {
-            Inner::Baseline(baseline) => baseline.scale,
-            #[cfg(feature = "progressive")]
-            Inner::Progressive(_) => Scale::Full,
-        }
+        self.inner.scale
     }
 
-    /// Whether this stream was progressive, and so decoded by the wrapped
-    /// codec rather than by this crate.
+    /// Whether this stream is a progressive frame.
     #[must_use]
     pub const fn is_progressive(&self) -> bool {
-        match &self.inner {
-            Inner::Baseline(_) => false,
-            #[cfg(feature = "progressive")]
-            Inner::Progressive(_) => true,
-        }
+        self.inner.progressive
     }
 }
 
 impl<S: Source + std::fmt::Debug> Decoder for JpegDecoder<S> {
     fn descriptor(&self) -> ImageDescriptor {
-        match &self.inner {
-            Inner::Baseline(baseline) => baseline.descriptor(),
-            #[cfg(feature = "progressive")]
-            Inner::Progressive(progressive) => progressive.descriptor(),
-        }
+        self.inner.descriptor()
     }
 
     /// The ICC profile, joined from its `APP2` segments.
@@ -200,53 +141,28 @@ impl<S: Source + std::fmt::Debug> Decoder for JpegDecoder<S> {
 
     /// The EXIF orientation, from the first EXIF `APP1` segment.
     fn orientation(&self) -> Orientation {
-        match &self.inner {
-            Inner::Baseline(baseline) => baseline.orientation,
-            #[cfg(feature = "progressive")]
-            Inner::Progressive(progressive) => progressive.orientation(),
-        }
-        .unwrap_or_default()
+        self.inner.orientation.unwrap_or_default()
     }
 
     fn capability(&self) -> DecodeCapability {
-        match &self.inner {
-            Inner::Baseline(baseline) => baseline.capability(),
-            #[cfg(feature = "progressive")]
-            Inner::Progressive(progressive) => progressive.capability(),
-        }
+        self.inner.capability()
     }
 
     fn reduced_descriptor(&self, target: (u32, u32)) -> Option<ImageDescriptor> {
-        match &self.inner {
-            Inner::Baseline(baseline) => baseline.reduced_descriptor(target),
-            // The wrapped decoder has no reduced-scale path, so shrink-on-load
-            // does not fire for a progressive source.
-            #[cfg(feature = "progressive")]
-            Inner::Progressive(_) => None,
-        }
+        self.inner.reduced_descriptor(target)
     }
 
     fn reduce_to(&mut self, descriptor: ImageDescriptor) -> Result<()> {
-        match &mut self.inner {
-            Inner::Baseline(baseline) => baseline.reduce_to(descriptor),
-            #[cfg(feature = "progressive")]
-            Inner::Progressive(_) => Err(PixelsError::unsupported(
-                "jpeg: a progressive frame decodes at one resolution",
-            )),
-        }
+        self.inner.reduce_to(descriptor)
     }
 
     fn read_row(&mut self, out: &mut [u8]) -> Result<()> {
-        match &mut self.inner {
-            Inner::Baseline(baseline) => baseline.read_row(out),
-            #[cfg(feature = "progressive")]
-            Inner::Progressive(progressive) => progressive.read_row(out),
-        }
+        self.inner.read_row(out)
     }
 }
 
-/// The baseline decoder: everything this crate implements itself.
-struct Baseline<S: Source> {
+/// The decoder proper, for baseline and progressive frames alike.
+struct Engine<S: Source> {
     reader: Reader<S>,
     descriptor: ImageDescriptor,
     frame: Frame,
@@ -284,11 +200,18 @@ struct Baseline<S: Source> {
     limits: Limits,
     /// Output rows already served.
     row: u32,
+    /// Whether the frame is progressive (`SOF2`).
+    progressive: bool,
+    /// A progressive frame's coefficients, once its scans are decoded.
+    coefficients: Option<Coefficients>,
+    /// Each component's quantization table, as it stood at the component's
+    /// first scan; a progressive file may redefine a slot between scans.
+    latched: Vec<Option<[u16; 64]>>,
 }
 
-impl<S: Source> std::fmt::Debug for Baseline<S> {
+impl<S: Source> std::fmt::Debug for Engine<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Baseline")
+        f.debug_struct("Engine")
             .field("descriptor", &self.descriptor)
             .field("colour", &self.colour)
             .field("components", &self.frame.components)
@@ -300,7 +223,7 @@ impl<S: Source> std::fmt::Debug for Baseline<S> {
     }
 }
 
-impl<S: Source> Baseline<S> {
+impl<S: Source> Engine<S> {
     /// Read every header up to and including the scan header.
     ///
     /// No coefficient is decoded here, so this is the `probe()`/metadata path
@@ -327,12 +250,9 @@ impl<S: Source> Baseline<S> {
     /// # Errors
     ///
     /// As [`JpegDecoder::new`].
-    fn with_scale(source: S, limits: Limits, scale: Scale) -> Result<Parsed<S>> {
+    fn with_scale(source: S, limits: Limits, scale: Scale) -> Result<Self> {
         let mut reader = Reader::new(source);
-        // Recorded only until the frame type is known; a baseline frame drops
-        // the tape immediately, so an ordinary decode buffers nothing.
-        #[cfg(feature = "progressive")]
-        reader.record();
+        let mut progressive = false;
         let mut quant = [[0_u16; 64]; 4];
         let mut dc_tables: [Option<HuffmanTable>; 4] = [None, None, None, None];
         let mut ac_tables: [Option<HuffmanTable>; 4] = [None, None, None, None];
@@ -353,44 +273,20 @@ impl<S: Source> Baseline<S> {
         let scan = loop {
             let code = reader.next_marker()?;
             match code {
-                marker::SOF0 | marker::SOF1 => {
+                marker::SOF0 | marker::SOF1 | marker::SOF2 => {
                     if frame.is_some() {
                         return Err(PixelsError::malformed(
                             "jpeg",
                             "stream declares more than one frame",
                         ));
                     }
-                    #[cfg(feature = "progressive")]
-                    reader.forget();
+                    progressive = code == marker::SOF2;
                     let parsed = Frame::parse(&reader.read_segment()?)?;
                     // Checked here rather than once the scan header arrives,
                     // so an enormous frame costs one segment parse and stops
                     // (SPEC §Safety and limits).
                     limits.check(u32::from(parsed.width), u32::from(parsed.height))?;
                     frame = Some(parsed);
-                }
-                marker::SOF2 => {
-                    // ADR-0004: progressive is a wrapped codec, not ours. The
-                    // decoders differ far more than the marker suggests — the
-                    // coefficients arrive in spectral bands across many scans,
-                    // which rules out the one-band-at-a-time streaming this
-                    // decoder is built around. So the stream is handed over
-                    // whole, replayed from the header already consumed.
-                    #[cfg(feature = "progressive")]
-                    {
-                        let (replay, source) = reader.into_replay();
-                        return Ok(Parsed::Progressive {
-                            replay,
-                            source,
-                            orientation,
-                            icc: icc.assemble(),
-                        });
-                    }
-                    #[cfg(not(feature = "progressive"))]
-                    return Err(PixelsError::unsupported(
-                        "jpeg: progressive JPEG; enable the `progressive` feature of \
-                         otf-pixels-codec-jpeg to decode it",
-                    ));
                 }
                 marker::DAC => {
                     return Err(PixelsError::unsupported(
@@ -454,7 +350,11 @@ impl<S: Source> Baseline<S> {
         let Some(frame) = frame else {
             return Err(PixelsError::malformed("jpeg", "stream has no frame header"));
         };
-        check_baseline_scan(&scan)?;
+        // A progressive scan is checked when it is decoded, against the
+        // tables as they stand by then; a baseline one must be complete now.
+        if !progressive {
+            check_baseline_scan(&scan)?;
+        }
 
         let colour = colour_model(&frame, adobe)?;
         let pixel = match colour {
@@ -472,7 +372,7 @@ impl<S: Source> Baseline<S> {
             &limits,
         )?;
 
-        if scan.components.len() != frame.components.len() {
+        if !progressive && scan.components.len() != frame.components.len() {
             // Every component of a baseline frame is coded in one interleaved
             // scan in practice. The alternative — a scan per component — needs
             // whole-image component planes, which would trade the memory
@@ -481,7 +381,7 @@ impl<S: Source> Baseline<S> {
                 "jpeg: non-interleaved baseline scan",
             ));
         }
-        for component in &scan.components {
+        for component in scan.components.iter().filter(|_| !progressive) {
             let slot = frame
                 .components
                 .get(component.index)
@@ -557,9 +457,12 @@ impl<S: Source> Baseline<S> {
             mcu_row: 0,
             scale: Scale::Full,
             row: 0,
+            progressive,
+            coefficients: None,
+            latched: Vec::new(),
         };
         decoder.apply_scale(scale)?;
-        Ok(Parsed::Baseline(Box::new(decoder)))
+        Ok(decoder)
     }
 
     /// Set the resolution this decoder will produce, rebuilding the geometry
@@ -641,6 +544,10 @@ impl<S: Source> Baseline<S> {
                 "jpeg",
                 "more rows were requested than the frame declares",
             ));
+        }
+
+        if self.progressive {
+            return self.fill_band_progressive();
         }
 
         let mut coefficients = [0_i32; 64];
@@ -727,6 +634,154 @@ impl<S: Source> Baseline<S> {
         self.mcu_row += 1;
         self.convert_band();
         self.band_row = 0;
+        Ok(())
+    }
+
+    /// [`Engine::fill_band`] for a progressive frame: the band's blocks come
+    /// from the coefficient buffer, decoded in full on the first call.
+    fn fill_band_progressive(&mut self) -> Result<()> {
+        if self.coefficients.is_none() {
+            self.decode_scans()?;
+        }
+        let Some(stored) = self.coefficients.as_ref() else {
+            return Err(PixelsError::graph(
+                "jpeg coefficients vanished after decoding",
+            ));
+        };
+
+        let mut natural = [0_i32; 64];
+        let scale = self.scale;
+        let sample = scale.block_size() as usize;
+        let mcu_row = self.mcu_row as usize;
+        for (index, component) in self.frame.components.iter().enumerate() {
+            let (h, v) = (usize::from(component.h), usize::from(component.v));
+            // A component no scan ever reached has all-zero coefficients, so
+            // whichever table dequantizes them makes no difference.
+            let quant = self
+                .latched
+                .get(index)
+                .copied()
+                .flatten()
+                .or_else(|| self.quant.get(component.quant as usize).copied())
+                .unwrap_or([0; 64]);
+            let Some(plane) = self.planes.get_mut(index) else {
+                continue;
+            };
+            for block_y in 0..v {
+                for block_x in 0..h * self.mcus_per_line as usize {
+                    let Some(block) = stored.block(index, block_x, mcu_row * v + block_y) else {
+                        continue;
+                    };
+                    for ((&at, &value), &step) in ZIGZAG.iter().zip(block).zip(&quant) {
+                        if let Some(slot) = natural.get_mut(at) {
+                            *slot = i32::from(value) * i32::from(step);
+                        }
+                    }
+                    idct::scaled_block(
+                        &natural,
+                        scale,
+                        &mut plane.samples,
+                        block_y * sample * plane.stride + block_x * sample,
+                        plane.stride,
+                    );
+                }
+            }
+        }
+
+        self.mcu_row += 1;
+        self.convert_band();
+        self.band_row = 0;
+        Ok(())
+    }
+
+    /// Decode every scan of a progressive frame into the coefficient buffer.
+    ///
+    /// The first scan's header was read when the decoder was built. Tables
+    /// and restart intervals may be redefined between scans and take effect
+    /// for the scans after them; the frame ends at `EOI`, or where the data
+    /// runs out, which leaves a partial download showing what arrived.
+    fn decode_scans(&mut self) -> Result<()> {
+        let mut coefficients = Coefficients::new(&self.frame, self.mcus_per_line, self.mcu_rows)?;
+        let mut latched: Vec<Option<[u16; 64]>> = vec![None; self.frame.components.len()];
+        let mut scan = self.scan.clone();
+        let mut scans = 0;
+        'scans: loop {
+            scans += 1;
+            if scans > MAX_SCANS {
+                return Err(PixelsError::malformed(
+                    "jpeg",
+                    format!("progressive frame has more than {MAX_SCANS} scans"),
+                ));
+            }
+            // libjpeg's rule: a component's table is fixed by its first scan.
+            for scanned in &scan.components {
+                let Some(component) = self.frame.components.get(scanned.index) else {
+                    continue;
+                };
+                if let Some(slot) = latched.get_mut(scanned.index) {
+                    if slot.is_none() {
+                        *slot = self.quant.get(component.quant as usize).copied();
+                    }
+                }
+            }
+            let tables = Tables {
+                dc: &self.dc_tables,
+                ac: &self.ac_tables,
+                restart_interval: self.restart_interval,
+            };
+            crate::progressive::decode_scan(
+                &mut self.reader,
+                &self.frame,
+                &scan,
+                &tables,
+                &mut coefficients,
+            )?;
+            self.reader.align();
+
+            loop {
+                // A stream that ends between scans is a partial download:
+                // what arrived stands, as it does mid-scan.
+                let Ok(code) = self.reader.next_marker() else {
+                    break 'scans;
+                };
+                match code {
+                    marker::SOS => {
+                        scan = Scan::parse(&self.reader.read_segment()?, &self.frame)?;
+                        continue 'scans;
+                    }
+                    marker::EOI => break 'scans,
+                    marker::DHT => read_huffman_tables(
+                        &self.reader.read_segment()?,
+                        &mut self.dc_tables,
+                        &mut self.ac_tables,
+                    )?,
+                    marker::DQT => {
+                        read_quantization_tables(&self.reader.read_segment()?, &mut self.quant)?;
+                    }
+                    marker::DRI => {
+                        let payload = self.reader.read_segment()?;
+                        let (Some(&hi), Some(&lo)) = (payload.first(), payload.get(1)) else {
+                            return Err(PixelsError::malformed(
+                                "jpeg",
+                                "DRI segment carries no interval",
+                            ));
+                        };
+                        self.restart_interval = u16::from_be_bytes([hi, lo]);
+                    }
+                    code if marker::is_frame(code) => {
+                        return Err(PixelsError::malformed(
+                            "jpeg",
+                            "stream declares more than one frame",
+                        ));
+                    }
+                    // A stray restart marker between scans carries nothing.
+                    code if marker::is_standalone(code) => {}
+                    _ => self.reader.skip_segment()?,
+                }
+            }
+        }
+        self.coefficients = Some(coefficients);
+        self.latched = latched;
         Ok(())
     }
 
@@ -1022,7 +1077,7 @@ fn read_huffman_tables(
     Ok(())
 }
 
-impl<S: Source + std::fmt::Debug> Decoder for Baseline<S> {
+impl<S: Source + std::fmt::Debug> Decoder for Engine<S> {
     fn descriptor(&self) -> ImageDescriptor {
         self.descriptor
     }

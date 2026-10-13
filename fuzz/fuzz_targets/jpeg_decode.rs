@@ -1,4 +1,5 @@
-//! Decode arbitrary bytes as baseline JPEG. The property is that nothing panics.
+//! Decode arbitrary bytes as JPEG, baseline or progressive. The property is that
+//! nothing panics.
 //!
 //! No assertion is made about the pixels: an arbitrary input has no correct
 //! decoding, so the only thing to check is that the decoder returns a value.

@@ -69,15 +69,6 @@ fn references() -> Vec<Reference> {
         .collect()
 }
 
-/// Whether this build can decode `name` at all.
-///
-/// The progressive fixtures need the wrapped decoder, which is behind a
-/// feature; without it they are expected to be refused, and the suites that
-/// sweep every fixture skip them rather than asserting the impossible.
-fn decodable(name: &str) -> bool {
-    cfg!(feature = "progressive") || !name.starts_with("progressive")
-}
-
 /// Decode a whole fixture into interleaved bytes.
 fn decode(bytes: &[u8]) -> otf_pixels_core::Result<(Vec<u8>, u32, u32, PixelFormat)> {
     let mut decoder = JpegDecoder::new(bytes, Limits::default())?;
@@ -292,7 +283,7 @@ fn hard_edged_subsampled_fixtures_match_libjpeg_away_from_chroma_edges() {
 fn every_fixture_decodes_to_its_declared_shape() {
     let all = references();
     assert!(all.len() >= 10, "the fixture set has shrunk");
-    for reference in all.into_iter().filter(|r| decodable(&r.name)) {
+    for reference in all.into_iter() {
         let (ours, width, height, _) = decode(&read_fixture(&reference.name, "jpg"))
             .unwrap_or_else(|e| panic!("{}: {e}", reference.name));
         assert_eq!(
@@ -329,7 +320,7 @@ fn restart_markers_do_not_change_the_decoded_image() {
 
 #[test]
 fn decoding_is_deterministic() {
-    for reference in references().into_iter().filter(|r| decodable(&r.name)) {
+    for reference in references().into_iter() {
         let bytes = read_fixture(&reference.name, "jpg");
         let (first, ..) = decode(&bytes).unwrap();
         let (second, ..) = decode(&bytes).unwrap();
@@ -404,16 +395,9 @@ fn exif_orientation_is_read_but_not_applied() {
     assert_eq!(ours, expected, "the orientation tag changed the pixels");
 }
 
-/// Progressive JPEG, decoded by the wrapped codec.
-///
-/// The wrapped decoder is not on trial here — libjpeg-turbo and
-/// `jpeg-decoder` are both mature. What is on trial is the **seam**: our
-/// header parser consumes bytes from a forward-only stream before it learns
-/// the frame is progressive, and the wrapped decoder needs the stream from
-/// byte zero. If the replayed prefix were short, long, or misordered, the
-/// picture would be wrong or the file rejected — so an exact-ish comparison
-/// against libjpeg is exactly the check that seam needs.
-#[cfg(feature = "progressive")]
+/// Progressive JPEG against libjpeg's decoding of the same files: 4:4:4 to
+/// the IDCT tolerance everywhere, 4:2:0 to the smooth-chroma bound (the
+/// fixture is shaded so the upsampling filters agree).
 #[test]
 fn progressive_fixtures_match_libjpeg() {
     let mut compared = 0;
@@ -429,12 +413,14 @@ fn progressive_fixtures_match_libjpeg() {
         assert_eq!(pixel, PixelFormat::Rgb8, "{}", reference.name);
         assert_eq!(ours.len(), theirs.len(), "{}: raster size", reference.name);
 
-        // Two decoders of the same progressive stream should agree to within
-        // the IDCT tolerance, chroma upsampling included: unlike our baseline
-        // path, this one does not substitute its own upsampler.
+        let (bound_worst, bound_mean) = if reference.name.contains("420") {
+            (8, 1.5)
+        } else {
+            (3, 0.5)
+        };
         let (worst, mean) = difference(&ours, &theirs, |_| true);
         assert!(
-            worst <= 4 && mean <= 0.5,
+            worst <= bound_worst && mean <= bound_mean,
             "{}: worst {worst}, mean {mean:.3}",
             reference.name
         );
@@ -446,16 +432,88 @@ fn progressive_fixtures_match_libjpeg() {
     );
 }
 
-/// The handover must not disturb what the header said.
-#[cfg(feature = "progressive")]
+/// Decode a whole file at `scale`, returning the raster and whether it was
+/// progressive.
+fn decode_at(bytes: &[u8], scale: otf_pixels_codec_jpeg::Scale) -> (Vec<u8>, bool) {
+    let mut decoder = JpegDecoder::with_scale(bytes, Limits::default(), scale).unwrap();
+    let descriptor = decoder.descriptor();
+    let mut pixels = vec![0_u8; descriptor.row_bytes() * descriptor.height as usize];
+    for row in pixels.chunks_exact_mut(descriptor.row_bytes()) {
+        decoder.read_row(row).unwrap();
+    }
+    (pixels, decoder.is_progressive())
+}
+
+/// The exact check on the progressive decoder.
+///
+/// Each twin is a baseline fixture re-encoded progressively by libjpeg with
+/// the same options, so it holds the same quantized coefficients sent in a
+/// different order: DC first and refine, AC first and refine, with and
+/// without restart intervals, 4:4:4, 4:2:2, 4:2:0 and greyscale. Our decode
+/// of a twin must therefore equal our decode of the baseline file byte for
+/// byte, at full size and every reduced scale — no tolerance involved.
 #[test]
-fn a_progressive_stream_reports_its_shape_and_route() {
+fn progressive_twins_decode_identically_to_their_baseline_files() {
+    let twins = [
+        "blocks420",
+        "gradient422",
+        "restart420",
+        "restart444",
+        "graynoise",
+        "noise444",
+    ];
+    let mut scales = vec![otf_pixels_codec_jpeg::Scale::Full];
+    scales.extend(scales_all());
+    for name in twins {
+        let baseline = read_fixture(name, "jpg");
+        let progressive = read_fixture(&format!("{name}-progressive"), "jpg");
+        for &scale in &scales {
+            let (expected, was_progressive) = decode_at(&baseline, scale);
+            assert!(
+                !was_progressive,
+                "{name}: baseline file read as progressive"
+            );
+            let (ours, is_progressive) = decode_at(&progressive, scale);
+            assert!(
+                is_progressive,
+                "{name}-progressive: not read as progressive"
+            );
+            assert!(
+                ours == expected,
+                "{name}-progressive at {scale:?} differs from its baseline twin"
+            );
+        }
+    }
+}
+
+/// The reduced scales alone.
+fn scales_all() -> Vec<otf_pixels_codec_jpeg::Scale> {
+    scales().into_iter().map(|(scale, ..)| scale).collect()
+}
+
+/// A progressive file reports its shape at open, and decodes at reduced
+/// scale like a baseline one.
+#[test]
+fn a_progressive_stream_reports_its_shape_and_scales() {
     let bytes = read_fixture("progressive", "jpg");
     let decoder = JpegDecoder::new(&bytes[..], Limits::default()).unwrap();
     assert!(decoder.is_progressive());
-    // The wrapped decoder produces one resolution, so shrink-on-load has
-    // nothing to offer and must not claim otherwise.
-    assert_eq!(decoder.scale(), otf_pixels_codec_jpeg::Scale::Full);
+    assert_eq!(
+        (decoder.descriptor().width, decoder.descriptor().height),
+        (48, 32)
+    );
+
+    let quarter = JpegDecoder::with_scale(
+        &bytes[..],
+        Limits::default(),
+        otf_pixels_codec_jpeg::Scale::Quarter,
+    )
+    .unwrap();
+    assert_eq!(quarter.scale(), otf_pixels_codec_jpeg::Scale::Quarter);
+    assert_eq!(
+        (quarter.descriptor().width, quarter.descriptor().height),
+        (12, 8)
+    );
 
     let baseline = read_fixture("gradient444", "jpg");
     let decoder = JpegDecoder::new(&baseline[..], Limits::default()).unwrap();

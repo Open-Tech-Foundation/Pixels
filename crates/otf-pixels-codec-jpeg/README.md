@@ -49,7 +49,7 @@ encoder.finish(&mut out)?;
 | Area | Support |
 | --- | --- |
 | Decode | Baseline 8-bit, standard chroma subsampling; scaled 1/2, 1/4, 1/8 |
-| Progressive | Decode behind the `progressive` feature (on by default), via `jpeg-decoder` |
+| Progressive | Decode, including scaled 1/2, 1/4, 1/8; written from scratch too |
 | Encode | Baseline, quality 1–100, chroma subsampling none / horizontal / both |
 | Checked against | libjpeg, both directions |
 

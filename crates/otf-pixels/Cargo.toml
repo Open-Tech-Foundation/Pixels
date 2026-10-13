@@ -26,7 +26,7 @@ otf-pixels-codec-webp = { workspace = true, optional = true }
 otf-pixels-codec-avif = { workspace = true, optional = true }
 
 [features]
-default = ["raw", "png", "gif", "jpeg", "jpeg-progressive", "tiff", "webp", "avif"]
+default = ["raw", "png", "gif", "jpeg", "tiff", "webp", "avif"]
 # Raw pixel codec. Kept behind a feature for symmetry with the other codecs
 # (ARCHITECTURE §Layer 2: "each format is a plugin behind a cargo feature").
 raw = ["dep:otf-pixels-codec-raw"]
@@ -34,14 +34,11 @@ raw = ["dep:otf-pixels-codec-raw"]
 png = ["dep:otf-pixels-codec-png"]
 # GIF codec, including LZW (ADR-0012).
 gif = ["dep:otf-pixels-codec-gif"]
-# Baseline JPEG codec, including M/8 scaled decode. Progressive JPEG is a
-# wrapped codec and is not part of this feature.
+# JPEG codec, baseline and progressive, including M/8 scaled decode.
 jpeg = ["dep:otf-pixels-codec-jpeg"]
-# Progressive JPEG, which is wrapped rather than owned (ADR-0004) and is the
-# only external dependency in the default build. Drop it with
-# `default-features = false` plus the features you want, and progressive files
-# then report `Unsupported`.
-jpeg-progressive = ["jpeg", "otf-pixels-codec-jpeg?/progressive"]
+# Deprecated, and the same as `jpeg`: progressive decode is now part of the
+# owned JPEG codec (ADR-0018). Kept so builds that name it still compile.
+jpeg-progressive = ["jpeg"]
 # TIFF codec. The only v1 format with region random access.
 tiff = ["dep:otf-pixels-codec-tiff"]
 # WebP, owned outright (ADR-0014): lossy and lossless, decode and encode.
@@ -54,8 +51,8 @@ avif = ["dep:otf-pixels-codec-avif"]
 
 [dev-dependencies]
 # Benchmark comparisons only (ROADMAP M4 exit criterion). These never enter the
-# published dependency graph, so the shipped library stays dependency-free
-# apart from the progressive JPEG decoder behind `jpeg-progressive`.
+# published dependency graph, so the shipped library has no dependencies
+# outside this workspace.
 image = { version = "0.25", default-features = false }
 fast_image_resize = "6"
 

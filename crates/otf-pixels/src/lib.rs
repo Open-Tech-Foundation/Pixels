@@ -106,8 +106,8 @@
 //! # Scope (v1)
 //!
 //! - **Formats**, all implemented in this workspace and checked against
-//!   their reference implementations: PNG, GIF, baseline JPEG (progressive
-//!   decode is wrapped), TIFF, WebP (lossy and lossless) and AVIF, read and
+//!   their reference implementations: PNG, GIF, JPEG (baseline, and
+//!   progressive decode), TIFF, WebP (lossy and lossless) and AVIF, read and
 //!   written, plus raw pixels.
 //! - **Ops**: crop, flip/flop, quarter-turn rotation and orientation,
 //!   resize with sharp's five fit modes, modulate, convolve/blur/sharpen,

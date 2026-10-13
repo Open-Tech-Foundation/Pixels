@@ -114,15 +114,15 @@ FIXTURES = {
         blocks(61, 37), "RGB",
         dict(quality=90, subsampling=0, restart_marker_blocks=3),
     ),
-    # Progressive, which a wrapped decoder handles (ADR-0004). Compared like
-    # any other fixture: what matters is that the seam between our header
-    # parsing and the wrapped decoder produces the same picture libjpeg does.
+    # Progressive (ADR-0018), compared with libjpeg like any other fixture:
+    # 4:4:4 across the whole raster, 4:2:0 smoothly shaded so the upsampling
+    # filters agree. The twins below are the exact check.
     "progressive": (
         gradient(48, 32), "RGB",
         dict(quality=90, subsampling=0, progressive=True),
     ),
     "progressive420": (
-        blocks(64, 48), "RGB",
+        gradient(64, 48), "RGB",
         dict(quality=85, subsampling=2, progressive=True),
     ),
     # Smaller than one MCU in both axes: the whole image is edge padding.
@@ -138,6 +138,15 @@ FIXTURES = {
 UNSUPPORTED = {
     "cmyk": (gradient(48, 32).convert("CMYK"), dict(quality=90)),
 }
+
+
+# Progressive twins of baseline fixtures: the same image, options and
+# quantization, written progressively. A twin holds exactly the baseline
+# file's quantized coefficients, sent in a different order, so our decode of
+# it must equal our decode of the baseline file byte for byte, at every scale
+# — a check that needs no tolerance and covers every scan type, restart
+# intervals included. Written as `<name>-progressive.jpg`; no raster needed.
+TWINS = ["blocks420", "gradient422", "restart420", "restart444", "graynoise", "noise444"]
 
 
 def main() -> int:
@@ -201,6 +210,12 @@ def main() -> int:
 
         manifest.append(f"{name} {width} {height} {channels}")
         print(f"{name}: {width}x{height}x{channels}, {os.path.getsize(path)} bytes")
+
+    for name in TWINS:
+        image, _, options = FIXTURES[name]
+        path = os.path.join(args.fixtures, f"{name}-progressive.jpg")
+        image.save(path, "JPEG", progressive=True, **options)
+        print(f"{name}-progressive: twin of {name}, {os.path.getsize(path)} bytes")
 
     for name, (image, options) in sorted(UNSUPPORTED.items()):
         path = os.path.join(args.fixtures, f"{name}.jpg")

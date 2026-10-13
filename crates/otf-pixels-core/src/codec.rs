@@ -1,9 +1,9 @@
 //! Container formats and the codec traits every format plugs in behind.
 //!
-//! Ownership per format — implemented from scratch versus wrapped — is
-//! recorded in ADR-0004 and is invisible here on purpose: everything sits
-//! behind [`Decoder`] and [`Encoder`], so a format can be rewritten without an
-//! API change.
+//! Every format is implemented in this workspace (ADR-0004, then ADR-0013,
+//! ADR-0014 and ADR-0018), and that is invisible here on purpose: everything
+//! sits behind [`Decoder`] and [`Encoder`], so a format can be rewritten
+//! without an API change.
 
 use crate::{
     ImageDescriptor, Orientation, PixelFormat, PixelsError, Region, Result, Sink, TileMut,

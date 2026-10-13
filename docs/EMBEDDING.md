@@ -137,8 +137,7 @@ compressed stream plus one canvas), progressive JPEG and interlaced PNG.
 
 ## Build
 
-All codecs are default features. The only dependency outside this
-workspace is the wrapped progressive JPEG decoder, through
-`jpeg-progressive` (ADR-0004). Build with `default-features = false` plus the
-codecs you want to leave it out; progressive JPEGs then report `Unsupported`. The crates are 0.x:
-pin the minor version.
+All codecs are default features, and nothing outside this workspace is a
+dependency. Build with `default-features = false` plus the codecs you want
+for a smaller binary. `jpeg-progressive` is a deprecated alias of `jpeg`. The
+crates are 0.x: pin the minor version.

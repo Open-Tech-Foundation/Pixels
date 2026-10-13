@@ -15,7 +15,7 @@ than silent divergence — this replaces the previous DECISIONS.md practice.
 | [0001](0001-libvips-style-demand-driven-engine.md) | libvips-style demand-driven engine | Accepted |
 | [0002](0002-hybrid-pixel-typing.md) | Hybrid pixel typing | Accepted |
 | [0003](0003-negotiated-tile-shapes.md) | Negotiated tile shapes | Accepted |
-| [0004](0004-codec-ownership-split.md) | Codec ownership split | Accepted · superseded in part by [ADR-0013](0013-own-avif.md) and [ADR-0014](0014-own-webp.md) |
+| [0004](0004-codec-ownership-split.md) | Codec ownership split | Accepted · superseded in part by [ADR-0013](0013-own-avif.md), [ADR-0014](0014-own-webp.md) and [ADR-0018](0018-own-progressive-jpeg.md) |
 | [0005](0005-streaming-io-sync-core.md) | Streaming-only I/O, sync core | Accepted |
 | [0006](0006-naming-and-crate-layout.md) | Naming and crate layout | Accepted |
 | [0007](0007-gpu-deferred-to-v2.md) | GPU compute deferred to v2, opt-in | Accepted |
@@ -29,6 +29,7 @@ than silent divergence — this replaces the previous DECISIONS.md practice.
 | [0015](0015-icc-to-srgb.md) | ICC profiles: preserve always, convert matrix/TRC to sRGB | Accepted |
 | [0016](0016-global-scheduler-by-default.md) | One process-wide scheduler by default | Accepted |
 | [0017](0017-own-task-queue.md) | Our own task queue, replacing crossbeam-deque | Accepted |
+| [0018](0018-own-progressive-jpeg.md) | Own progressive JPEG decode | Accepted |
 
 Deferred (no ADR yet, decide when reached): tile cache eviction policy
 details, fusion pass design, error taxonomy granularity.

@@ -56,7 +56,8 @@ Estimates deliberately omitted — scope, not dates, is the commitment.
 ### M6 — JPEG baseline (from scratch) + wrapped codecs
 - Baseline JPEG decode/encode: Huffman, DCT, chroma subsampling; EXIF
   orientation; M/8 scaled decode fast path.
-- Progressive JPEG wrapped behind the codec traits.
+- Progressive JPEG wrapped behind the codec traits (since written here,
+  ADR-0018).
 - **Exit**: full format table in SPEC.md is green; safety guards complete.
 
 ### M6.5 — AVIF from scratch (ADR-0013)

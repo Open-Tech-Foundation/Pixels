@@ -46,9 +46,10 @@ feature. Two capability levels a decoder may declare:
   decode (tiled TIFF; scaled-decode JPEG).
 
 Formats that cannot stream (progressive JPEG, interlaced PNG, AVIF) buffer
-internally; the external contract stays streaming (ADR-0005). Ownership per
-format — from scratch vs wrapped crate — is recorded in ADR-0004 and is
-swappable without API change because everything sits behind the same traits.
+internally; the external contract stays streaming (ADR-0005). Every format
+is implemented in this workspace (ADR-0004, ADR-0013, ADR-0014, ADR-0018), and
+each is swappable without API change because everything sits behind the same
+traits.
 
 Codecs also implement `probe()`: format sniffing from magic bytes and header
 parsing for `metadata()` without pixel decode. Dimension limits
