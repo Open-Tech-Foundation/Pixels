@@ -113,6 +113,25 @@ fn transform([s0, s1, s2, s3, s4, s5, s6, s7]: [i64; 8]) -> [i64; 8] {
 /// right edges of an image are padded to whole blocks by the format, and that
 /// padding has nowhere to go.
 pub fn block(coefficients: &[i32; 64], out: &mut [u8], offset: usize, stride: usize) {
+    // A block with no AC terms — most of a smooth photograph — is one value.
+    // It is computed through the same two passes' arithmetic, so the shortcut
+    // changes no output: the column pass makes column 0 `flat` and the rest
+    // zero, and the row pass turns `[flat, 0, ..]` into `flat << SCALE`.
+    let [dc, ac @ ..] = coefficients;
+    if ac.iter().all(|&value| value == 0) {
+        let flat = ((i64::from(*dc) << SCALE) + rounding(COLUMN_SHIFT)) >> COLUMN_SHIFT;
+        let shifted = ((flat << SCALE) + rounding(ROW_SHIFT)) >> ROW_SHIFT;
+        let value = (shifted + 128).clamp(0, 255) as u8;
+        for row in 0..8 {
+            // Clipped like the general path: edge padding has nowhere to go.
+            let start = offset + row * stride;
+            if let Some(target) = out.get_mut(start..(start + 8).min(out.len())) {
+                target.fill(value);
+            }
+        }
+        return;
+    }
+
     let mut columns = [0_i64; 64];
 
     for column in 0..8 {
@@ -143,7 +162,13 @@ pub fn block(coefficients: &[i32; 64], out: &mut [u8], offset: usize, stride: us
     for row in 0..8 {
         let input: [i64; 8] =
             std::array::from_fn(|column| *columns.get(column + row * 8).unwrap_or(&0));
-        let output = transform(input);
+        // As for columns: a row with no AC terms transforms to a constant.
+        let [first, rest @ ..] = input;
+        let output = if rest.iter().all(|&value| value == 0) {
+            [first << SCALE; 8]
+        } else {
+            transform(input)
+        };
 
         let Some(target) = out.get_mut(offset + row * stride..) else {
             continue;
@@ -381,6 +406,59 @@ mod tests {
             }
         }
         out
+    }
+
+    /// Both passes through `transform`, with neither shortcut: what `block`
+    /// must reproduce exactly.
+    fn without_shortcuts(coefficients: &[i32; 64]) -> Vec<u8> {
+        let mut columns = [0_i64; 64];
+        for column in 0..8 {
+            let input: [i64; 8] =
+                std::array::from_fn(|row| i64::from(coefficients[column + row * 8]));
+            for (row, value) in transform(input).into_iter().enumerate() {
+                columns[column + row * 8] = (value + rounding(COLUMN_SHIFT)) >> COLUMN_SHIFT;
+            }
+        }
+        let mut out = vec![0_u8; 64];
+        for row in 0..8 {
+            let input: [i64; 8] = std::array::from_fn(|column| columns[column + row * 8]);
+            for (column, value) in transform(input).into_iter().enumerate() {
+                let shifted = (value + rounding(ROW_SHIFT)) >> ROW_SHIFT;
+                out[row * 8 + column] = (shifted + 128).clamp(0, 255) as u8;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_shortcuts_change_no_output() {
+        // DC-only blocks, across and beyond the legal range.
+        for dc in -20_000..=20_000 {
+            let mut coefficients = [0_i32; 64];
+            coefficients[0] = dc;
+            assert_eq!(
+                decode(&coefficients),
+                without_shortcuts(&coefficients),
+                "dc {dc}"
+            );
+        }
+        // Sparse blocks, which leave whole rows with no AC terms after the
+        // column pass.
+        let mut state = 0x9E37_79B9_u32;
+        for _ in 0..20_000 {
+            let mut coefficients = [0_i32; 64];
+            for _ in 0..(state % 6) {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let at = (state >> 8) as usize % 64;
+                coefficients[at] = ((state >> 16) % 2001) as i32 - 1000;
+            }
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            assert_eq!(
+                decode(&coefficients),
+                without_shortcuts(&coefficients),
+                "{coefficients:?}"
+            );
+        }
     }
 
     fn decode(coefficients: &[i32; 64]) -> Vec<u8> {

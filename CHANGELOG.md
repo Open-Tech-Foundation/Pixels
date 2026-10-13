@@ -7,7 +7,10 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
-- JPEG decoding is faster: a full 12 MP decode went from 149 ms to 84 ms.
+- JPEG decoding is faster: a full 12 MP decode went from 149 ms to 71 ms.
+  The inverse DCT now short-cuts blocks with no AC terms, and rows left
+  with none after the column pass, through the same arithmetic, so output
+  is unchanged.
   Chroma is expanded to output width once per row with a fixed two-byte copy
   (a `fill` per pixel pair had been a `memset` call each), and YCbCr to RGB
   uses 16-bit multipliers that the baseline x86-64 target can vectorize,
