@@ -67,8 +67,8 @@ Time for one job (best of 10), quality 80, same input files, i7-8700K (12 thread
 
 | Workload | **Pixels** | sharp 0.35 (libvips 8.18) | Pillow 11 | `image` 0.25 |
 | --- | --- | --- | --- | --- |
-| 12 MP JPEG → 400 px WebP | 56 ms | 23 ms | 24 ms | — (no lossy WebP) |
-| 12 MP JPEG → 400 px JPEG | 40 ms | 16 ms | 16 ms | 201 ms |
+| 12 MP JPEG → 400 px WebP | 51 ms | 23 ms | 24 ms | — (no lossy WebP) |
+| 12 MP JPEG → 400 px JPEG | 34 ms | 16 ms | 16 ms | 201 ms |
 | 1280×800 PNG → 320 px JPEG | 20 ms | 15 ms | 27 ms | 24 ms |
 
 The C libraries are still faster on JPEG and WebP, where they use
