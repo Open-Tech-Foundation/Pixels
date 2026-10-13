@@ -7,6 +7,11 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- JPEG decoding is faster: a full 12 MP decode went from 149 ms to 84 ms.
+  Chroma is expanded to output width once per row with a fixed two-byte copy
+  (a `fill` per pixel pair had been a `memset` call each), and YCbCr to RGB
+  uses 16-bit multipliers that the baseline x86-64 target can vectorize,
+  with results identical to before for all 16.7 million inputs.
 - Progressive JPEG is decoded by `otf-pixels-codec-jpeg` itself instead of
   the wrapped `jpeg-decoder` (ADR-0018), so the published crates now have no
   dependencies outside this workspace. Opening a progressive file reads only

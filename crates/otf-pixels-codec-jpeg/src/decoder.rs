@@ -182,6 +182,9 @@ struct Engine<S: Source> {
     /// The ICC profile, until [`JpegDecoder`] takes it.
     icc: Option<Vec<u8>>,
     planes: Vec<Plane>,
+    /// One output-width row per component, reused for every row: the
+    /// component's samples at output resolution, ready for colour conversion.
+    expanded: Vec<Vec<u8>>,
     /// Per-component DC predictor, reset at every restart.
     predictors: Vec<i32>,
     /// Interleaved output rows for the MCU row just decoded.
@@ -449,6 +452,7 @@ impl<S: Source> Engine<S> {
             icc: icc.assemble(),
             limits,
             planes: Vec::new(),
+            expanded: Vec::new(),
             band: Vec::new(),
             band_row: 0,
             band_height: 0,
@@ -526,6 +530,7 @@ impl<S: Source> Engine<S> {
             .ok_or_else(|| PixelsError::malformed("jpeg", "MCU row band overflows"))?;
 
         self.descriptor = descriptor;
+        self.expanded = vec![vec![0_u8; descriptor.width as usize]; planes.len()];
         self.planes = planes;
         self.band = vec![0_u8; band];
         // Nothing decoded yet, so the band is spent and the first `read_row`
@@ -787,9 +792,15 @@ impl<S: Source> Engine<S> {
 
     /// Upsample the component planes and write interleaved pixels into the
     /// output band.
+    ///
+    /// Each component's row is first expanded to output width in a buffer of
+    /// its own, so colour conversion is one straight loop over equal-length
+    /// slices — which the compiler vectorizes — rather than a per-pixel
+    /// lookup into each plane.
     fn convert_band(&mut self) {
         let width = self.descriptor.width as usize;
         let row_bytes = self.descriptor.row_bytes();
+        let h_max = usize::from(self.frame.h_max());
 
         for y in 0..self.band_height as usize {
             let Some(out) = self
@@ -799,34 +810,42 @@ impl<S: Source> Engine<S> {
             else {
                 continue;
             };
+            for ((plane, component), expanded) in self
+                .planes
+                .iter()
+                .zip(&self.frame.components)
+                .zip(self.expanded.iter_mut())
+            {
+                // Whole ratios only; anything else takes the general path.
+                let h = usize::from(component.h.max(1));
+                let ratio = if h_max % h == 0 { h_max / h } else { 0 };
+                plane.expand_row(y, ratio, expanded);
+            }
 
             match self.colour {
                 Colour::Grayscale => {
-                    let Some(plane) = self.planes.first() else {
-                        continue;
-                    };
-                    let source = plane.row(y);
-                    for (x, slot) in out.iter_mut().enumerate().take(width) {
-                        *slot = plane.sample(source, x);
-                    }
-                }
-                Colour::YCbCr | Colour::Rgb => {
-                    let (Some(first), Some(second), Some(third)) =
-                        (self.planes.first(), self.planes.get(1), self.planes.get(2))
-                    else {
-                        continue;
-                    };
-                    let (a, b, c) = (first.row(y), second.row(y), third.row(y));
-                    for (x, pixel) in out.chunks_exact_mut(3).enumerate().take(width) {
-                        let samples = [first.sample(a, x), second.sample(b, x), third.sample(c, x)];
-                        let rgb = if self.colour == Colour::Rgb {
-                            samples
-                        } else {
-                            ycbcr_to_rgb(samples)
-                        };
-                        for (slot, value) in pixel.iter_mut().zip(rgb) {
+                    if let Some(grey) = self.expanded.first() {
+                        for (slot, &value) in out.iter_mut().zip(grey).take(width) {
                             *slot = value;
                         }
+                    }
+                }
+                Colour::Rgb => {
+                    let [a, b, c] =
+                        [0, 1, 2].map(|i| self.expanded.get(i).map_or(&[][..], Vec::as_slice));
+                    for (pixel, ((&r, &g), &b)) in
+                        out.chunks_exact_mut(3).zip(a.iter().zip(b).zip(c))
+                    {
+                        pixel.copy_from_slice(&[r, g, b]);
+                    }
+                }
+                Colour::YCbCr => {
+                    let [luma, cb, cr] =
+                        [0, 1, 2].map(|i| self.expanded.get(i).map_or(&[][..], Vec::as_slice));
+                    for (pixel, ((&y, &cb), &cr)) in
+                        out.chunks_exact_mut(3).zip(luma.iter().zip(cb).zip(cr))
+                    {
+                        pixel.copy_from_slice(&ycbcr_to_rgb([y, cb, cr]));
                     }
                 }
             }
@@ -835,6 +854,41 @@ impl<S: Source> Engine<S> {
 }
 
 impl Plane {
+    /// Write this plane's samples for output row `y` of the band into
+    /// `out`, one per output column. `ratio` is how many output columns one
+    /// sample covers, or 0 if that is not a whole number; 1 and 2 — every
+    /// common layout — take fast paths, and anything else goes through the
+    /// general column table.
+    fn expand_row(&self, y: usize, ratio: usize, out: &mut [u8]) {
+        let source = self.row(y);
+        match ratio {
+            1 => {
+                let count = out.len().min(source.len());
+                if let (Some(to), Some(from)) = (out.get_mut(..count), source.get(..count)) {
+                    to.copy_from_slice(from);
+                }
+            }
+            2 => {
+                // A fixed two-byte copy, not `fill`: on a slice that short,
+                // `fill` is a `memset` call per pixel pair.
+                let half = out.len() / 2;
+                let mut pairs = out.chunks_exact_mut(2);
+                for (pair, &value) in (&mut pairs).zip(source) {
+                    pair.copy_from_slice(&[value, value]);
+                }
+                // An odd width leaves one column, covered by the last sample.
+                if let ([last], Some(&value)) = (pairs.into_remainder(), source.get(half)) {
+                    *last = value;
+                }
+            }
+            _ => {
+                for (x, slot) in out.iter_mut().enumerate() {
+                    *slot = self.sample(source, x);
+                }
+            }
+        }
+    }
+
     /// The plane row backing output row `y` of the band.
     fn row(&self, y: usize) -> &[u8] {
         let row = self.rows.get(y).copied().unwrap_or(0) as usize;
@@ -916,15 +970,27 @@ fn decode_block<S: Source>(
 /// The coefficients are JFIF's, scaled by 2^16. Fixed point rather than float
 /// for ADR-0011's reason: the same input has to produce the same byte on every
 /// target.
+///
+/// Each constant above 2^15 is split into a shift and a multiplier below it,
+/// so every product is 16 by 16 bits: the baseline x86-64 target (SSE2) has
+/// no 32-bit vector multiply but does have 16-bit ones, so this form
+/// vectorizes and the direct one does not. The results are identical.
+///
+/// | Constant | As |
+/// |---|---|
+/// | 91 881 | `(c << 16) + 26 345 c` |
+/// | 116 130 | `(c << 17) − 14 942 c` |
+/// | 46 802 | `(c << 16) − 18 734 c` |
+#[inline]
 pub(crate) fn ycbcr_to_rgb([y, cb, cr]: [u8; 3]) -> [u8; 3] {
     const HALF: i32 = 1 << 15;
-    let luma = i32::from(y) << 16;
-    let blue = i32::from(cb) - 128;
-    let red = i32::from(cr) - 128;
+    let luma = (i32::from(y) << 16) + HALF;
+    let blue = i32::from(i16::from(cb) - 128);
+    let red = i32::from(i16::from(cr) - 128);
 
-    let r = (luma + 91_881 * red + HALF) >> 16;
-    let g = (luma - 22_554 * blue - 46_802 * red + HALF) >> 16;
-    let b = (luma + 116_130 * blue + HALF) >> 16;
+    let r = (luma + (red << 16) + 26_345 * red) >> 16;
+    let g = (luma - 22_554 * blue - (red << 16) + 18_734 * red) >> 16;
+    let b = (luma + (blue << 17) - 14_942 * blue) >> 16;
     [
         r.clamp(0, 255) as u8,
         g.clamp(0, 255) as u8,
@@ -1180,5 +1246,33 @@ impl Codec for JpegCodec {
 
     fn probe(&self, prefix: &[u8]) -> bool {
         probe(prefix)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The split-constant form must equal the direct JFIF formula for every
+    /// one of the 16.7 million inputs, not merely for typical ones.
+    #[test]
+    fn colour_conversion_matches_the_direct_formula_everywhere() {
+        fn direct([y, cb, cr]: [u8; 3]) -> [u8; 3] {
+            const HALF: i32 = 1 << 15;
+            let luma = i32::from(y) << 16;
+            let blue = i32::from(cb) - 128;
+            let red = i32::from(cr) - 128;
+            let r = (luma + 91_881 * red + HALF) >> 16;
+            let g = (luma - 22_554 * blue - 46_802 * red + HALF) >> 16;
+            let b = (luma + 116_130 * blue + HALF) >> 16;
+            [r, g, b].map(|v| v.clamp(0, 255) as u8)
+        }
+        for y in 0..=255 {
+            for cb in 0..=255 {
+                for cr in 0..=255 {
+                    assert_eq!(ycbcr_to_rgb([y, cb, cr]), direct([y, cb, cr]));
+                }
+            }
+        }
     }
 }
