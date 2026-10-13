@@ -36,6 +36,14 @@ versioning: [SemVer](https://semver.org/).
   5–7%.
 
 ### Added
+- sharp's per-pixel adjustments: `negate`, `gamma`, `linear` (and
+  `linear_per_channel`), `threshold`, `tint`, `greyscale`, `recomb` (3x3 and
+  4x4), `ensure_alpha`, `remove_alpha`, `extract_channel_named` (by
+  `Channel`), and `Modulate::with_lightness`. Each works at 8-bit, 16-bit
+  and float depth. Where the result differs from sharp's it says so:
+  `threshold` keeps the input's channel count, and `tint` and `lightness`
+  work on luma rather than Lab, so they are close to sharp's but not
+  identical.
 - Resize `position` and `without_reduction`, as in sharp.
   `ResizeOptions::with_position` takes one of nine gravities (`Position`:
   centre, the four edges, the four corners): which part `Fit::Cover` keeps

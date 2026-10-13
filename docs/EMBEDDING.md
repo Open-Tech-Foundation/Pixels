@@ -89,9 +89,13 @@ any allocation.
 | `extract` | `crop` |
 | `rotate()` (auto) / `rotate(90)` | `auto_orient` / `rotate(degrees)`, multiples of 90 (other angles are `InvalidArgument` in v1) |
 | `flip` / `flop` | `flip` / `flop` |
-| `modulate`, `blur`, `sharpen`, `convolve` | same names |
+| `modulate`, `blur`, `sharpen`, `convolve` | same names; `modulate({ lightness })` is `Modulate::with_lightness`, added to luma rather than Lab L* |
+| `negate({ alpha })`, `greyscale()`, `tint(rgb)`, `threshold(t, { greyscale })` | `negate(alpha)`, `greyscale()`, `tint(r, g, b)`, `threshold(t, greyscale)`. `greyscale` keeps three channels, as sharp's does; `threshold` keeps the input's channel count (sharp returns one); `tint` works in YCbCr (sharp: Lab), so colours are close, not identical |
+| `gamma(g, gOut)` | `gamma(1.0 / g)` before the resize, `gamma(gOut)` after it; `gamma(e)` is libvips' `value^(1/e)` |
+| `linear(a, b)`, `recomb(matrix)` | `linear(a, b)` or `linear_per_channel([..], [..])` (`b` in 8-bit units); `recomb` (3x3) or `recomb_rgba` (4x4) |
+| `ensureAlpha(level)`, `removeAlpha()` | `ensure_alpha(level)`, `remove_alpha()` |
 | `composite` | `composite`, `composite_with` |
-| `flatten`, `extractChannel`, `toColourspace('b-w')` | `flatten`, `extract_channel`, `to_pixel_format(PixelFormat::Gray8)` |
+| `flatten`, `extractChannel`, `toColourspace('b-w')` | `flatten`, `extract_channel(index)` or `extract_channel_named(Channel::Red)`, `to_pixel_format(PixelFormat::Gray8)` |
 | `jpeg/png/webp/avif/gif/tiff({ quality, lossless })` | `output(Format::.., EncodeOptions::with_quality(q)?.with_lossless(..))` |
 | `keepIccProfile` | open with `to_srgb` off; the profile is written to the output |
 

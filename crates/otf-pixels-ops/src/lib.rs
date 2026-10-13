@@ -48,6 +48,7 @@
 //! rather than only under M1's whole-image evaluator, so they must be right
 //! even while the evaluator only ever asks for whole images.
 
+mod adjust;
 mod composite;
 mod convert;
 mod convolve;
@@ -59,6 +60,7 @@ mod resample;
 mod resize;
 mod rotate;
 
+pub use adjust::{EnsureAlpha, Gamma, Greyscale, Linear, Negate, Recomb, Threshold, Tint};
 pub use composite::{Blend, Composite};
 pub use convert::ConvertFormat;
 pub use convolve::{Convolve, Kernel};

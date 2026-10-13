@@ -33,6 +33,12 @@ pub struct Modulate {
     pub saturation: f32,
     /// Rotation of hue in degrees.
     pub hue: f32,
+    /// Lightness added, in sharp's units: 0 to 100 spans black to white, so
+    /// 10 lifts every pixel by a tenth of the range. 0 leaves it unchanged.
+    ///
+    /// sharp adds to Lab's L*; this adds to BT.601 luma, keeping chroma, so
+    /// the result is close to sharp's rather than identical.
+    pub lightness: f32,
 }
 
 impl Default for Modulate {
@@ -41,6 +47,7 @@ impl Default for Modulate {
             brightness: 1.0,
             saturation: 1.0,
             hue: 0.0,
+            lightness: 0.0,
         }
     }
 }
@@ -89,10 +96,29 @@ impl Modulate {
         Ok(self)
     }
 
+    /// Add `amount` to lightness, in sharp's 0..=100 units; negative darkens.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::InvalidArgument`] if `amount` is not finite.
+    pub fn with_lightness(mut self, amount: f32) -> Result<Self> {
+        if !amount.is_finite() {
+            return Err(PixelsError::invalid_argument(
+                "lightness",
+                format!("must be finite, got {amount}"),
+            ));
+        }
+        self.lightness = amount;
+        Ok(self)
+    }
+
     /// Whether this modulation is the identity, and can be skipped entirely.
     #[must_use]
     pub fn is_identity(&self) -> bool {
-        self.brightness == 1.0 && self.saturation == 1.0 && self.hue % 360.0 == 0.0
+        self.brightness == 1.0
+            && self.saturation == 1.0
+            && self.hue % 360.0 == 0.0
+            && self.lightness == 0.0
     }
 }
 
@@ -150,11 +176,20 @@ fn hsv_to_rgb(hue: f32, saturation: f32, value: f32) -> (f32, f32, f32) {
 /// Apply the modulation to one colour, in 0..=1.
 fn modulate_rgb(m: &Modulate, r: f32, g: f32, b: f32) -> (f32, f32, f32) {
     let (hue, saturation, value) = rgb_to_hsv(r, g, b);
-    hsv_to_rgb(
+    let (r, g, b) = hsv_to_rgb(
         hue + m.hue,
         (saturation * m.saturation).clamp(0.0, 1.0),
         (value * m.brightness).clamp(0.0, 1.0),
-    )
+    );
+    // Adding the same amount to every channel moves BT.601 luma by exactly
+    // that amount and leaves both chroma differences alone.
+    let lift = m.lightness / 100.0;
+    (r + lift, g + lift, b + lift)
+}
+
+/// [`Modulate`] on one greyscale value in 0..=1: brightness, then lightness.
+fn modulate_grey(m: &Modulate, value: f32) -> f32 {
+    (value * m.brightness).clamp(0.0, 1.0) + m.lightness / 100.0
 }
 
 impl Op for Modulate {
@@ -229,7 +264,7 @@ fn modulate_row_u8(
             // Hue and saturation have no meaning on one channel; brightness
             // still does, and silently ignoring it would be surprising.
             let value = f32::from(from.first().copied().unwrap_or(0)) / 255.0;
-            let scaled = (value * m.brightness).clamp(0.0, 1.0);
+            let scaled = modulate_grey(m, value).clamp(0.0, 1.0);
             if let Some(slot) = to.first_mut() {
                 *slot = (scaled * 255.0 + 0.5) as u8;
             }
@@ -284,7 +319,7 @@ fn modulate_row_u16(
         };
 
         if is_gray(layout) {
-            write(0, read(0) * m.brightness);
+            write(0, modulate_grey(m, read(0)));
         } else {
             let (r, g, b) = modulate_rgb(m, read(0), read(1), read(2));
             write(0, r);
@@ -333,7 +368,7 @@ fn modulate_row_f32(
         };
 
         if is_gray(layout) {
-            write(0, read(0) * m.brightness);
+            write(0, modulate_grey(m, read(0)));
         } else {
             let (r, g, b) = modulate_rgb(m, read(0), read(1), read(2));
             write(0, r);
@@ -716,6 +751,30 @@ mod tests {
             .unwrap();
         let (_, out) = apply(&m, &desc, &bytes).unwrap();
         assert!(out.iter().all(|&v| v == 50), "got {:?}", &out[..4]);
+    }
+
+    #[test]
+    fn lightness_lifts_every_channel_by_the_same_amount() {
+        // +20 is a fifth of the range: exactly 51 steps at 8-bit.
+        let m = Modulate::identity().with_lightness(20.0).unwrap();
+        let (desc, bytes) = image(2, 2, PixelFormat::Rgba8, &[100, 50, 200, 77]);
+        let (_, out) = apply(&m, &desc, &bytes).unwrap();
+        assert_eq!(&out[..4], &[151, 101, 251, 77]);
+        let (desc, bytes) = image(2, 2, PixelFormat::Gray8, &[100]);
+        let (_, out) = apply(&m, &desc, &bytes).unwrap();
+        assert!(out.iter().all(|&v| v == 151), "got {:?}", &out[..4]);
+        // Negative darkens, and the range clamps rather than wrapping.
+        let m = Modulate::identity().with_lightness(-100.0).unwrap();
+        let (desc, bytes) = image(2, 2, PixelFormat::Rgb8, &[100, 50, 200]);
+        let (_, out) = apply(&m, &desc, &bytes).unwrap();
+        assert!(out.iter().all(|&v| v == 0));
+        assert!(Modulate::identity().with_lightness(f32::NAN).is_err());
+        assert!(
+            !Modulate::identity()
+                .with_lightness(1.0)
+                .unwrap()
+                .is_identity()
+        );
     }
 
     #[test]

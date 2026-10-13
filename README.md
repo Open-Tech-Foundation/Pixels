@@ -121,7 +121,8 @@ The format is identified from the file's first bytes, never from its name.
 | --- | --- |
 | Resize (seven filters, sharp's fit modes and positions) | `resize`, `resize_with`, `thumbnail` |
 | Geometry | `crop`, `rotate` (multiples of 90°), `flip`, `flop`, `orient` |
-| Colour | `modulate`, `to_srgb`, `to_pixel_format`, `flatten`, `extract_channel` |
+| Colour | `modulate`, `greyscale`, `tint`, `negate`, `gamma`, `linear`, `recomb`, `threshold`, `to_srgb`, `to_pixel_format`, `flatten` |
+| Channels | `extract_channel`, `extract_channel_named`, `ensure_alpha`, `remove_alpha` |
 | Filters | `blur`, `sharpen`, `convolve` |
 | Compositing | `composite`, `composite_with` |
 | Output | `output(format, options)` then `bytes()` or `write(sink)` |

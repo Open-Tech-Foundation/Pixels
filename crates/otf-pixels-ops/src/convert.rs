@@ -72,7 +72,7 @@ fn write(pixel: &mut [u8], kind: SampleKind, index: usize, value: f32) {
 }
 
 /// A pixel as RGBA in 0..=1.
-fn to_rgba(pixel: &[u8], format: PixelFormat) -> [f32; 4] {
+pub(crate) fn to_rgba(pixel: &[u8], format: PixelFormat) -> [f32; 4] {
     let kind = format.sample_kind();
     let at = |i| read(pixel, kind, i);
     match format.layout() {
@@ -83,7 +83,7 @@ fn to_rgba(pixel: &[u8], format: PixelFormat) -> [f32; 4] {
     }
 }
 
-fn from_rgba(rgba: [f32; 4], pixel: &mut [u8], format: PixelFormat) {
+pub(crate) fn from_rgba(rgba: [f32; 4], pixel: &mut [u8], format: PixelFormat) {
     let kind = format.sample_kind();
     let [r, g, b, a] = rgba;
     let luma = || 0.299 * r + 0.587 * g + 0.114 * b;

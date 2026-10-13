@@ -132,9 +132,9 @@ pub use otf_pixels_core::{
     Sink, Source, TileShape, evaluate as evaluate_reference,
 };
 pub use otf_pixels_ops::{
-    Blend, Composite, Conversion, ConvertFormat, Convolve, Crop, ExtractChannel, Filter, Fit,
-    Flatten, Flip, Flop, Kernel, Modulate, Position, Quarter, Resize, ResizeOptions, Rotate,
-    ToSrgb, Unconvertible,
+    Blend, Composite, Conversion, ConvertFormat, Convolve, Crop, EnsureAlpha, ExtractChannel,
+    Filter, Fit, Flatten, Flip, Flop, Gamma, Greyscale, Kernel, Linear, Modulate, Negate, Position,
+    Quarter, Recomb, Resize, ResizeOptions, Rotate, Threshold, Tint, ToSrgb, Unconvertible,
 };
 
 #[cfg(feature = "raw")]
@@ -252,6 +252,20 @@ impl Default for OpenOptions {
             limits: Limits::default(),
         }
     }
+}
+
+/// A channel named the way sharp's `extractChannel` names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Channel {
+    /// The first channel: red, or the grey of a greyscale image.
+    Red,
+    /// The second channel of a colour image.
+    Green,
+    /// The third channel of a colour image.
+    Blue,
+    /// The last channel of an image with alpha.
+    Alpha,
 }
 
 /// A lazily evaluated image pipeline.
@@ -639,6 +653,144 @@ impl Image {
     #[must_use]
     pub fn extract_channel(self, index: usize) -> Self {
         self.apply(Arc::new(ExtractChannel::new(index)))
+    }
+
+    /// Extract a channel by name (sharp's `extractChannel('red')` and so on).
+    ///
+    /// Alpha is the last channel of an image that has one. A greyscale image
+    /// has no green or blue, and asking for them is an error, surfaced at the
+    /// terminal like any other.
+    #[must_use]
+    pub fn extract_channel_named(self, channel: Channel) -> Self {
+        let layout = match self.descriptor() {
+            Ok(descriptor) => descriptor.pixel.layout(),
+            Err(error) => return Self::failed(error),
+        };
+        let index = match (channel, layout) {
+            (Channel::Red, _) => Some(0),
+            (Channel::Green, ChannelLayout::Rgb | ChannelLayout::Rgba) => Some(1),
+            (Channel::Blue, ChannelLayout::Rgb | ChannelLayout::Rgba) => Some(2),
+            (Channel::Alpha, ChannelLayout::GrayAlpha) => Some(1),
+            (Channel::Alpha, ChannelLayout::Rgba) => Some(3),
+            _ => None,
+        };
+        match index {
+            Some(index) => self.extract_channel(index),
+            None => Self::failed(PixelsError::invalid_argument(
+                "channel",
+                format!("a {layout:?} image has no {channel:?} channel"),
+            )),
+        }
+    }
+
+    /// Invert colours, and alpha too when `alpha` is set (sharp's `negate`,
+    /// whose default is to invert alpha).
+    #[must_use]
+    pub fn negate(self, alpha: bool) -> Self {
+        self.apply(Arc::new(Negate::new(alpha)))
+    }
+
+    /// Gamma: each colour channel becomes `value^(1 / exponent)` (libvips'
+    /// definition); above 1 brightens.
+    ///
+    /// sharp's `gamma(g, gOut)` is `gamma(1.0 / g)` before a resize and
+    /// `gamma(gOut)` after it.
+    #[must_use]
+    pub fn gamma(self, exponent: f32) -> Self {
+        match Gamma::new(exponent) {
+            Ok(op) => self.apply(Arc::new(op)),
+            Err(error) => Self::failed(error),
+        }
+    }
+
+    /// `value * a + b` on every colour channel (sharp's `linear`), with `b`
+    /// in 8-bit units at any depth. Alpha is untouched.
+    #[must_use]
+    pub fn linear(self, a: f32, b: f32) -> Self {
+        self.linear_per_channel([a; 3], [b; 3])
+    }
+
+    /// [`Image::linear`] with a separate `a` and `b` for red, green and blue.
+    #[must_use]
+    pub fn linear_per_channel(self, a: [f32; 3], b: [f32; 3]) -> Self {
+        match Linear::per_channel(a, b) {
+            Ok(op) => self.apply(Arc::new(op)),
+            Err(error) => Self::failed(error),
+        }
+    }
+
+    /// Two levels (sharp's `threshold`): at or above `level` (8-bit units;
+    /// sharp's default is 128) becomes full, below becomes zero. With
+    /// `greyscale`, sharp's default, luma is thresholded into every colour
+    /// channel; without, each channel on its own.
+    #[must_use]
+    pub fn threshold(self, level: u8, greyscale: bool) -> Self {
+        self.apply(Arc::new(Threshold::new(level, greyscale)))
+    }
+
+    /// Tint towards a colour, keeping each pixel's luma (sharp's `tint`).
+    /// A greyscale image becomes colour.
+    #[must_use]
+    pub fn tint(self, red: u8, green: u8, blue: u8) -> Self {
+        self.apply(Arc::new(Tint::new(red, green, blue)))
+    }
+
+    /// Greyscale by BT.601 luma (sharp's `greyscale`). As in sharp, the
+    /// channel count is kept: RGB becomes three equal channels, and alpha is
+    /// untouched. Use [`Image::to_pixel_format`] for a one-channel image.
+    #[must_use]
+    pub fn greyscale(self) -> Self {
+        self.apply(Arc::new(Greyscale))
+    }
+
+    /// Mix red, green and blue through a 3x3 matrix (sharp's `recomb`):
+    /// `out[i] = sum(matrix[i][j] * in[j])`. Alpha is untouched.
+    #[must_use]
+    pub fn recomb(self, matrix: [[f32; 3]; 3]) -> Self {
+        match Recomb::rgb(matrix) {
+            Ok(op) => self.apply(Arc::new(op)),
+            Err(error) => Self::failed(error),
+        }
+    }
+
+    /// [`Image::recomb`] with a 4x4 matrix that mixes alpha too; an image
+    /// without alpha gains an opaque one first.
+    #[must_use]
+    pub fn recomb_rgba(self, matrix: [[f32; 4]; 4]) -> Self {
+        match Recomb::rgba(matrix) {
+            Ok(op) => self.apply(Arc::new(op)),
+            Err(error) => Self::failed(error),
+        }
+    }
+
+    /// Add an alpha channel at `level`, 0 transparent to 1 opaque, if there
+    /// is none (sharp's `ensureAlpha`, default 1). An image with alpha is
+    /// unchanged.
+    #[must_use]
+    pub fn ensure_alpha(self, level: f32) -> Self {
+        match EnsureAlpha::new(level) {
+            Ok(op) => self.apply(Arc::new(op)),
+            Err(error) => Self::failed(error),
+        }
+    }
+
+    /// Drop the alpha channel without compositing (sharp's `removeAlpha`).
+    /// Use [`Image::flatten`] to composite onto a colour instead. An image
+    /// without alpha is unchanged.
+    #[must_use]
+    pub fn remove_alpha(self) -> Self {
+        let pixel = match self.descriptor() {
+            Ok(descriptor) => descriptor.pixel,
+            Err(error) => return Self::failed(error),
+        };
+        let opaque = match pixel {
+            PixelFormat::GrayA8 => PixelFormat::Gray8,
+            PixelFormat::Rgba8 => PixelFormat::Rgb8,
+            PixelFormat::Rgba16 => PixelFormat::Rgb16,
+            PixelFormat::RgbaF32 => PixelFormat::RgbF32,
+            other => other,
+        };
+        self.to_pixel_format(opaque)
     }
 
     /// Composite this image against an opaque background, discarding alpha.
