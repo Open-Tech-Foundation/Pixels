@@ -12,7 +12,6 @@ categories.workspace = true
 keywords.workspace = true
 
 [dependencies]
-crossbeam-deque.workspace = true
 
 [features]
 # Test doubles (counting producers, trivial ops) for exercising engine

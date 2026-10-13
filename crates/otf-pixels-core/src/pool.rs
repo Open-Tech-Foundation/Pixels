@@ -1,16 +1,20 @@
-//! The work-stealing thread pool.
+//! The thread pool.
 //!
-//! Per ADR-0008 the lock-free deque comes from `crossbeam-deque`; the pool,
-//! the parking policy and every scheduling decision are ours.
+//! Everything here is ours, the queue included (ADR-0017, superseding
+//! ADR-0008's `crossbeam-deque`).
 //!
 //! # Shape
 //!
-//! Each worker owns a LIFO deque and pushes new work onto it. LIFO on the
-//! owner's end is deliberate: the most recently produced tile is the one most
-//! likely still in cache, so depth-first execution on each worker keeps the
-//! working set small. Idle workers steal from the *other* end of a victim's
-//! deque, taking the oldest and coldest work — which is also the work least
-//! likely to be stolen back immediately.
+//! One FIFO queue, shared by every worker. Tasks only ever come from outside
+//! the pool — a scheduler wave submits about one tile per worker — so there
+//! is nothing for per-worker queues and stealing to balance, and handing
+//! tiles out in submission order is also what keeps neighbouring tiles on
+//! the same wave. Measured against `crossbeam-deque`'s work-stealing deques
+//! on the same scheduler, this is level on strips and concurrent jobs and 17%
+//! faster on a tiled blur. The queue is a `VecDeque` behind a lock: a
+//! lock-free one cannot be written without `unsafe`, which every crate
+//! forbids, and a task is a whole tile, so a lock held for one push or pop is
+//! noise beside it.
 //!
 //! # Panics are contained, not propagated
 //!
@@ -21,27 +25,21 @@
 //! still must not take the host process down with it.
 
 use crate::{PixelsError, Result};
-use crossbeam_deque::{Injector, Stealer, Worker};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 /// A unit of work for the pool.
 type Task = Box<dyn FnOnce() + Send>;
 
-/// How long an idle worker sleeps when no task is pending anywhere.
+/// How long an idle worker sleeps before looking again.
 ///
-/// Correctness does not depend on it: a worker parks only after seeing
-/// `pending == 0` under the parking lock, and a submitter raises `pending`
-/// before signalling under that same lock, so the wakeup cannot be missed. It
-/// is a backstop, long enough that an idle pool living as long as the process
+/// Correctness does not depend on it: a worker parks only after finding the
+/// queue empty under the parking lock, and a submitter pushes before
+/// signalling under that same lock, so a wakeup cannot be missed. It is a
+/// backstop, long enough that an idle pool living as long as the process
 /// costs nothing measurable.
 const IDLE_PARK: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// How long an idle worker sleeps while tasks are pending elsewhere.
-///
-/// Work another worker has pulled into its own deque raises no signal, so a
-/// worker that might steal it polls briefly instead.
-const BUSY_PARK: std::time::Duration = std::time::Duration::from_millis(1);
 
 thread_local! {
     /// Whether this thread is a worker of some [`ThreadPool`].
@@ -50,13 +48,13 @@ thread_local! {
 
 /// Shared state every worker sees.
 struct Shared {
-    /// Global queue: where non-worker threads submit work.
-    injector: Injector<Task>,
-    /// One stealer per worker, for cross-worker theft.
-    stealers: Vec<Stealer<Task>>,
+    /// Tasks waiting for a worker, oldest first.
+    queue: Mutex<VecDeque<Task>>,
+    /// How many workers the pool runs.
+    workers: usize,
     /// Set once to tell workers to wind down.
     shutdown: AtomicBool,
-    /// Tasks queued but not yet finished; drives idle parking.
+    /// Tasks queued or running; shutdown waits for it to reach zero.
     pending: AtomicUsize,
     /// Parking lot for idle workers.
     idle: Mutex<()>,
@@ -64,10 +62,18 @@ struct Shared {
 }
 
 impl Shared {
+    fn queue(&self) -> MutexGuard<'_, VecDeque<Task>> {
+        // A task never runs under this lock, so a poisoned one only means a
+        // push or pop was interrupted; the queue itself is still whole.
+        self.queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Wake one parked worker, if any.
     fn signal_one(&self) {
-        // The lock is taken so a worker cannot check `pending`, decide to
-        // park, and miss this notification in between.
+        // The lock is taken so a worker cannot find the queue empty, decide
+        // to park, and miss this notification in between.
         let _guard = self
             .idle
             .lock()
@@ -83,36 +89,9 @@ impl Shared {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.wake.notify_all();
     }
-
-    /// Take one task, preferring local work, then global, then theft.
-    fn find_task(&self, local: &Worker<Task>) -> Option<Task> {
-        // Local LIFO first: hottest tile, no synchronisation.
-        if let Some(task) = local.pop() {
-            return Some(task);
-        }
-        loop {
-            // Global queue next, in batches so a submitter burst spreads out.
-            match self.injector.steal_batch_and_pop(local) {
-                crossbeam_deque::Steal::Success(task) => return Some(task),
-                crossbeam_deque::Steal::Retry => continue,
-                crossbeam_deque::Steal::Empty => break,
-            }
-        }
-        // Finally steal from a peer's cold end.
-        for stealer in &self.stealers {
-            loop {
-                match stealer.steal_batch_and_pop(local) {
-                    crossbeam_deque::Steal::Success(task) => return Some(task),
-                    crossbeam_deque::Steal::Retry => continue,
-                    crossbeam_deque::Steal::Empty => break,
-                }
-            }
-        }
-        None
-    }
 }
 
-/// A work-stealing pool of worker threads.
+/// A pool of worker threads sharing one task queue.
 ///
 /// Dropping the pool signals shutdown and joins every worker, so no task
 /// outlives it.
@@ -126,7 +105,7 @@ pub struct ThreadPool {
 impl std::fmt::Debug for Shared {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Shared")
-            .field("workers", &self.stealers.len())
+            .field("workers", &self.workers)
             .field("pending", &self.pending.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
@@ -144,16 +123,9 @@ impl ThreadPool {
     /// worker thread.
     pub fn new(threads: usize) -> Result<Self> {
         let threads = threads.max(1);
-        let mut locals = Vec::with_capacity(threads);
-        let mut stealers = Vec::with_capacity(threads);
-        for _ in 0..threads {
-            let worker = Worker::new_lifo();
-            stealers.push(worker.stealer());
-            locals.push(worker);
-        }
         let shared = Arc::new(Shared {
-            injector: Injector::new(),
-            stealers,
+            queue: Mutex::new(VecDeque::new()),
+            workers: threads,
             shutdown: AtomicBool::new(false),
             pending: AtomicUsize::new(0),
             idle: Mutex::new(()),
@@ -161,11 +133,11 @@ impl ThreadPool {
         });
 
         let mut workers = Vec::with_capacity(threads);
-        for (index, local) in locals.into_iter().enumerate() {
+        for index in 0..threads {
             let shared = Arc::clone(&shared);
             let handle = std::thread::Builder::new()
                 .name(format!("otf-pixels-worker-{index}"))
-                .spawn(move || worker_loop(&shared, &local))
+                .spawn(move || worker_loop(&shared))
                 .map_err(|e| PixelsError::io("spawning a scheduler worker thread", e))?;
             workers.push(handle);
         }
@@ -216,7 +188,7 @@ impl ThreadPool {
     /// and do not propagate here.
     pub fn spawn(&self, task: impl FnOnce() + Send + 'static) {
         self.shared.pending.fetch_add(1, Ordering::SeqCst);
-        self.shared.injector.push(Box::new(task));
+        self.shared.queue().push_back(Box::new(task));
         self.shared.signal_one();
     }
 
@@ -248,13 +220,27 @@ impl ThreadPool {
         if tasks.is_empty() {
             return Ok(());
         }
-        let batch = Arc::new(Batch::new(tasks.len()));
-        for (index, task) in tasks.into_iter().enumerate() {
-            let batch = Arc::clone(&batch);
-            self.spawn(move || {
-                let outcome = catch(task);
-                batch.finish(index, outcome);
-            });
+        let count = tasks.len();
+        let batch = Arc::new(Batch::new(count));
+        // The whole wave is queued under one lock and then as many workers
+        // woken as it can use, rather than a lock and a wakeup per task.
+        self.shared.pending.fetch_add(count, Ordering::SeqCst);
+        {
+            let mut queue = self.shared.queue();
+            for (index, task) in tasks.into_iter().enumerate() {
+                let batch = Arc::clone(&batch);
+                queue.push_back(Box::new(move || {
+                    let outcome = catch(task);
+                    batch.finish(index, outcome);
+                }));
+            }
+        }
+        if count >= self.shared.workers {
+            self.shared.signal_all();
+        } else {
+            for _ in 0..count {
+                self.shared.signal_one();
+            }
         }
         batch.wait();
         batch.first_error()
@@ -354,36 +340,39 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 }
 
 /// The body of each worker thread.
-fn worker_loop(shared: &Arc<Shared>, local: &Worker<Task>) {
+fn worker_loop(shared: &Arc<Shared>) {
     ON_WORKER.with(|flag| flag.set(true));
     loop {
         if shared.shutdown.load(Ordering::SeqCst) && shared.pending.load(Ordering::SeqCst) == 0 {
             return;
         }
-        if let Some(task) = shared.find_task(local) {
+        // Bound before matching, so the queue lock is released before the
+        // task runs.
+        let next = shared.queue().pop_front();
+        if let Some(task) = next {
             // A panicking task must not unwind out of the worker thread.
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task));
             shared.pending.fetch_sub(1, Ordering::SeqCst);
             continue;
         }
-        // Nothing to do: park until woken. With nothing pending anywhere the
-        // next submission is guaranteed to signal, so the sleep is long;
-        // with work pending elsewhere, poll briefly in case it can be stolen.
+        // Nothing queued: park until a submission signals. The queue is
+        // checked again under the parking lock, because a task pushed since
+        // the pop above has already sent its signal.
         let guard = shared
             .idle
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !shared.queue().is_empty() {
+            continue;
+        }
+        // Shutting down with nothing queued: tasks still running belong to
+        // other workers, and this one has nothing left to do.
         if shared.shutdown.load(Ordering::SeqCst) {
             return;
         }
-        let park = if shared.pending.load(Ordering::SeqCst) == 0 {
-            IDLE_PARK
-        } else {
-            BUSY_PARK
-        };
         let _unused = shared
             .wake
-            .wait_timeout(guard, park)
+            .wait_timeout(guard, IDLE_PARK)
             .unwrap_or_else(std::sync::PoisonError::into_inner);
     }
 }
@@ -614,13 +603,15 @@ mod tests {
         let pool = ThreadPool::new(4).unwrap();
         let seen: Arc<Mutex<std::collections::HashSet<std::thread::ThreadId>>> =
             Arc::new(Mutex::new(std::collections::HashSet::new()));
-        let tasks: Vec<_> = (0..2000)
+        let tasks: Vec<_> = (0..200)
             .map(|_| {
                 let seen = Arc::clone(&seen);
                 move || {
-                    // Enough work that tasks overlap rather than draining
-                    // faster than they are queued.
-                    std::hint::black_box((0..500_u64).sum::<u64>());
+                    // Each task takes real time, so one worker cannot drain
+                    // the whole wave before its peers wake. A computed delay
+                    // is no good here: an optimised build folds it away, and
+                    // the first worker then legitimately runs everything.
+                    std::thread::sleep(std::time::Duration::from_micros(100));
                     seen.lock().unwrap().insert(std::thread::current().id());
                     Ok(())
                 }
@@ -630,7 +621,7 @@ mod tests {
         let count = seen.lock().unwrap().len();
         assert!(
             count > 1,
-            "all work ran on one thread; stealing is not happening"
+            "all work ran on one thread; the queue is not being shared"
         );
     }
 

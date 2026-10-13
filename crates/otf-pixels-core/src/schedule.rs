@@ -10,7 +10,7 @@
 //!    materialization points (ADR-0009). No pixels move.
 //! 2. Nodes the plan marked are materialized, in forward order.
 //! 3. Output tiles are processed in **batches**. Within a batch, tiles are
-//!    evaluated in parallel on the work-stealing pool; batches themselves run
+//!    evaluated in parallel on the shared pool; batches themselves run
 //!    in order, and results are handed to the sink in order so an encoder still
 //!    sees rows top to bottom.
 //!

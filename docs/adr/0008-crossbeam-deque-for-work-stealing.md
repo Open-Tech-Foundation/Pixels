@@ -1,6 +1,6 @@
 # ADR-0008: crossbeam-deque for work stealing
 
-Status: Accepted · 2026-07-20
+Status: Superseded by [ADR-0017](0017-own-task-queue.md) · 2026-07-20
 
 ## Context
 ADR-0001 commits to a work-stealing scheduler as part of what distinguishes

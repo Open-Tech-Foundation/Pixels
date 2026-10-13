@@ -137,9 +137,8 @@ compressed stream plus one canvas), progressive JPEG and interlaced PNG.
 
 ## Build
 
-All codecs are default features. The dependencies outside this workspace
-are `crossbeam-deque` (the scheduler's work-stealing queue, ADR-0008) and,
-through `jpeg-progressive`, the wrapped progressive JPEG decoder (ADR-0004).
-Build with `default-features = false` plus the codecs you want to leave the
-latter out; progressive JPEGs then report `Unsupported`. The crates are 0.x:
+All codecs are default features. The only dependency outside this
+workspace is the wrapped progressive JPEG decoder, through
+`jpeg-progressive` (ADR-0004). Build with `default-features = false` plus the
+codecs you want to leave it out; progressive JPEGs then report `Unsupported`. The crates are 0.x:
 pin the minor version.

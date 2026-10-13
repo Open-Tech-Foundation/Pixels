@@ -13,7 +13,7 @@ Codecs (Decoder trait — region decode where format allows)
    │
 Op graph (immutable lazy DAG of Arc<dyn Op>)
    │
-Tile scheduler (pull-based, negotiated tile shapes, work stealing)
+Tile scheduler (pull-based, negotiated tile shapes, shared worker pool)
    │            ├── CPU backend (SIMD, multiversioned)   [v1]
    │            └── GPU backend (wgpu compute, opt-in)   [v2]
    │
@@ -89,7 +89,7 @@ The engine's heart. Evaluation is pull-based:
    order, so encoders can stream).
 2. The scheduler walks the DAG backwards via `input_region`, building the
    set of (node, region) pairs required.
-3. Pairs with no unmet dependencies become tasks on a work-stealing thread
+3. Pairs with no unmet dependencies become tasks on a shared thread
    pool. Completed tiles satisfy their dependents until the sink's region is
    ready.
 

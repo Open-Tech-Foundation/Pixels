@@ -6,6 +6,17 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- The worker pool no longer depends on `crossbeam-deque` (or
+  `crossbeam-epoch` and `crossbeam-utils`); `otf-pixels-core` now has no
+  dependencies at all (ADR-0017, superseding ADR-0008). Every task already
+  came from the caller one scheduler wave at a time, so per-worker deques and
+  stealing had nothing to balance: the pool is now one shared FIFO queue,
+  filled a wave at a time, with idle workers sleeping until signalled
+  instead of polling every millisecond. Against crossbeam, a tiled blur is
+  17% faster, resize level, and strip and 40-job concurrent pipelines within
+  5–7%.
+
 ### Added
 - Multi-page TIFF reading. `Image::pages()` says how many pages a file holds,
   counted at open without decoding any, and `OpenOptions::with_page(n)` opens

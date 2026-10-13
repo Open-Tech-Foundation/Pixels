@@ -19,7 +19,7 @@ than silent divergence — this replaces the previous DECISIONS.md practice.
 | [0005](0005-streaming-io-sync-core.md) | Streaming-only I/O, sync core | Accepted |
 | [0006](0006-naming-and-crate-layout.md) | Naming and crate layout | Accepted |
 | [0007](0007-gpu-deferred-to-v2.md) | GPU compute deferred to v2, opt-in | Accepted |
-| [0008](0008-crossbeam-deque-for-work-stealing.md) | crossbeam-deque for work stealing | Accepted |
+| [0008](0008-crossbeam-deque-for-work-stealing.md) | crossbeam-deque for work stealing | Superseded by 0017 |
 | [0009](0009-scheduler-inserted-materialization.md) | Scheduler-inserted materialization at order-incompatible seams | Accepted |
 | [0010](0010-own-inflate-and-deflate.md) | Own inflate and deflate | Accepted |
 | [0011](0011-autovectorization-and-fixed-point.md) | SIMD by autovectorization; fixed-point arithmetic at 8 bits | Accepted |
@@ -28,6 +28,7 @@ than silent divergence — this replaces the previous DECISIONS.md practice.
 | [0014](0014-own-webp.md) | Own WebP, lossy and lossless, decode and encode | Accepted |
 | [0015](0015-icc-to-srgb.md) | ICC profiles: preserve always, convert matrix/TRC to sRGB | Accepted |
 | [0016](0016-global-scheduler-by-default.md) | One process-wide scheduler by default | Accepted |
+| [0017](0017-own-task-queue.md) | Our own task queue, replacing crossbeam-deque | Accepted |
 
 Deferred (no ADR yet, decide when reached): tile cache eviction policy
 details, fusion pass design, error taxonomy granularity.

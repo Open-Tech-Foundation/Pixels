@@ -15,7 +15,8 @@ Estimates deliberately omitted — scope, not dates, is the commitment.
 
 ### M2 — Tile scheduler
 - Demand propagation (`input_region`), strip/square negotiation, line-cache
-  seam, work-stealing pool, byte-budgeted LRU tile cache.
+  seam, work-stealing pool (since replaced by a shared queue, ADR-0017),
+  byte-budgeted LRU tile cache.
 - **Exit**: pipelines produce byte-identical output vs M1 evaluator;
   constant-memory test on a synthetic huge raw source; scaling benchmark
   across cores.
