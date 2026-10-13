@@ -6,6 +6,8 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-13
+
 ### Changed
 - JPEG decoding is faster: a full 12 MP decode went from 149 ms to 71 ms.
   The inverse DCT now short-cuts blocks with no AC terms, and rows left
