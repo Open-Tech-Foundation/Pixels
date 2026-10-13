@@ -119,7 +119,7 @@ The format is identified from the file's first bytes, never from its name.
 
 | Operation | Method |
 | --- | --- |
-| Resize (seven filters, fit modes) | `resize`, `resize_with`, `thumbnail` |
+| Resize (seven filters, sharp's fit modes and positions) | `resize`, `resize_with`, `thumbnail` |
 | Geometry | `crop`, `rotate` (multiples of 90°), `flip`, `flop`, `orient` |
 | Colour | `modulate`, `to_srgb`, `to_pixel_format`, `flatten`, `extract_channel` |
 | Filters | `blur`, `sharpen`, `convolve` |

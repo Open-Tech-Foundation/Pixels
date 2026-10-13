@@ -85,7 +85,7 @@ any allocation.
 |---|---|
 | `metadata()` | `Image::metadata()`, `Image::animation()`, `Image::icc_profile()`; `pages` is `Image::pages()` |
 | `sharp(input, { page })` | `OpenOptions::with_page(page)`; a page past the end is `InvalidArgument` |
-| `resize(w, h, { fit, background, withoutEnlargement, kernel })` | `resize_with(w, h, ResizeOptions::default().with_fit(..).with_background(..).without_enlargement(..).with_filter(..))`, fits `Fill`/`Inside`/`Outside`/`Cover`/`Contain` |
+| `resize(w, h, { fit, position, background, withoutEnlargement, withoutReduction, kernel })` | `resize_with(w, h, ResizeOptions::default().with_fit(..).with_position(..).with_background(..).without_enlargement(..).without_reduction(..).with_filter(..))`, fits `Fill`/`Inside`/`Outside`/`Cover`/`Contain`; `position` is one of sharp's nine gravities (`Position::North` is sharp's `top`/`north`); the `entropy`/`attention` strategies are not implemented |
 | `extract` | `crop` |
 | `rotate()` (auto) / `rotate(90)` | `auto_orient` / `rotate(degrees)`, multiples of 90 (other angles are `InvalidArgument` in v1) |
 | `flip` / `flop` | `flip` / `flop` |

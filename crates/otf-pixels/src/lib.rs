@@ -133,8 +133,8 @@ pub use otf_pixels_core::{
 };
 pub use otf_pixels_ops::{
     Blend, Composite, Conversion, ConvertFormat, Convolve, Crop, ExtractChannel, Filter, Fit,
-    Flatten, Flip, Flop, Kernel, Modulate, Quarter, Resize, ResizeOptions, Rotate, ToSrgb,
-    Unconvertible,
+    Flatten, Flip, Flop, Kernel, Modulate, Position, Quarter, Resize, ResizeOptions, Rotate,
+    ToSrgb, Unconvertible,
 };
 
 #[cfg(feature = "raw")]

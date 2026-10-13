@@ -36,6 +36,12 @@ versioning: [SemVer](https://semver.org/).
   5–7%.
 
 ### Added
+- Resize `position` and `without_reduction`, as in sharp.
+  `ResizeOptions::with_position` takes one of nine gravities (`Position`:
+  centre, the four edges, the four corners): which part `Fit::Cover` keeps
+  and where `Fit::Contain` places the image. The default is still centred.
+  `without_reduction` never scales an image down, the counterpart of
+  `without_enlargement`.
 - Multi-page TIFF reading. `Image::pages()` says how many pages a file holds,
   counted at open without decoding any, and `OpenOptions::with_page(n)` opens
   page `n` instead of the first (`TiffDecoder::with_page` underneath). Asking

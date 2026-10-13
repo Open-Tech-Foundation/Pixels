@@ -66,5 +66,5 @@ pub use filter::{Filter, Run, Weights};
 pub use geometry::{Crop, Flip, Flop};
 pub use icc::{Conversion, ToSrgb, Unconvertible};
 pub use pointwise::{ExtractChannel, Flatten, Modulate};
-pub use resize::{Fit, Resize, ResizeOptions};
+pub use resize::{Fit, Position, Resize, ResizeOptions};
 pub use rotate::{Quarter, Rotate};

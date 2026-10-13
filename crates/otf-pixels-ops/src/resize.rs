@@ -44,11 +44,63 @@ pub enum Fit {
     /// the scaled image, at least the box.
     Outside,
     /// Preserve aspect and fill the box exactly: scale to cover it, then
-    /// crop the overflow, centred.
+    /// crop the overflow, keeping the part [`ResizeOptions::position`] names.
     Cover,
     /// Preserve aspect and fill the box exactly: scale to fit inside it,
-    /// then pad the rest with [`ResizeOptions::background`], centred.
+    /// then pad the rest with [`ResizeOptions::background`], with the image
+    /// placed where [`ResizeOptions::position`] says.
     Contain,
+}
+
+/// Which part of the image [`Fit::Cover`] keeps, and where [`Fit::Contain`]
+/// places it: sharp's `position` gravities.
+///
+/// The compass names follow sharp's (`north` is the top edge); sharp's
+/// `top`, `right top` and so on are the same nine positions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum Position {
+    /// The middle, on both axes.
+    #[default]
+    Centre,
+    /// Top edge, centred across.
+    North,
+    /// Top right corner.
+    NorthEast,
+    /// Right edge, centred down.
+    East,
+    /// Bottom right corner.
+    SouthEast,
+    /// Bottom edge, centred across.
+    South,
+    /// Bottom left corner.
+    SouthWest,
+    /// Left edge, centred down.
+    West,
+    /// Top left corner.
+    NorthWest,
+}
+
+impl Position {
+    /// Where to start a span of `inner` within `outer` on each axis: the
+    /// near edge, the middle, or the far edge.
+    const fn offset(self, outer: (u32, u32), inner: (u32, u32)) -> (u32, u32) {
+        let (spare_x, spare_y) = (
+            outer.0.saturating_sub(inner.0),
+            outer.1.saturating_sub(inner.1),
+        );
+        let x = match self {
+            Self::West | Self::NorthWest | Self::SouthWest => 0,
+            Self::East | Self::NorthEast | Self::SouthEast => spare_x,
+            Self::Centre | Self::North | Self::South => spare_x / 2,
+        };
+        let y = match self {
+            Self::North | Self::NorthWest | Self::NorthEast => 0,
+            Self::South | Self::SouthWest | Self::SouthEast => spare_y,
+            Self::Centre | Self::West | Self::East => spare_y / 2,
+        };
+        (x, y)
+    }
 }
 
 /// Options for [`Resize`].
@@ -61,6 +113,12 @@ pub struct ResizeOptions {
     pub fit: Fit,
     /// Never scale *up*: an image already smaller than the box is left alone.
     pub without_enlargement: bool,
+    /// Never scale *down*: an image already larger than the box is left
+    /// alone (sharp's `withoutReduction`).
+    pub without_reduction: bool,
+    /// Which part [`Fit::Cover`] keeps and where [`Fit::Contain`] places the
+    /// image. Centred by default, as in sharp.
+    pub position: Position,
     /// The RGBA colour [`Fit::Contain`] pads with: opaque black by default,
     /// as in sharp. Grey formats take its luma; formats without alpha
     /// ignore its alpha.
@@ -73,6 +131,8 @@ impl Default for ResizeOptions {
             filter: Filter::default(),
             fit: Fit::default(),
             without_enlargement: false,
+            without_reduction: false,
+            position: Position::Centre,
             background: [0, 0, 0, 255],
         }
     }
@@ -104,6 +164,21 @@ impl ResizeOptions {
     #[must_use]
     pub const fn without_enlargement(mut self, refuse: bool) -> Self {
         self.without_enlargement = refuse;
+        self
+    }
+
+    /// Options that refuse to reduce.
+    #[must_use]
+    pub const fn without_reduction(mut self, refuse: bool) -> Self {
+        self.without_reduction = refuse;
+        self
+    }
+
+    /// Options with an explicit [`Position`] for [`Fit::Cover`] and
+    /// [`Fit::Contain`].
+    #[must_use]
+    pub const fn with_position(mut self, position: Position) -> Self {
+        self.position = position;
         self
     }
 }
@@ -224,12 +299,16 @@ impl Resize {
             width = width.min(input.width);
             height = height.min(input.height);
         }
+        if self.options.without_reduction {
+            width = width.max(input.width);
+            height = height.max(input.height);
+        }
         let scaled = (width.max(1), height.max(1));
         let (sw, sh) = scaled;
         match self.options.fit {
             Fit::Cover => {
                 let (ow, oh) = (sw.min(self.width), sh.min(self.height));
-                let window = ((sw - ow) / 2, (sh - oh) / 2);
+                let window = self.options.position.offset((sw, sh), (ow, oh));
                 (
                     scaled,
                     Layout {
@@ -241,7 +320,8 @@ impl Resize {
             }
             Fit::Contain => {
                 let (ow, oh) = (self.width.max(sw), self.height.max(sh));
-                let placed = Region::new((ow - sw) / 2, (oh - sh) / 2, sw, sh);
+                let (px, py) = self.options.position.offset((ow, oh), (sw, sh));
+                let placed = Region::new(px, py, sw, sh);
                 (
                     scaled,
                     Layout {
@@ -738,14 +818,45 @@ mod tests {
     }
 
     fn with_fit(width: u32, height: u32, fit: Fit) -> Resize {
+        with_fit_at(width, height, fit, Position::Centre)
+    }
+
+    fn with_fit_at(width: u32, height: u32, fit: Fit, position: Position) -> Resize {
         Resize::new(
             width,
             height,
             ResizeOptions::default()
                 .with_fit(fit)
+                .with_position(position)
                 .with_background([10, 20, 30, 255]),
         )
         .unwrap()
+    }
+
+    const POSITIONS: [Position; 9] = [
+        Position::Centre,
+        Position::North,
+        Position::NorthEast,
+        Position::East,
+        Position::SouthEast,
+        Position::South,
+        Position::SouthWest,
+        Position::West,
+        Position::NorthWest,
+    ];
+
+    #[test]
+    fn positions_name_the_near_edge_the_middle_or_the_far_edge() {
+        let (outer, inner) = ((100, 60), (40, 20));
+        assert_eq!(Position::NorthWest.offset(outer, inner), (0, 0));
+        assert_eq!(Position::North.offset(outer, inner), (30, 0));
+        assert_eq!(Position::NorthEast.offset(outer, inner), (60, 0));
+        assert_eq!(Position::West.offset(outer, inner), (0, 20));
+        assert_eq!(Position::Centre.offset(outer, inner), (30, 20));
+        assert_eq!(Position::East.offset(outer, inner), (60, 20));
+        assert_eq!(Position::SouthWest.offset(outer, inner), (0, 40));
+        assert_eq!(Position::South.offset(outer, inner), (30, 40));
+        assert_eq!(Position::SouthEast.offset(outer, inner), (60, 40));
     }
 
     #[test]
@@ -759,12 +870,15 @@ mod tests {
     }
 
     #[test]
-    fn cover_is_outside_then_a_centred_crop() {
-        for (w, h, format) in [
+    fn cover_is_outside_then_a_crop_at_the_position() {
+        for (w, h, format, position) in [
             (200, 100, PixelFormat::Rgb8),
             (61, 97, PixelFormat::Rgba16),
             (90, 90, PixelFormat::Gray8),
-        ] {
+        ]
+        .into_iter()
+        .flat_map(|(w, h, f)| POSITIONS.map(|p| (w, h, f, p)))
+        {
             let (input, bytes) = ramp(w, h, format);
             let (outside_desc, outside) = resize_tiled(
                 &with_fit(40, 30, Fit::Outside),
@@ -774,15 +888,19 @@ mod tests {
             );
             let bpp = format.bytes_per_pixel();
             for tile in [(1000, 1000), (7, 5), (40, 1)] {
-                let (desc, cover) =
-                    resize_tiled(&with_fit(40, 30, Fit::Cover), &input, &bytes, tile);
+                let (desc, cover) = resize_tiled(
+                    &with_fit_at(40, 30, Fit::Cover, position),
+                    &input,
+                    &bytes,
+                    tile,
+                );
                 assert_eq!(
                     (desc.width, desc.height),
                     (40.min(outside_desc.width), 30.min(outside_desc.height))
                 );
-                let (dx, dy) = (
-                    (outside_desc.width - desc.width) / 2,
-                    (outside_desc.height - desc.height) / 2,
+                let (dx, dy) = position.offset(
+                    (outside_desc.width, outside_desc.height),
+                    (desc.width, desc.height),
                 );
                 for y in 0..desc.height as usize {
                     let from =
@@ -791,7 +909,7 @@ mod tests {
                     assert_eq!(
                         &cover[y * row..(y + 1) * row],
                         &outside[from..from + row],
-                        "{w}x{h} {format} row {y} tile {tile:?}"
+                        "{w}x{h} {format} {position:?} row {y} tile {tile:?}"
                     );
                 }
             }
@@ -799,22 +917,29 @@ mod tests {
     }
 
     #[test]
-    fn contain_is_inside_centred_on_the_background() {
-        for (w, h, format) in [
+    fn contain_is_inside_placed_on_the_background_at_the_position() {
+        for (w, h, format, position) in [
             (200, 100, PixelFormat::Rgb8),
             (61, 97, PixelFormat::Rgba8),
             (30, 90, PixelFormat::Gray16),
-        ] {
+        ]
+        .into_iter()
+        .flat_map(|(w, h, f)| POSITIONS.map(|p| (w, h, f, p)))
+        {
             let (input, bytes) = ramp(w, h, format);
             let (inside_desc, inside) =
                 resize_tiled(&with_fit(40, 30, Fit::Inside), &input, &bytes, (1000, 1000));
             let bpp = format.bytes_per_pixel();
             let fill = background_pixel(format, [10, 20, 30, 255]);
             for tile in [(1000, 1000), (7, 5), (3, 30), (40, 2)] {
-                let (desc, contain) =
-                    resize_tiled(&with_fit(40, 30, Fit::Contain), &input, &bytes, tile);
+                let (desc, contain) = resize_tiled(
+                    &with_fit_at(40, 30, Fit::Contain, position),
+                    &input,
+                    &bytes,
+                    tile,
+                );
                 assert_eq!((desc.width, desc.height), (40, 30));
-                let (px, py) = ((40 - inside_desc.width) / 2, (30 - inside_desc.height) / 2);
+                let (px, py) = position.offset((40, 30), (inside_desc.width, inside_desc.height));
                 for y in 0..30_u32 {
                     for x in 0..40_u32 {
                         let at = ((y * 40 + x) as usize) * bpp;
@@ -938,6 +1063,25 @@ mod tests {
         // The same options must still shrink something larger than the box.
         let big = ImageDescriptor::new(4000, 3000, PixelFormat::Rgb8).unwrap();
         assert_eq!(op.target(&big), (1000, 750));
+    }
+
+    #[test]
+    fn without_reduction_leaves_a_large_image_alone() {
+        let big = ImageDescriptor::new(4000, 3000, PixelFormat::Rgb8).unwrap();
+        let options = ResizeOptions::default()
+            .with_fit(Fit::Inside)
+            .without_reduction(true);
+        let op = Resize::new(1000, 1000, options).unwrap();
+        assert_eq!(op.target(&big), (4000, 3000));
+
+        // The same options must still enlarge something smaller than the box.
+        let small = ImageDescriptor::new(40, 30, PixelFormat::Rgb8).unwrap();
+        assert_eq!(op.target(&small), (1000, 750));
+
+        // Both refusals together leave every image at its own size.
+        let neither = Resize::new(1000, 1000, options.without_enlargement(true)).unwrap();
+        assert_eq!(neither.target(&big), (4000, 3000));
+        assert_eq!(neither.target(&small), (40, 30));
     }
 
     #[test]
