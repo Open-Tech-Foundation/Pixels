@@ -102,6 +102,7 @@ any allocation.
 | `png({ palette, colours, dither, compressionLevel })` | `EncodeOptions::default().with_palette(true).with_colours(n)?.with_dither(d)?.with_compression_level(l)?`; `colours` or `dither` imply `palette`, as in sharp. PNG `quality` and `effort`, which steer libimagequant, have no counterpart: the palette is a median cut |
 | `gif({ colours, dither })` | `with_colours(n)?`, `with_dither(d)?` |
 | `webp({ effort, alphaQuality, nearLossless })` | `with_effort(e)?`, `with_alpha_quality(q)?`, `with_near_lossless(true)` (at `quality`, as in sharp); efforts above 2 give the same lossy file, since the VP8 search has nothing further to try; `smartSubsample` and `preset` have no counterpart |
+| `jpeg({ chromaSubsampling })`, `avif({ chromaSubsampling, effort })` | `with_chroma_subsampling(ChromaSubsampling::Yuv444)` for `'4:4:4'`, `Yuv420` for `'4:2:0'`; `with_effort(e)?`. sharp's AVIF default is 4:4:4 and ours 4:2:0, so pass `Yuv444` to match it. AVIF effort above 4 searches no further |
 | `keepIccProfile` | open with `to_srgb` off; the profile is written to the output |
 
 `output()` narrows pixels to what the format can hold: 16-bit or float input

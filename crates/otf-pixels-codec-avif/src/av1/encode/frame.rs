@@ -13,16 +13,19 @@ use super::headers::{
     CdefStrength, FrameParams, OBU_FRAME, OBU_SEQUENCE_HEADER, SequenceParams, frame_header, obu,
     sequence_header,
 };
-use super::tile::{SourcePlane, TileEncoder, Tuning};
+use super::tile::{ALL_MODES, SourcePlane, TileEncoder, Tuning};
 use otf_pixels_core::{PixelsError, Result};
 
-/// An 8-bit picture to code: one luma plane, or luma and two 4:2:0 chroma
-/// planes, each row-major at its own size.
+/// An 8-bit picture to code: one luma plane, or luma and two chroma planes,
+/// each row-major at its own size.
 pub(crate) struct Picture<'a> {
     pub width: u32,
     pub height: u32,
-    /// Y, then U and V (half size, rounded up) unless monochrome.
+    /// Y, then U and V unless monochrome: half size (rounded up) when
+    /// `subsampled`, full size otherwise.
     pub planes: &'a [&'a [u16]],
+    /// Chroma at 4:2:0 rather than 4:4:4.
+    pub subsampled: bool,
     /// `(colour_primaries, transfer, matrix)`.
     pub cicp: (u8, u8, u8),
     pub full_range: bool,
@@ -33,6 +36,11 @@ pub(crate) struct Picture<'a> {
 pub(crate) struct CodedStill {
     /// `seq_level_idx[0]`, which `av1C` repeats.
     pub level: u8,
+    /// `seq_profile`, which `av1C` repeats: 0, or 1 for 4:4:4.
+    pub profile: u8,
+    /// Whether chroma is 4:2:0 (or the picture is monochrome, which `av1C`
+    /// also flags as subsampled).
+    pub subsampled: bool,
     pub sequence_header_obu: Vec<u8>,
     pub data: Vec<u8>,
 }
@@ -62,8 +70,23 @@ fn cdef_strength(qindex: u8) -> CdefStrength {
     }
 }
 
-/// Encode `picture` at `qindex` as a reduced-still-picture AV1 stream.
+/// Encode `picture` at `qindex` as a reduced-still-picture AV1 stream, at
+/// the default effort.
+#[cfg(test)]
 pub(crate) fn encode_still(picture: &Picture<'_>, qindex: u8) -> Result<CodedStill> {
+    encode_still_with(picture, qindex, DEFAULT_EFFORT)
+}
+
+/// sharp's default AVIF effort, and the search this encoder always made.
+pub(crate) const DEFAULT_EFFORT: u8 = 4;
+
+/// [`encode_still`] at `effort`, 0..=9: below 3 the intra mode search tries
+/// only the four cheapest predictors, DC, vertical, horizontal and Paeth.
+pub(crate) fn encode_still_with(
+    picture: &Picture<'_>,
+    qindex: u8,
+    effort: u8,
+) -> Result<CodedStill> {
     let mono_chrome = picture.planes.len() == 1;
     if picture.width == 0
         || picture.height == 0
@@ -78,6 +101,7 @@ pub(crate) fn encode_still(picture: &Picture<'_>, qindex: u8) -> Result<CodedSti
         width: picture.width,
         height: picture.height,
         mono_chrome,
+        subsampled: picture.subsampled,
         cicp: picture.cicp,
         full_range: picture.full_range,
     };
@@ -99,7 +123,7 @@ pub(crate) fn encode_still(picture: &Picture<'_>, qindex: u8) -> Result<CodedSti
     // The source, padded to the decoder's plane sizes.
     let mut source = Vec::with_capacity(picture.planes.len());
     for (index, samples) in picture.planes.iter().enumerate() {
-        let sub = u32::from(index > 0);
+        let sub = u32::from(index > 0 && picture.subsampled);
         let (w, h) = (
             ((picture.width + sub) >> sub) as usize,
             ((picture.height + sub) >> sub) as usize,
@@ -126,6 +150,11 @@ pub(crate) fn encode_still(picture: &Picture<'_>, qindex: u8) -> Result<CodedSti
         ac_q: ac_q(8, i32::from(qindex)),
         dc_bias: 0.5,
         ac_bias: 0.36,
+        modes: if effort < 3 {
+            &[0, 1, 2, 12]
+        } else {
+            &ALL_MODES
+        },
     };
     let info = &frame.tile_info;
     let (mi_rows, mi_cols) = state.mi_dims();
@@ -157,6 +186,8 @@ pub(crate) fn encode_still(picture: &Picture<'_>, qindex: u8) -> Result<CodedSti
     data.extend_from_slice(&obu(OBU_FRAME, &payload));
     Ok(CodedStill {
         level: seq_params.level(),
+        profile: u8::from(!mono_chrome && !picture.subsampled),
+        subsampled: mono_chrome || picture.subsampled,
         sequence_header_obu,
         data,
     })
@@ -227,6 +258,7 @@ mod tests {
     ) -> (Vec<Vec<u16>>, usize) {
         let refs: Vec<&[u16]> = planes.iter().map(Vec::as_slice).collect();
         let picture = Picture {
+            subsampled: true,
             width,
             height,
             planes: &refs,
@@ -282,6 +314,7 @@ mod tests {
             }
             let refs: Vec<&[u16]> = planes.iter().map(Vec::as_slice).collect();
             let picture = Picture {
+                subsampled: true,
                 width,
                 height,
                 planes: &refs,
@@ -364,6 +397,7 @@ mod tests {
         let y = vec![0_u16; 4];
         let refs: Vec<&[u16]> = vec![&y, &y];
         let picture = Picture {
+            subsampled: true,
             width: 2,
             height: 2,
             planes: &refs,
@@ -373,6 +407,7 @@ mod tests {
         assert!(encode_still(&picture, 50).is_err());
         let refs: Vec<&[u16]> = vec![&y];
         let picture = Picture {
+            subsampled: true,
             width: 3,
             height: 2,
             planes: &refs,

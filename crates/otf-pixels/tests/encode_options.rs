@@ -1,18 +1,28 @@
 //! sharp's size-changing output options through the facade: palette PNG
 //! (`palette`, `colours`, `dither`), PNG `compressionLevel`, GIF `colours`
-//! and `dither`, and WebP `effort`, `alphaQuality` and `nearLossless`.
+//! and `dither`, WebP `effort`, `alphaQuality` and `nearLossless`, AVIF
+//! `effort`, and `chromaSubsampling` for JPEG and AVIF.
 //!
 //! The encoders check exact bitstreams; this checks the options reach them
 //! from `output`, that the files decode, and that defaults are unchanged.
 
-#![cfg(all(feature = "raw", feature = "png", feature = "gif", feature = "webp"))]
+#![cfg(all(
+    feature = "raw",
+    feature = "png",
+    feature = "gif",
+    feature = "webp",
+    feature = "avif",
+    feature = "jpeg"
+))]
 #![allow(
     clippy::unwrap_used,
     clippy::indexing_slicing,
     reason = "tests operate on known-good values"
 )]
 
-use otf_pixels::{EncodeOptions, ErrorCode, Format, Image, ImageDescriptor, PixelFormat};
+use otf_pixels::{
+    ChromaSubsampling, EncodeOptions, ErrorCode, Format, Image, ImageDescriptor, PixelFormat,
+};
 
 /// A `width` x `height` image of photographic noise in `pixel`.
 fn noisy(width: u32, height: u32, pixel: PixelFormat) -> Image {
@@ -199,4 +209,97 @@ fn webp_alpha_quality_and_near_lossless_shrink_the_file() {
         .max()
         .unwrap();
     assert!(worst <= 16, "near-lossless moved a sample by {worst}");
+}
+
+/// Thin red and blue stripes, which 4:2:0 averages to purple.
+fn stripes() -> Image {
+    let descriptor = ImageDescriptor::new(48, 32, PixelFormat::Rgb8).unwrap();
+    let bytes = (0..48 * 32)
+        .flat_map(|i| {
+            if i % 2 == 0 {
+                [230, 20, 20]
+            } else {
+                [20, 20, 230]
+            }
+        })
+        .collect();
+    Image::from_raw(descriptor, bytes).unwrap()
+}
+
+/// Mean absolute error of an encoded file against the stripes.
+fn stripe_error(bytes: Vec<u8>) -> u64 {
+    let decoded = Image::from_stream(std::io::Cursor::new(bytes)).unwrap();
+    let got = encode(
+        decoded.to_pixel_format(PixelFormat::Rgb8),
+        Format::Raw,
+        EncodeOptions::default(),
+    );
+    let want = encode(stripes(), Format::Raw, EncodeOptions::default());
+    got.iter()
+        .zip(&want)
+        .map(|(a, b)| u64::from(a.abs_diff(*b)))
+        .sum::<u64>()
+        / want.len() as u64
+}
+
+#[test]
+fn full_chroma_keeps_colour_edges_in_jpeg_and_avif() {
+    for format in [Format::Jpeg, Format::Avif] {
+        let options = EncodeOptions::with_quality(85).unwrap();
+        let sub = stripe_error(encode(
+            stripes(),
+            format,
+            options.with_chroma_subsampling(ChromaSubsampling::Yuv420),
+        ));
+        let full = stripe_error(encode(
+            stripes(),
+            format,
+            options.with_chroma_subsampling(ChromaSubsampling::Yuv444),
+        ));
+        assert!(
+            full * 2 < sub,
+            "{format}: 4:4:4 error {full} against 4:2:0 {sub}"
+        );
+    }
+    // Unset, JPEG still follows quality and AVIF stays 4:2:0, as before.
+    let jpeg = EncodeOptions::with_quality(85).unwrap();
+    assert_eq!(
+        encode(stripes(), Format::Jpeg, jpeg),
+        encode(
+            stripes(),
+            Format::Jpeg,
+            jpeg.with_chroma_subsampling(ChromaSubsampling::Yuv420)
+        )
+    );
+    assert_eq!(
+        encode(stripes(), Format::Avif, EncodeOptions::default()),
+        encode(
+            stripes(),
+            Format::Avif,
+            EncodeOptions::default().with_chroma_subsampling(ChromaSubsampling::Yuv420)
+        )
+    );
+}
+
+#[test]
+fn avif_effort_keeps_its_default_and_decodes_at_every_level() {
+    let image = || noisy(40, 30, PixelFormat::Rgba8).blur(1.0);
+    let default = encode(image(), Format::Avif, EncodeOptions::default());
+    assert_eq!(
+        default,
+        encode(
+            image(),
+            Format::Avif,
+            EncodeOptions::default().with_effort(4).unwrap()
+        )
+    );
+    for effort in [0, 2, 9] {
+        let bytes = encode(
+            image(),
+            Format::Avif,
+            EncodeOptions::default().with_effort(effort).unwrap(),
+        );
+        let decoded = Image::from_stream(std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(decoded.descriptor().unwrap().width, 40);
+    }
 }

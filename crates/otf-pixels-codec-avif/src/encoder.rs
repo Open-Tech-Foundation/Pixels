@@ -3,9 +3,13 @@
 //! container.
 //!
 //! What is written:
-//! - Colour as 8-bit 4:2:0 BT.601 full-range YUV with sRGB primaries and
-//!   transfer (`colr` nclx 1/13/6, libavif's default for RGB input); a grey
-//!   image as monochrome AV1.
+//! - Colour as 8-bit BT.601 full-range YUV with sRGB primaries and transfer
+//!   (`colr` nclx 1/13/6, libavif's default for RGB input): 4:2:0 in AV1
+//!   profile 0 by default, or 4:4:4 in profile 1 when
+//!   [`EncodeOptions::chroma_subsampling`] asks; a grey image as monochrome
+//!   AV1.
+//! - [`EncodeOptions::effort`] (0..=9, default 4) narrows the intra mode
+//!   search below 3; above 4 there is no wider search to make yet.
 //! - Transparency as an auxiliary monochrome AV1 item (`auxC` alpha URN,
 //!   `auxl` reference to the colour item), coded at a finer quantizer than
 //!   the colour. An opaque alpha channel is dropped.
@@ -13,9 +17,12 @@
 //! Lossless AVIF needs 4:4:4 RGB coding at quantizer 0, which this encoder
 //! does not produce; asking for it is refused rather than silently lossy.
 
-use crate::av1::encode::frame::{CodedStill, Picture, encode_still, qindex_for_quality};
+use crate::av1::encode::frame::{
+    CodedStill, DEFAULT_EFFORT, Picture, encode_still_with, qindex_for_quality,
+};
 use otf_pixels_core::{
-    EncodeOptions, Encoder, ImageDescriptor, PixelFormat, PixelsError, Result, Sink,
+    ChromaSubsampling, EncodeOptions, Encoder, ImageDescriptor, PixelFormat, PixelsError, Result,
+    Sink,
 };
 
 /// `colr` nclx: BT.709 primaries, sRGB transfer, BT.601 matrix.
@@ -157,7 +164,7 @@ impl Encoder for AvifEncoder {
                 ),
             ));
         }
-        let bytes = encode(state, self.options.quality, self.icc.as_deref())?;
+        let bytes = encode(state, &self.options, self.icc.as_deref())?;
         sink.write_all(&bytes)?;
         sink.flush()
     }
@@ -170,6 +177,7 @@ fn to_planes(
     format: PixelFormat,
     width: usize,
     height: usize,
+    subsampled: bool,
 ) -> (Vec<Vec<u16>>, Option<Vec<u16>>) {
     let channels = format.channels();
     let grey = matches!(format, PixelFormat::Gray8 | PixelFormat::GrayA8);
@@ -198,6 +206,15 @@ fn to_planes(
         u_full.push((b - luma) / 1.772);
         v_full.push((r - luma) / 1.402);
     }
+    if !subsampled {
+        let full = |plane: &[f64]| -> Vec<u16> {
+            plane
+                .iter()
+                .map(|&c| (c + 128.0).round().clamp(0.0, 255.0) as u16)
+                .collect()
+        };
+        return (vec![y, full(&u_full), full(&v_full)], alpha);
+    }
     let (cw, ch) = (width.div_ceil(2), height.div_ceil(2));
     let average = |full: &[f64]| -> Vec<u16> {
         let mut out = Vec::with_capacity(cw * ch);
@@ -219,37 +236,44 @@ fn to_planes(
     (vec![y, average(&u_full), average(&v_full)], alpha)
 }
 
-fn encode(state: &State, quality: u8, icc: Option<&[u8]>) -> Result<Vec<u8>> {
+fn encode(state: &State, options: &EncodeOptions, icc: Option<&[u8]>) -> Result<Vec<u8>> {
     let (width, height) = (state.descriptor.width, state.descriptor.height);
+    let subsampled = options.chroma_subsampling != Some(ChromaSubsampling::Yuv444);
+    let effort = options.effort.unwrap_or(DEFAULT_EFFORT).min(9);
     let (planes, alpha) = to_planes(
         &state.pixels,
         state.descriptor.pixel,
         width as usize,
         height as usize,
+        subsampled,
     );
-    let qindex = qindex_for_quality(quality);
+    let qindex = qindex_for_quality(options.quality);
     let refs: Vec<&[u16]> = planes.iter().map(Vec::as_slice).collect();
-    let colour = encode_still(
+    let colour = encode_still_with(
         &Picture {
             width,
             height,
+            subsampled,
             planes: &refs,
             cicp: CICP,
             full_range: true,
         },
         qindex,
+        effort,
     )?;
     // Alpha edges show more than chroma errors: code it finer.
     let alpha = match alpha.filter(|a| a.iter().any(|&v| v != 255)) {
-        Some(alpha) => Some(encode_still(
+        Some(alpha) => Some(encode_still_with(
             &Picture {
                 width,
                 height,
+                subsampled: true,
                 planes: &[&alpha],
                 cicp: (2, 2, 2),
                 full_range: true,
             },
             (qindex / 2).max(1),
+            effort,
         )?),
         None => None,
     };
@@ -283,10 +307,11 @@ fn full(kind: &[u8; 4], version: u8, flags: u32, payload: &[u8]) -> Vec<u8> {
 /// `av1C` for a coded still (AV1-ISOBMFF §2.3.3).
 fn av1c(coded: &CodedStill, mono: bool) -> Vec<u8> {
     let mut payload = vec![
-        0x81,               // marker, version 1
-        coded.level & 0x1F, // seq_profile 0, seq_level_idx_0
-        // tier 0, 8-bit, monochrome, 4:2:0 subsampling, sample position 0.
-        (u8::from(mono) << 4) | 0b1100,
+        0x81, // marker, version 1
+        (coded.profile << 5) | (coded.level & 0x1F),
+        // tier 0, 8-bit, monochrome, chroma subsampling x and y, sample
+        // position 0.
+        (u8::from(mono) << 4) | if coded.subsampled { 0b1100 } else { 0 },
         0, // no initial_presentation_delay
     ];
     payload.extend_from_slice(&coded.sequence_header_obu);
@@ -419,7 +444,7 @@ mod tests {
     #[test]
     fn rgb_to_yuv_follows_bt601_full_range() {
         let pixels = [255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 0, 255];
-        let (planes, alpha) = to_planes(&pixels, PixelFormat::Rgb8, 2, 2);
+        let (planes, alpha) = to_planes(&pixels, PixelFormat::Rgb8, 2, 2, true);
         assert!(alpha.is_none());
         assert_eq!(planes[0], vec![255, 0, 76, 29]);
         // Chroma of the four averaged: red's V and blue's U pull up.
@@ -435,7 +460,7 @@ mod tests {
     #[test]
     fn grey_keeps_one_plane_and_alpha_is_split_out() {
         let pixels = [10, 200, 20, 255, 30, 0];
-        let (planes, alpha) = to_planes(&pixels, PixelFormat::GrayA8, 3, 1);
+        let (planes, alpha) = to_planes(&pixels, PixelFormat::GrayA8, 3, 1, true);
         assert_eq!(planes, vec![vec![10, 20, 30]]);
         assert_eq!(alpha.unwrap(), vec![200, 255, 0]);
     }
@@ -443,8 +468,121 @@ mod tests {
     #[test]
     fn odd_sizes_average_only_the_samples_present() {
         let pixels = [0, 0, 255, 0, 0, 255, 0, 0, 255];
-        let (planes, _) = to_planes(&pixels, PixelFormat::Rgb8, 3, 1);
+        let (planes, _) = to_planes(&pixels, PixelFormat::Rgb8, 3, 1, true);
         assert_eq!((planes[1].len(), planes[2].len()), (2, 2));
         assert_eq!(planes[1][0], planes[1][1]);
+    }
+
+    /// Encode `pixels` with `options`.
+    fn encode_with(descriptor: &ImageDescriptor, pixels: &[u8], options: EncodeOptions) -> Vec<u8> {
+        let mut encoder = AvifEncoder::from_options(&options);
+        let mut out = Vec::new();
+        encoder.write_header(descriptor, &mut out).unwrap();
+        for row in pixels.chunks_exact(descriptor.row_bytes()) {
+            encoder.write_row(row, &mut out).unwrap();
+        }
+        encoder.finish(&mut out).unwrap();
+        out
+    }
+
+    fn decode(bytes: &[u8]) -> Vec<u8> {
+        use otf_pixels_core::{Decoder, Limits};
+        let mut decoder = crate::AvifDecoder::new(bytes, Limits::default()).unwrap();
+        let mut row = vec![0_u8; decoder.descriptor().row_bytes()];
+        let mut out = Vec::new();
+        for _ in 0..decoder.descriptor().height {
+            decoder.read_row(&mut row).unwrap();
+            out.extend_from_slice(&row);
+        }
+        out
+    }
+
+    /// The `av1C` record's profile byte and subsampling byte.
+    fn av1c_bytes(file: &[u8]) -> (u8, u8) {
+        let at = file.windows(4).position(|w| w == b"av1C").unwrap() + 4;
+        (file[at + 1] >> 5, file[at + 2] & 0b1100)
+    }
+
+    #[test]
+    fn full_resolution_chroma_keeps_every_chroma_sample() {
+        let pixels = [255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 0, 255];
+        let (planes, _) = to_planes(&pixels, PixelFormat::Rgb8, 2, 2, false);
+        assert_eq!((planes[1].len(), planes[2].len()), (4, 4));
+        assert_eq!(planes[1][0], 128, "white has no chroma");
+        assert_eq!(planes[2][2], 255, "red's V is full scale");
+    }
+
+    #[test]
+    fn four_four_four_is_profile_one_and_sharper_in_colour() {
+        // Thin colour stripes, which 4:2:0 averages away.
+        let descriptor = ImageDescriptor::new(32, 16, PixelFormat::Rgb8).unwrap();
+        let pixels: Vec<u8> = (0..32 * 16)
+            .flat_map(|i| if i % 2 == 0 { [255, 0, 0] } else { [0, 0, 255] })
+            .collect();
+        let options = EncodeOptions::with_quality(90).unwrap();
+        let sub = encode_with(&descriptor, &pixels, options);
+        let full = encode_with(
+            &descriptor,
+            &pixels,
+            options.with_chroma_subsampling(ChromaSubsampling::Yuv444),
+        );
+        assert_eq!(av1c_bytes(&sub), (0, 0b1100));
+        assert_eq!(av1c_bytes(&full), (1, 0));
+        assert_eq!(
+            encode_with(
+                &descriptor,
+                &pixels,
+                options.with_chroma_subsampling(ChromaSubsampling::Yuv420)
+            ),
+            sub
+        );
+        let error = |bytes: &[u8]| -> u64 {
+            decode(bytes)
+                .iter()
+                .zip(&pixels)
+                .map(|(a, b)| u64::from(a.abs_diff(*b)))
+                .sum()
+        };
+        assert!(
+            error(&full) * 2 < error(&sub),
+            "{} against {}",
+            error(&full),
+            error(&sub)
+        );
+    }
+
+    #[test]
+    fn grey_and_alpha_stay_profile_zero_under_four_four_four() {
+        let descriptor = ImageDescriptor::new(9, 7, PixelFormat::GrayA8).unwrap();
+        let pixels: Vec<u8> = (0..9 * 7)
+            .flat_map(|i| [(i * 4) as u8, (i * 3) as u8])
+            .collect();
+        let file = encode_with(
+            &descriptor,
+            &pixels,
+            EncodeOptions::default().with_chroma_subsampling(ChromaSubsampling::Yuv444),
+        );
+        assert_eq!(av1c_bytes(&file).0, 0);
+        assert_eq!(decode(&file).len(), 9 * 7 * 2);
+    }
+
+    #[test]
+    fn effort_narrows_the_search_and_four_is_the_default() {
+        let descriptor = ImageDescriptor::new(40, 24, PixelFormat::Rgb8).unwrap();
+        let pixels: Vec<u8> = (0..40 * 24 * 3)
+            .map(|i| ((i * 13 + i / 97) % 256) as u8)
+            .collect();
+        let base = EncodeOptions::default();
+        let default = encode_with(&descriptor, &pixels, base);
+        for effort in 3..=10 {
+            assert_eq!(
+                encode_with(&descriptor, &pixels, base.with_effort(effort).unwrap()),
+                default,
+                "effort {effort}"
+            );
+        }
+        let fast = encode_with(&descriptor, &pixels, base.with_effort(0).unwrap());
+        assert_ne!(fast, default);
+        assert_eq!(decode(&fast).len(), pixels.len());
     }
 }

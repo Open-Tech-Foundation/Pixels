@@ -84,7 +84,12 @@ pub(crate) struct Tuning {
     /// step.
     pub dc_bias: f64,
     pub ac_bias: f64,
+    /// The intra modes the mode search tries.
+    pub modes: &'static [usize],
 }
+
+/// Every intra mode, `DC_PRED..=PAETH_PRED`.
+pub(crate) const ALL_MODES: [usize; INTRA_MODES] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 
 /// Decides and writes one tile.
 pub(crate) struct TileEncoder<'a> {
@@ -154,7 +159,7 @@ impl<'a> TileEncoder<'a> {
         planes: &[usize],
     ) -> usize {
         let mut best = (u64::MAX, 0);
-        for mode in 0..INTRA_MODES {
+        for &mode in self.tuning.modes {
             let mut cost = 0_u64;
             for &plane in planes {
                 let (Some(pred), Some(src)) = (

@@ -2,8 +2,8 @@
 //! header and a key-frame header, wrapped in OBUs.
 //!
 //! Each writer mirrors its parser in `seq.rs` / `frame.rs` field for field,
-//! restricted to the subset this encoder uses: one 8-bit picture, 4:2:0 or
-//! monochrome, 64x64 superblocks, no screen-content tools, no superres or
+//! restricted to the subset this encoder uses: one 8-bit picture, 4:2:0
+//! (profile 0), 4:4:4 (profile 1) or monochrome, 64x64 superblocks, no screen-content tools, no superres or
 //! loop restoration, and the deblocking filter and CDEF signalled.
 
 /// Writes bits most-significant first, as AV1 headers are packed.
@@ -90,8 +90,10 @@ pub struct SequenceParams {
     pub width: u32,
     /// Picture height in pixels.
     pub height: u32,
-    /// One plane (an alpha image) rather than 4:2:0 colour.
+    /// One plane (an alpha image) rather than colour.
     pub mono_chrome: bool,
+    /// Colour at 4:2:0 (profile 0) rather than 4:4:4 (profile 1).
+    pub subsampled: bool,
     /// CICP colour primaries, transfer characteristics, matrix coefficients.
     pub cicp: (u8, u8, u8),
     /// Full-range samples rather than studio range.
@@ -128,7 +130,8 @@ fn bits_for(value: u32) -> u32 {
 #[must_use]
 pub fn sequence_header(p: &SequenceParams) -> Vec<u8> {
     let mut w = BitWriter::default();
-    w.f(3, 0); // seq_profile 0
+    // seq_profile: 0 (Main) for 4:2:0 and monochrome, 1 (High) for 4:4:4.
+    w.f(3, u32::from(!p.mono_chrome && !p.subsampled));
     w.flag(true); // still_picture
     w.flag(true); // reduced_still_picture_header
     w.f(5, u32::from(p.level()));
@@ -152,7 +155,10 @@ pub fn sequence_header(p: &SequenceParams) -> Vec<u8> {
     w.f(8, u32::from(p.cicp.2));
     w.flag(p.full_range);
     if !p.mono_chrome {
-        w.f(2, 0); // chroma_sample_position: unknown
+        // Profile 1 implies 4:4:4, which has no sample position to give.
+        if p.subsampled {
+            w.f(2, 0); // chroma_sample_position: unknown
+        }
         w.flag(false); // separate_uv_delta_q
     }
     w.flag(false); // film_grain_params_present
@@ -309,6 +315,7 @@ mod tests {
             width,
             height,
             mono_chrome: mono,
+            subsampled: true,
             cicp: (1, 13, 6),
             full_range: true,
         }

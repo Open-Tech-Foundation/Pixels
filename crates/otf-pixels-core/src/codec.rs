@@ -151,6 +151,18 @@ impl Metadata {
     }
 }
 
+/// How an encoder samples chroma (sharp's `chromaSubsampling`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ChromaSubsampling {
+    /// Chroma at half resolution both ways (`'4:2:0'`): smaller files, and
+    /// a loss photographs rarely show.
+    Yuv420,
+    /// Chroma at full resolution (`'4:4:4'`): edges between colours, as in
+    /// screenshots and text, stay sharp.
+    Yuv444,
+}
+
 /// Encoder tuning shared across formats.
 ///
 /// Fields that a format has no notion of are ignored by that format rather
@@ -168,8 +180,8 @@ pub struct EncodeOptions {
     /// as `cwebp` and sharp do. Formats with one mode ignore it.
     pub lossless: bool,
     /// CPU spent for a smaller file, 0 (fastest) to 10, in each format's
-    /// own range as sharp defines it: WebP 0–6 (default 4). `None` is the
-    /// format's default.
+    /// own range as sharp defines it: WebP 0–6 and AVIF 0–9, both with a
+    /// default of 4. `None` is the format's default.
     pub effort: Option<u8>,
     /// PNG's DEFLATE level, 0 (store) to 9. `None` derives it from
     /// `quality`, as before this option existed.
@@ -190,6 +202,9 @@ pub struct EncodeOptions {
     /// by as much as `quality` allows (sharp's `nearLossless`; 100 changes
     /// nothing). Implies lossless.
     pub near_lossless: bool,
+    /// Chroma sampling for JPEG and AVIF. `None` is each format's default:
+    /// for JPEG 4:2:0 below quality 90 and 4:4:4 from it, for AVIF 4:2:0.
+    pub chroma_subsampling: Option<ChromaSubsampling>,
 }
 
 /// Check `value` lies in `range`, naming `name` if not.
@@ -310,6 +325,13 @@ impl EncodeOptions {
         self
     }
 
+    /// These options with an explicit chroma subsampling.
+    #[must_use]
+    pub const fn with_chroma_subsampling(mut self, subsampling: ChromaSubsampling) -> Self {
+        self.chroma_subsampling = Some(subsampling);
+        self
+    }
+
     /// Whether a PNG should be written as a palette image.
     #[must_use]
     pub const fn wants_palette(&self) -> bool {
@@ -329,6 +351,7 @@ impl Default for EncodeOptions {
             dither: None,
             alpha_quality: 100,
             near_lossless: false,
+            chroma_subsampling: None,
         }
     }
 }

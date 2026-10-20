@@ -42,6 +42,15 @@ versioning: [SemVer](https://semver.org/).
   5–7%.
 
 ### Added
+- `chromaSubsampling` for JPEG and AVIF, and AVIF `effort`, as in sharp.
+  `EncodeOptions::with_chroma_subsampling(ChromaSubsampling::Yuv444)` (or
+  `Yuv420`) overrides JPEG's choice by quality (4:2:0 below 90, 4:4:4 from
+  it) and AVIF's 4:2:0. The AV1 encoder now writes 4:4:4 as profile 1, with
+  `av1C` to match; libavif decodes it, and on colour edges it halves the
+  error for files about a third larger. sharp defaults AVIF to 4:4:4, so a
+  host matching sharp should ask for it. `with_effort` below 3 narrows
+  AVIF's intra mode search to DC, vertical, horizontal and Paeth; 4 is the
+  default and the search it always made, and there is no wider one above.
 - WebP's `effort`, `alphaQuality` and `nearLossless`, as in sharp.
   `EncodeOptions::with_effort(0..=10)` is libwebp's `method`, clamped to
   0..=6 with 4 the default and the search WebP output used before: lossy

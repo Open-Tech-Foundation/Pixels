@@ -27,7 +27,8 @@ use crate::format::{ICC_CHUNK, ZIGZAG, icc_segments, marker};
 use crate::huffman::HuffmanEncoder;
 use crate::tables;
 use otf_pixels_core::{
-    EncodeOptions, Encoder, ImageDescriptor, PixelFormat, PixelsError, Result, Sink,
+    ChromaSubsampling, EncodeOptions, Encoder, ImageDescriptor, PixelFormat, PixelsError, Result,
+    Sink,
 };
 
 /// How much the chroma channels are subsampled relative to luma.
@@ -263,10 +264,16 @@ impl JpegEncoder {
         self
     }
 
-    /// An encoder configured from generic encode options.
+    /// An encoder configured from generic encode options: `quality`, and
+    /// `chroma_subsampling` in place of the one quality implies.
     #[must_use]
     pub fn from_options(options: &EncodeOptions) -> Self {
-        Self::with_quality(options.quality).unwrap_or_else(|_| Self::new())
+        let encoder = Self::with_quality(options.quality).unwrap_or_else(|_| Self::new());
+        match options.chroma_subsampling {
+            Some(ChromaSubsampling::Yuv444) => encoder.with_subsampling(Subsampling::None),
+            Some(ChromaSubsampling::Yuv420) => encoder.with_subsampling(Subsampling::Both),
+            _ => encoder,
+        }
     }
 
     /// The chosen chroma subsampling.
@@ -832,6 +839,30 @@ impl Encoder for JpegEncoder {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn options_choose_the_subsampling_over_the_one_quality_implies() {
+        let low = EncodeOptions::with_quality(50).unwrap();
+        let high = EncodeOptions::with_quality(95).unwrap();
+        assert_eq!(
+            JpegEncoder::from_options(&low).subsampling(),
+            Subsampling::Both
+        );
+        assert_eq!(
+            JpegEncoder::from_options(&high).subsampling(),
+            Subsampling::None
+        );
+        let full = low.with_chroma_subsampling(ChromaSubsampling::Yuv444);
+        assert_eq!(
+            JpegEncoder::from_options(&full).subsampling(),
+            Subsampling::None
+        );
+        let sub = high.with_chroma_subsampling(ChromaSubsampling::Yuv420);
+        assert_eq!(
+            JpegEncoder::from_options(&sub).subsampling(),
+            Subsampling::Both
+        );
+    }
 
     #[test]
     fn magnitude_categories_mirror_the_decoder() {

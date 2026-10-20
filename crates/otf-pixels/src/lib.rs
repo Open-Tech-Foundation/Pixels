@@ -126,10 +126,10 @@ use otf_pixels_core::{BufferSource, Op, Prefixed, Producer, TileBuf};
 use std::sync::Arc;
 
 pub use otf_pixels_core::{
-    AccessPattern, Animation, ChannelLayout, Codec, ColorModel, Decoder, EncodeOptions, Encoder,
-    ErrorCode, Format, ImageDescriptor, Limit, Limits, Metadata, Orientation, PixelFormat,
-    PixelsError, PlanOptions, Region, Result, RunStats, SampleKind, Scheduler, SchedulerOptions,
-    Sink, Source, TileShape, evaluate as evaluate_reference,
+    AccessPattern, Animation, ChannelLayout, ChromaSubsampling, Codec, ColorModel, Decoder,
+    EncodeOptions, Encoder, ErrorCode, Format, ImageDescriptor, Limit, Limits, Metadata,
+    Orientation, PixelFormat, PixelsError, PlanOptions, Region, Result, RunStats, SampleKind,
+    Scheduler, SchedulerOptions, Sink, Source, TileShape, evaluate as evaluate_reference,
 };
 pub use otf_pixels_ops::{
     Blend, Composite, Conversion, ConvertFormat, Convolve, Crop, EnsureAlpha, Extend, ExtendWith,
