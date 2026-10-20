@@ -19,12 +19,13 @@ use otf_pixels_core::{
 };
 
 use crate::format::{SIGNATURE_89A, label, write_sub_blocks};
-use crate::quantize::{Dither, build_palette, quantize};
+use otf_pixels_compress::{build_palette, quantize_with};
 
 /// Encodes a single-frame GIF.
 #[derive(Debug)]
 pub struct GifEncoder {
-    dither: Dither,
+    /// How much quantization error is diffused, 0..=1.
+    dither: f32,
     /// Palette entries to aim for, at most 256.
     colours: usize,
     state: Option<State>,
@@ -50,7 +51,7 @@ impl GifEncoder {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            dither: Dither::FloydSteinberg,
+            dither: 1.0,
             colours: 256,
             state: None,
         }
@@ -75,8 +76,25 @@ impl GifEncoder {
     /// An encoder with dithering disabled.
     #[must_use]
     pub const fn without_dithering(mut self) -> Self {
-        self.dither = Dither::None;
+        self.dither = 0.0;
         self
+    }
+
+    /// An encoder diffusing `dither` of the quantization error, 0 (none) to
+    /// 1 (full Floyd-Steinberg, the default), as sharp's `dither`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::InvalidArgument`] outside 0..=1.
+    pub fn with_dither(mut self, dither: f32) -> Result<Self> {
+        if !(0.0..=1.0).contains(&dither) {
+            return Err(PixelsError::invalid_argument(
+                "dither",
+                format!("must be in 0..=1, got {dither}"),
+            ));
+        }
+        self.dither = dither;
+        Ok(self)
     }
 
     /// An encoder configured from generic encode options.
@@ -84,14 +102,21 @@ impl GifEncoder {
     /// GIF has no quality dial in the JPEG sense — it is lossless *given a
     /// palette*, and the palette is where all the loss lives. So quality is
     /// read as palette size, mapping 1..=100 onto 2..=256 entries, which is
-    /// the axis that actually trades size for fidelity.
+    /// the axis that actually trades size for fidelity, unless
+    /// [`EncodeOptions::colours`] gives the size outright.
+    /// [`EncodeOptions::dither`] sets the dithering.
     #[must_use]
     pub fn from_options(options: &EncodeOptions) -> Self {
-        let quality = u32::from(options.quality.clamp(1, 100));
-        let colours = 2 + (quality - 1) * 254 / 99;
+        let colours = options.colours.map_or_else(
+            || {
+                let quality = u32::from(options.quality.clamp(1, 100));
+                (2 + (quality - 1) * 254 / 99) as usize
+            },
+            |colours| usize::from(colours).clamp(2, 256),
+        );
         Self {
-            dither: Dither::FloydSteinberg,
-            colours: colours as usize,
+            dither: options.dither.unwrap_or(1.0).clamp(0.0, 1.0),
+            colours,
             state: None,
         }
     }
@@ -220,7 +245,7 @@ impl Encoder for GifEncoder {
         let width = state.descriptor.width;
         let height = state.descriptor.height;
         let palette = build_palette(&state.rgb, self.colours);
-        let indices = quantize(&state.rgb, width as usize, &palette, self.dither);
+        let indices = quantize_with(&state.rgb, width as usize, &palette, self.dither);
         let table = palette.padded();
         let bits = palette.code_bits();
 
@@ -479,5 +504,36 @@ mod tests {
         let bytes = encode(&descriptor, &raster, GifEncoder::new()).unwrap();
         let (_, decoded) = decode(&bytes).unwrap();
         assert_eq!(&decoded[..3], [9, 8, 7]);
+    }
+
+    #[test]
+    fn options_set_the_palette_size_and_the_dithering() {
+        let descriptor = ImageDescriptor::new(40, 30, PixelFormat::Rgb8).unwrap();
+        let raster: Vec<u8> = (0..40 * 30 * 3).map(|i| (i * 7 % 256) as u8).collect();
+        let options = EncodeOptions::default().with_colours(8).unwrap();
+        let bytes = encode(&descriptor, &raster, GifEncoder::from_options(&options)).unwrap();
+        let (_, decoded) = decode(&bytes).unwrap();
+        let mut distinct: Vec<&[u8]> = decoded.chunks_exact(4).collect();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert!(distinct.len() <= 8, "{} colours", distinct.len());
+
+        // Dithering only matters when the palette cannot hold every colour.
+        let undithered = options.with_dither(0.0).unwrap();
+        assert_eq!(
+            encode(&descriptor, &raster, GifEncoder::from_options(&undithered)).unwrap(),
+            encode(
+                &descriptor,
+                &raster,
+                GifEncoder::from_options(&options).without_dithering()
+            )
+            .unwrap()
+        );
+        let half = options.with_dither(0.5).unwrap();
+        assert_ne!(
+            encode(&descriptor, &raster, GifEncoder::from_options(&half)).unwrap(),
+            encode(&descriptor, &raster, GifEncoder::from_options(&undithered)).unwrap()
+        );
+        assert!(GifEncoder::new().with_dither(2.0).is_err());
     }
 }

@@ -99,6 +99,8 @@ any allocation.
 | `composite([{ input, blend, gravity, left, top, tile }, ..])` | `composite_overlays([Overlay::new(image).with_blend(Blend::..).with_gravity(Position::..).at(left, top).tiled(..), ..])`; every sharp blend mode is a `Blend` (`colour-dodge` is `ColourDodge`, `dest-over` is `DestOver`); an overlay larger than the base is clipped where sharp refuses it; `premultiplied` is not supported |
 | `flatten`, `extractChannel`, `toColourspace('b-w')` | `flatten`, `extract_channel(index)` or `extract_channel_named(Channel::Red)`, `to_pixel_format(PixelFormat::Gray8)` |
 | `jpeg/png/webp/avif/gif/tiff({ quality, lossless })` | `output(Format::.., EncodeOptions::with_quality(q)?.with_lossless(..))` |
+| `png({ palette, colours, dither, compressionLevel })` | `EncodeOptions::default().with_palette(true).with_colours(n)?.with_dither(d)?.with_compression_level(l)?`; `colours` or `dither` imply `palette`, as in sharp. PNG `quality` and `effort`, which steer libimagequant, have no counterpart: the palette is a median cut |
+| `gif({ colours, dither })` | `with_colours(n)?`, `with_dither(d)?` |
 | `keepIccProfile` | open with `to_srgb` off; the profile is written to the output |
 
 `output()` narrows pixels to what the format can hold: 16-bit or float input

@@ -21,12 +21,11 @@
 mod decoder;
 mod encoder;
 mod format;
-mod quantize;
 
 pub use decoder::{Frame, GifCodec, GifDecoder, probe};
 pub use encoder::GifEncoder;
 pub use format::{Disposal, GraphicControl, ImageDescriptor, Screen};
-pub use quantize::{Dither, Palette, build_palette, quantize};
+pub use otf_pixels_compress::{Dither, Palette, build_palette, quantize};
 
 /// Translate a compression failure into this crate's error type.
 ///

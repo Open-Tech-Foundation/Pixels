@@ -155,7 +155,9 @@ impl Metadata {
 ///
 /// Fields that a format has no notion of are ignored by that format rather
 /// than rejected, so the same options value can be handed to any encoder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Every field's default leaves a format's output as it was before the field
+/// existed.
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub struct EncodeOptions {
     /// Lossy quality, 1–100. Ignored by lossless formats, and by a format
@@ -165,6 +167,34 @@ pub struct EncodeOptions {
     /// lossless. Off by default: such a format encodes lossy at `quality`,
     /// as `cwebp` and sharp do. Formats with one mode ignore it.
     pub lossless: bool,
+    /// PNG's DEFLATE level, 0 (store) to 9. `None` derives it from
+    /// `quality`, as before this option existed.
+    pub compression_level: Option<u8>,
+    /// Write PNG as a palette image of at most `colours` entries (sharp's
+    /// `palette`). Setting `colours` or `dither` implies it, as in sharp.
+    pub palette: bool,
+    /// The palette size for palette PNG and GIF, 2–256. `None` is 256 for
+    /// PNG, and for GIF the size `quality` implies.
+    pub colours: Option<u16>,
+    /// How much of the quantization error a palette image diffuses, 0 (none)
+    /// to 1 (full Floyd-Steinberg, the default). `None` is 1.
+    pub dither: Option<f32>,
+}
+
+/// Check `value` lies in `range`, naming `name` if not.
+fn within(name: &'static str, value: u16, range: core::ops::RangeInclusive<u16>) -> Result<()> {
+    if range.contains(&value) {
+        Ok(())
+    } else {
+        Err(PixelsError::invalid_argument(
+            name,
+            format!(
+                "must be in {}..={}, got {value}",
+                range.start(),
+                range.end()
+            ),
+        ))
+    }
 }
 
 impl EncodeOptions {
@@ -177,12 +207,7 @@ impl EncodeOptions {
     ///
     /// Returns [`PixelsError::InvalidArgument`] unless `quality` is in 1..=100.
     pub fn with_quality(quality: u8) -> Result<Self> {
-        if !(1..=100).contains(&quality) {
-            return Err(PixelsError::invalid_argument(
-                "quality",
-                format!("must be in 1..=100, got {quality}"),
-            ));
-        }
+        within("quality", quality.into(), 1..=100)?;
         Ok(Self {
             quality,
             ..Self::default()
@@ -195,6 +220,59 @@ impl EncodeOptions {
         self.lossless = lossless;
         self
     }
+
+    /// These options with a PNG DEFLATE level, 0..=9.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::InvalidArgument`] above 9.
+    pub fn with_compression_level(mut self, level: u8) -> Result<Self> {
+        within("compression_level", level.into(), 0..=9)?;
+        self.compression_level = Some(level);
+        Ok(self)
+    }
+
+    /// These options with palette PNG on or off.
+    #[must_use]
+    pub const fn with_palette(mut self, palette: bool) -> Self {
+        self.palette = palette;
+        self
+    }
+
+    /// These options with a palette size, 2..=256, which for PNG implies a
+    /// palette.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::InvalidArgument`] outside 2..=256.
+    pub fn with_colours(mut self, colours: u16) -> Result<Self> {
+        within("colours", colours, 2..=256)?;
+        self.colours = Some(colours);
+        Ok(self)
+    }
+
+    /// These options with a dithering level, 0..=1, which for PNG implies a
+    /// palette.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::InvalidArgument`] outside 0..=1.
+    pub fn with_dither(mut self, dither: f32) -> Result<Self> {
+        if !(0.0..=1.0).contains(&dither) {
+            return Err(PixelsError::invalid_argument(
+                "dither",
+                format!("must be in 0..=1, got {dither}"),
+            ));
+        }
+        self.dither = Some(dither);
+        Ok(self)
+    }
+
+    /// Whether a PNG should be written as a palette image.
+    #[must_use]
+    pub const fn wants_palette(&self) -> bool {
+        self.palette || self.colours.is_some() || self.dither.is_some()
+    }
 }
 
 impl Default for EncodeOptions {
@@ -202,6 +280,10 @@ impl Default for EncodeOptions {
         Self {
             quality: Self::DEFAULT_QUALITY,
             lossless: false,
+            compression_level: None,
+            palette: false,
+            colours: None,
+            dither: None,
         }
     }
 }

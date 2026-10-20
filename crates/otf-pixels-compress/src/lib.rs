@@ -2,12 +2,14 @@
 //!
 //! Per ADR-0010 these are written from scratch, and per ADR-0012 they live
 //! here rather than inside one codec, because three formats now share them:
-//! PNG needs zlib, TIFF needs zlib *and* LZW, GIF needs LZW.
+//! PNG needs zlib, TIFF needs zlib *and* LZW, GIF needs LZW. Palette
+//! quantization is here for the same reason: GIF and palette PNG share it.
 //!
 //! # Scope
 //!
-//! This crate knows about bit streams and byte buffers. It knows nothing about
-//! images, pixels or descriptors, and deliberately does not depend on
+//! This crate knows about bit streams and byte buffers — the quantizer's
+//! pixels are interleaved bytes too. It knows nothing about images or
+//! descriptors, and deliberately does not depend on
 //! `otf-pixels-core`. That boundary is what lets it be tested directly against
 //! reference implementations — the validation ADR-0010 requires — rather than
 //! only through a codec.
@@ -29,11 +31,13 @@ mod checksum;
 mod deflate;
 mod inflate;
 mod lzw;
+mod quantize;
 
 pub use checksum::{Adler32, Crc32};
 pub use deflate::{Level, deflate, zlib_compress};
 pub use inflate::{Inflater, ZlibStream, inflate_to, zlib_decompress};
 pub use lzw::{BitOrder, LzwDecoder, LzwEncoder};
+pub use quantize::{Dither, Palette, build_palette, build_palette_rgba, quantize, quantize_with};
 
 use core::fmt;
 

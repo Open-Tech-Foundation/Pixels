@@ -5,6 +5,12 @@
 //! versions, so changing the algorithm later would change pixels we said were
 //! stable.
 //!
+//! GIF and palette PNG share it, which is why it lives here rather than in
+//! either codec. GIF quantizes RGB ([`build_palette`], [`quantize`]); PNG
+//! quantizes RGBA too ([`build_palette_rgba`], [`quantize_with`]), since its
+//! palette carries an alpha per entry. The RGBA form is the same algorithm
+//! over four channels, and RGB is the three-channel instance of it.
+//!
 //! # Why median cut
 //!
 //! It is deterministic with no seed, runs in one pass over a histogram, and is
@@ -23,24 +29,33 @@
 
 #![allow(
     clippy::indexing_slicing,
-    reason = "every index here is into a three-element array or a \
-              chunks_exact(3) slice, both of which the compiler already \
+    reason = "every index here is into an N-element array or a \
+              chunks_exact(N) slice, both of which the compiler already \
               knows the length of; get()/unwrap_or() would hide that rather \
               than prove anything"
 )]
 
 use std::collections::HashMap;
 
-/// A colour table of at most 256 entries.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Palette {
-    entries: Vec<[u8; 3]>,
+/// A colour table of at most 256 entries of `N` channels: RGB by default,
+/// or RGBA.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Palette<const N: usize = 3> {
+    entries: Vec<[u8; N]>,
 }
 
-impl Palette {
+impl<const N: usize> Default for Palette<N> {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl<const N: usize> Palette<N> {
     /// Build a palette from explicit entries, truncated to 256.
     #[must_use]
-    pub fn new(entries: Vec<[u8; 3]>) -> Self {
+    pub fn new(entries: Vec<[u8; N]>) -> Self {
         let mut entries = entries;
         entries.truncate(256);
         Self { entries }
@@ -48,7 +63,7 @@ impl Palette {
 
     /// The entries, in index order.
     #[must_use]
-    pub fn entries(&self) -> &[[u8; 3]] {
+    pub fn entries(&self) -> &[[u8; N]] {
         &self.entries
     }
 
@@ -79,10 +94,10 @@ impl Palette {
 
     /// The table padded to `2^code_bits` entries, as GIF requires.
     #[must_use]
-    pub fn padded(&self) -> Vec<[u8; 3]> {
+    pub fn padded(&self) -> Vec<[u8; N]> {
         let size = 1_usize << self.code_bits();
         let mut out = self.entries.clone();
-        out.resize(size, [0, 0, 0]);
+        out.resize(size, [0; N]);
         out
     }
 
@@ -93,14 +108,15 @@ impl Palette {
     /// that the linear scan vectorizes, and the tree's build cost lands on
     /// every image rather than only on large ones.
     #[must_use]
-    pub fn nearest(&self, colour: [i32; 3]) -> u8 {
+    pub fn nearest(&self, colour: [i32; N]) -> u8 {
         let mut best = 0_usize;
         let mut best_distance = i32::MAX;
         for (index, entry) in self.entries.iter().enumerate() {
-            let dr = colour[0] - i32::from(entry[0]);
-            let dg = colour[1] - i32::from(entry[1]);
-            let db = colour[2] - i32::from(entry[2]);
-            let distance = dr * dr + dg * dg + db * db;
+            let mut distance = 0;
+            for channel in 0..N {
+                let d = colour[channel] - i32::from(entry[channel]);
+                distance += d * d;
+            }
             if distance < best_distance {
                 best_distance = distance;
                 best = index;
@@ -115,15 +131,15 @@ impl Palette {
 
 /// One box in the median-cut partition.
 #[derive(Debug, Clone)]
-struct Box3 {
+struct Box3<const N: usize> {
     /// Distinct colours in this box, with their pixel counts.
-    colours: Vec<([u8; 3], u32)>,
+    colours: Vec<([u8; N], u32)>,
     /// Total pixels, which is what the split target is measured in.
     weight: u64,
 }
 
-impl Box3 {
-    fn new(colours: Vec<([u8; 3], u32)>) -> Self {
+impl<const N: usize> Box3<N> {
+    fn new(colours: Vec<([u8; N], u32)>) -> Self {
         let weight = colours.iter().map(|&(_, count)| u64::from(count)).sum();
         Self { colours, weight }
     }
@@ -132,7 +148,7 @@ impl Box3 {
     fn widest_channel(&self) -> (usize, u8) {
         let mut widest = 0;
         let mut spread = 0;
-        for channel in 0..3 {
+        for channel in 0..N {
             let mut low = u8::MAX;
             let mut high = 0_u8;
             for &(colour, _) in &self.colours {
@@ -176,8 +192,8 @@ impl Box3 {
     }
 
     /// The pixel-count-weighted mean colour of this box.
-    fn average(&self) -> [u8; 3] {
-        let mut totals = [0_u64; 3];
+    fn average(&self) -> [u8; N] {
+        let mut totals = [0_u64; N];
         let mut count = 0_u64;
         for &(colour, weight) in &self.colours {
             for (slot, &value) in totals.iter_mut().zip(colour.iter()) {
@@ -186,9 +202,9 @@ impl Box3 {
             count += u64::from(weight);
         }
         if count == 0 {
-            return [0, 0, 0];
+            return [0; N];
         }
-        let mut out = [0_u8; 3];
+        let mut out = [0_u8; N];
         for (slot, &total) in out.iter_mut().zip(totals.iter()) {
             // Round rather than truncate: truncation biases every entry dark,
             // which on a large flat area is a visible shift.
@@ -198,28 +214,52 @@ impl Box3 {
     }
 }
 
+/// A pixel of `N` channels as the quantizer sees it. Every fully
+/// transparent RGBA pixel is the same pixel, whatever colour it hides, so
+/// invisible colours take no palette entries.
+fn key<const N: usize>(pixel: &[u8]) -> [u8; N] {
+    let mut key = [0_u8; N];
+    key.copy_from_slice(&pixel[..N]);
+    if N == 4 && key[3] == 0 {
+        key = [0; N];
+    }
+    key
+}
+
 /// Build a palette of at most `size` entries for `pixels`.
 ///
 /// `pixels` is RGB8, three bytes per pixel. Alpha is not considered: GIF
 /// transparency is a palette index, so it is the caller's to reserve.
 #[must_use]
 pub fn build_palette(pixels: &[u8], size: usize) -> Palette {
+    median_cut(pixels, size)
+}
+
+/// Build a palette of at most `size` RGBA entries for RGBA8 `pixels`, as a
+/// PNG palette with transparency needs. Fully transparent pixels share one
+/// entry.
+#[must_use]
+pub fn build_palette_rgba(pixels: &[u8], size: usize) -> Palette<4> {
+    median_cut(pixels, size)
+}
+
+/// Median cut over pixels of `N` channels.
+fn median_cut<const N: usize>(pixels: &[u8], size: usize) -> Palette<N> {
     let size = size.clamp(2, 256);
 
     // Histogram first. Real images have far fewer distinct colours than
     // pixels, so this is what makes the rest cheap — and it is also what makes
     // the result depend on the image's colours rather than on its size.
-    let mut histogram: HashMap<[u8; 3], u32> = HashMap::new();
-    for pixel in pixels.chunks_exact(3) {
-        let key = [pixel[0], pixel[1], pixel[2]];
-        *histogram.entry(key).or_insert(0) += 1;
+    let mut histogram: HashMap<[u8; N], u32> = HashMap::new();
+    for pixel in pixels.chunks_exact(N) {
+        *histogram.entry(key::<N>(pixel)).or_insert(0) += 1;
     }
 
     if histogram.is_empty() {
-        return Palette::new(vec![[0, 0, 0]]);
+        return Palette::new(vec![[0; N]]);
     }
 
-    let mut colours: Vec<([u8; 3], u32)> = histogram.into_iter().collect();
+    let mut colours: Vec<([u8; N], u32)> = histogram.into_iter().collect();
     // A HashMap iterates in an unspecified order, so sorting here is what
     // makes the palette deterministic rather than accidentally stable.
     colours.sort_unstable();
@@ -250,7 +290,7 @@ pub fn build_palette(pixels: &[u8], size: usize) -> Palette {
         boxes.push(right);
     }
 
-    let mut entries: Vec<[u8; 3]> = boxes.iter().map(Box3::average).collect();
+    let mut entries: Vec<[u8; N]> = boxes.iter().map(Box3::average).collect();
     // Sorting the final table keeps the output independent of the order boxes
     // happened to be split in, which `swap_remove` above does not preserve.
     entries.sort_unstable();
@@ -274,75 +314,95 @@ pub enum Dither {
 /// to find a pixel's neighbours.
 #[must_use]
 pub fn quantize(pixels: &[u8], width: usize, palette: &Palette, dither: Dither) -> Vec<u8> {
-    let count = pixels.len() / 3;
+    let strength = match dither {
+        Dither::FloydSteinberg => 1.0,
+        Dither::None => 0.0,
+    };
+    quantize_with(pixels, width, palette, strength)
+}
+
+/// Map `pixels` of `N` channels onto `palette`, diffusing `strength` of
+/// each pixel's error (sharp's `dither`): 0 maps every pixel to its nearest
+/// entry, 1 is full Floyd-Steinberg. Values outside 0..=1 are clamped.
+#[must_use]
+pub fn quantize_with<const N: usize>(
+    pixels: &[u8],
+    width: usize,
+    palette: &Palette<N>,
+    strength: f32,
+) -> Vec<u8> {
+    let count = pixels.len() / N;
     let mut out = vec![0_u8; count];
     if palette.is_empty() || width == 0 {
         return out;
     }
+    let strength = if strength.is_nan() {
+        0.0
+    } else {
+        strength.clamp(0.0, 1.0)
+    };
 
-    match dither {
-        Dither::None => {
-            for (index, pixel) in pixels.chunks_exact(3).enumerate() {
-                let colour = [
-                    i32::from(pixel[0]),
-                    i32::from(pixel[1]),
-                    i32::from(pixel[2]),
-                ];
-                if let Some(slot) = out.get_mut(index) {
-                    *slot = palette.nearest(colour);
-                }
+    if strength == 0.0 {
+        for (index, pixel) in pixels.chunks_exact(N).enumerate() {
+            let colour = key::<N>(pixel).map(i32::from);
+            if let Some(slot) = out.get_mut(index) {
+                *slot = palette.nearest(colour);
             }
         }
-        Dither::FloydSteinberg => {
-            // Two rows of running error: the current row and the next. Holding
-            // the whole image's error would be no more accurate and would grow
-            // with image size, which is the thing this engine does not do.
-            let mut current = vec![0_i32; (width + 2) * 3];
-            let mut next = vec![0_i32; (width + 2) * 3];
-            let height = count / width;
+        return out;
+    }
 
-            for y in 0..height {
-                next.fill(0);
-                for x in 0..width {
-                    let index = y * width + x;
-                    let Some(pixel) = pixels.get(index * 3..index * 3 + 3) else {
-                        continue;
-                    };
-                    // The error buffers are offset by one so a pixel's left
-                    // neighbour is always in range without a branch.
-                    let at = (x + 1) * 3;
-                    let mut wanted = [0_i32; 3];
-                    for channel in 0..3 {
-                        let carried = current.get(at + channel).copied().unwrap_or(0);
-                        wanted[channel] = (i32::from(pixel[channel]) + carried).clamp(0, 255);
-                    }
+    // Two rows of running error: the current row and the next. Holding the
+    // whole image's error would be no more accurate and would grow with image
+    // size, which is the thing this engine does not do.
+    let mut current = vec![0_i32; (width + 2) * N];
+    let mut next = vec![0_i32; (width + 2) * N];
+    let height = count / width;
 
-                    let chosen = palette.nearest(wanted);
-                    if let Some(slot) = out.get_mut(index) {
-                        *slot = chosen;
-                    }
-                    let entry = palette
-                        .entries()
-                        .get(chosen as usize)
-                        .copied()
-                        .unwrap_or([0, 0, 0]);
+    for y in 0..height {
+        next.fill(0);
+        for x in 0..width {
+            let index = y * width + x;
+            let Some(pixel) = pixels.get(index * N..index * N + N) else {
+                continue;
+            };
+            let pixel = key::<N>(pixel);
+            // The error buffers are offset by one so a pixel's left neighbour
+            // is always in range without a branch.
+            let at = (x + 1) * N;
+            let mut wanted = [0_i32; N];
+            for channel in 0..N {
+                let carried = current.get(at + channel).copied().unwrap_or(0);
+                wanted[channel] = (i32::from(pixel[channel]) + carried).clamp(0, 255);
+            }
 
-                    // Floyd-Steinberg weights: 7/16 right, 3/16 below-left,
-                    // 5/16 below, 1/16 below-right.
-                    for channel in 0..3 {
-                        let error = wanted[channel] - i32::from(entry[channel]);
-                        if error == 0 {
-                            continue;
-                        }
-                        diffuse(&mut current, at + 3 + channel, error * 7 / 16);
-                        diffuse(&mut next, at - 3 + channel, error * 3 / 16);
-                        diffuse(&mut next, at + channel, error * 5 / 16);
-                        diffuse(&mut next, at + 3 + channel, error / 16);
-                    }
+            let chosen = palette.nearest(wanted);
+            if let Some(slot) = out.get_mut(index) {
+                *slot = chosen;
+            }
+            let entry = palette
+                .entries()
+                .get(chosen as usize)
+                .copied()
+                .unwrap_or([0; N]);
+
+            // Floyd-Steinberg weights: 7/16 right, 3/16 below-left, 5/16
+            // below, 1/16 below-right.
+            for channel in 0..N {
+                let mut error = wanted[channel] - i32::from(entry[channel]);
+                if strength < 1.0 {
+                    error = (error as f32 * strength).round() as i32;
                 }
-                std::mem::swap(&mut current, &mut next);
+                if error == 0 {
+                    continue;
+                }
+                diffuse(&mut current, at + N + channel, error * 7 / 16);
+                diffuse(&mut next, at - N + channel, error * 3 / 16);
+                diffuse(&mut next, at + channel, error * 5 / 16);
+                diffuse(&mut next, at + N + channel, error / 16);
             }
         }
+        std::mem::swap(&mut current, &mut next);
     }
     out
 }

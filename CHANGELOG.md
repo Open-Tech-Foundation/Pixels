@@ -42,6 +42,18 @@ versioning: [SemVer](https://semver.org/).
   5–7%.
 
 ### Added
+- Palette PNG and the PNG and GIF size options, as in sharp.
+  `EncodeOptions::with_palette`, `with_colours(2..=256)` and
+  `with_dither(0..=1)` write a PNG of colour type 3: quantized by the median
+  cut GIF uses, with a `tRNS` when any entry is translucent, at the smallest
+  bit depth that holds the palette. Setting `colours` or `dither` implies a
+  palette, as in sharp. `with_compression_level(0..=9)` sets PNG's DEFLATE
+  level; without it the level still comes from `quality`. GIF takes
+  `colours` (otherwise implied by `quality`, as before) and `dither`. The
+  quantizer moved to `otf-pixels-compress` (`build_palette_rgba`,
+  `quantize_with` for RGBA and partial dithering), and `Palette` is generic
+  over its channel count, RGB by default; GIF output is byte-identical.
+  `EncodeOptions` no longer derives `Eq`, since `dither` is a float.
 - sharp's `composite` for watermarking. `composite_overlays([Overlay, ..])`
   draws several overlays in order, each with sharp's options:
   `with_gravity` (centred by default, as in sharp), `at(left, top)`,
