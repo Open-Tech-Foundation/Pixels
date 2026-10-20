@@ -6,6 +6,8 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-20
+
 ### Changed
 - The `otf-pixels-codec-jxl` README follows the other codec crates'
   layout and records what decodes and encodes, what does not yet, where
