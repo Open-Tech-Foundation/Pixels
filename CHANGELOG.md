@@ -7,6 +7,9 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- The `otf-pixels-codec-jxl` README follows the other codec crates'
+  layout and records what decodes and encodes, what does not yet, where
+  output differs from `djxl`, and the size and speed measured.
 - `Composite` no longer derives `Copy`, `PartialEq`, `Eq` and `Hash`, and
   `Composite::offset` is replaced by `Composite::placement`: gravity and
   tiling are resolved against the inputs' sizes, which an instance binds
