@@ -53,6 +53,10 @@ pub struct Params {
     /// Code loop-filter deltas for the intra reference and for 4x4
     /// prediction.
     pub filter_deltas: bool,
+    /// Search the ten 4x4 luma modes as well as the four 16x16 ones. Off,
+    /// at the lowest efforts, every macroblock is predicted whole: much
+    /// faster, and larger on detailed images.
+    pub intra4: bool,
 }
 
 impl Params {
@@ -65,6 +69,7 @@ impl Params {
             sharpness: 0,
             segments: false,
             filter_deltas: false,
+            intra4: true,
         }
     }
 }
@@ -585,6 +590,7 @@ pub fn encode(planes: &Planes, params: Params) -> Result<Vec<u8>> {
                 &above_modes[mx],
                 &left_modes,
                 segment,
+                params.intra4,
             );
             above_modes[mx] = [mb.modes[12], mb.modes[13], mb.modes[14], mb.modes[15]];
             left_modes = [mb.modes[3], mb.modes[7], mb.modes[11], mb.modes[15]];
@@ -892,6 +898,7 @@ fn encode_macroblock(
     above_modes: &[u8; 4],
     left_modes: &[u8; 4],
     segment: u8,
+    intra4: bool,
 ) -> Macroblock {
     let stride = mb_cols * 16;
     let (x0, y0) = (mx * 16, my * 16);
@@ -963,13 +970,13 @@ fn encode_macroblock(
     let mut levels4 = [[0_i16; 16]; 25];
     let mut modes4 = [b::DC; 16];
     let mut ctx4 = *ctx;
-    let mut score4 = 0_u64;
-    {
+    let mut score4 = if intra4 { 0_u64 } else { u64::MAX };
+    if intra4 {
         let mut cost = Cost::default();
         cost.tree(&KF_Y_MODE_TREE, &KF_Y_MODE_PROBS, B_PRED);
         score4 += u64::from(lambda) * u64::from(cost.0);
     }
-    for i in 0..16 {
+    for i in (0..16).filter(|_| intra4) {
         let (bx, by) = (i & 3, i >> 2);
         let edges = sub_edges(recon_y, mb_cols, mx, my, bx, by);
         let src = block_at(&planes.y, stride, x0 + bx * 4, y0 + by * 4);

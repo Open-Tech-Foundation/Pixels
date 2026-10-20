@@ -42,6 +42,18 @@ versioning: [SemVer](https://semver.org/).
   5–7%.
 
 ### Added
+- WebP's `effort`, `alphaQuality` and `nearLossless`, as in sharp.
+  `EncodeOptions::with_effort(0..=10)` is libwebp's `method`, clamped to
+  0..=6 with 4 the default and the search WebP output used before: lossy
+  efforts 0 and 1 skip the 4x4 intra search (half the time, 7% larger), and
+  lossless effort scales the LZ77 chain depth and the colour-cache sizes
+  tried (effort 6 is 2% smaller than 4, 60% slower). `with_alpha_quality`
+  maps a lossy image's alpha to fewer levels by libwebp's `QuantizeLevels`
+  (2 at 0, 16 at 70, all of them at 100, the default). `with_near_lossless`
+  encodes lossless with libwebp's residual quantization at `quality`
+  (8% smaller at 80, 16% at 20; 100 is exact), leaving flat areas, the
+  border, fully transparent and fully opaque alpha, and icons under 64
+  pixels exact.
 - Palette PNG and the PNG and GIF size options, as in sharp.
   `EncodeOptions::with_palette`, `with_colours(2..=256)` and
   `with_dither(0..=1)` write a PNG of colour type 3: quantized by the median

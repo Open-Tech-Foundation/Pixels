@@ -591,7 +591,7 @@ pub fn decode_image_stream(
 }
 
 /// Per-channel addition, wrapping each byte.
-const fn add_pixels(a: u32, b: u32) -> u32 {
+pub(crate) const fn add_pixels(a: u32, b: u32) -> u32 {
     let alpha_green = (a & 0xff00_ff00).wrapping_add(b & 0xff00_ff00);
     let red_blue = (a & 0x00ff_00ff).wrapping_add(b & 0x00ff_00ff);
     (alpha_green & 0xff00_ff00) | (red_blue & 0x00ff_00ff)

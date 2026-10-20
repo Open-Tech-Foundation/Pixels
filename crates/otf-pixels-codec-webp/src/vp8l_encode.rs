@@ -28,8 +28,74 @@ const MAX_MATCH: usize = 4096;
 /// The furthest back a reference can reach: distance code 39's largest value
 /// less the 120 short codes.
 const MAX_DISTANCE: usize = 1_048_576 - 120;
-/// Hash-chain candidates examined per position.
-const CHAIN_LIMIT: usize = 32;
+
+/// How hard the encoder searches, from sharp's `effort` (libwebp's
+/// `method`), 0..=6.
+///
+/// Effort decides how many hash-chain candidates LZ77 examines per position
+/// and which colour-cache sizes are tried. The default, 4, is the search
+/// this encoder has always made, so its output is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tuning {
+    /// Hash-chain candidates examined per position.
+    chain: usize,
+    /// Colour-cache sizes, as bits, to choose between by estimated cost.
+    caches: &'static [u32],
+    /// The largest residual quantization near-lossless coding may use, as
+    /// log2; 0 is exact.
+    near_lossless_bits: u32,
+}
+
+impl Tuning {
+    /// The search for `effort`, clamped to 0..=6.
+    pub const fn for_effort(effort: u8) -> Self {
+        match effort {
+            0 => Self {
+                chain: 4,
+                caches: &[0],
+                near_lossless_bits: 0,
+            },
+            1 | 2 => Self {
+                chain: 8,
+                caches: &[0, 7],
+                near_lossless_bits: 0,
+            },
+            3 | 4 => Self {
+                chain: 32,
+                caches: &[0, 4, 7, 10],
+                near_lossless_bits: 0,
+            },
+            5 => Self {
+                chain: 96,
+                caches: &[0, 3, 4, 5, 6, 7, 8, 9, 10],
+                near_lossless_bits: 0,
+            },
+            _ => Self {
+                chain: 256,
+                caches: &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+                near_lossless_bits: 0,
+            },
+        }
+    }
+}
+
+impl Tuning {
+    /// This search, near-lossless at `quality` as libwebp's
+    /// `near_lossless`: residuals in detailed areas may be quantized by up
+    /// to `1 << (5 - quality / 20)`, and 100 is exact.
+    #[must_use]
+    pub const fn near_lossless(mut self, quality: u8) -> Self {
+        let quality = if quality > 100 { 100 } else { quality };
+        self.near_lossless_bits = 5 - (quality as u32) / 20;
+        self
+    }
+}
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Self::for_effort(4)
+    }
+}
 /// Predictor and entropy block size, as log2 of the side.
 const BLOCK_BITS: u32 = 4;
 
@@ -291,7 +357,7 @@ fn distance_code(distance: usize, width: usize) -> usize {
 }
 
 /// LZ77 over pixels with a hash chain, greedy with one step of lookahead.
-fn lz77(pixels: &[u32], width: usize) -> Vec<(usize, usize)> {
+fn lz77(pixels: &[u32], width: usize, chain: usize) -> Vec<(usize, usize)> {
     // Each entry: (length, distance); length 0 marks a literal.
     let n = pixels.len();
     let mut out = Vec::with_capacity(n);
@@ -319,7 +385,7 @@ fn lz77(pixels: &[u32], width: usize) -> Vec<(usize, usize)> {
         let mut candidate = head[hash(i)];
         let mut tries = 0;
         let limit = (n - i).min(MAX_MATCH);
-        while candidate != usize::MAX && tries < CHAIN_LIMIT && i - candidate <= MAX_DISTANCE {
+        while candidate != usize::MAX && tries < chain && i - candidate <= MAX_DISTANCE {
             let len = (0..limit)
                 .take_while(|&k| pixels[candidate + k] == pixels[i + k])
                 .count();
@@ -480,14 +546,15 @@ fn write_coded_image(
     width: usize,
     top_level: bool,
     compress: bool,
+    tuning: Tuning,
 ) {
     let matches = if compress {
-        lz77(pixels, width)
+        lz77(pixels, width, tuning.chain)
     } else {
         vec![(0, 0); pixels.len()]
     };
     // Colour cache size by estimated cost: none, small, medium, large.
-    let candidates: &[u32] = if compress { &[0, 4, 7, 10] } else { &[0] };
+    let candidates: &[u32] = if compress { tuning.caches } else { &[0] };
     let (cache_bits, tokens) = candidates
         .iter()
         .map(|&bits| {
@@ -531,7 +598,7 @@ fn write_coded_image(
                     .iter()
                     .map(|&k| 0xff00_0000 | (u32::from(k >> 8) << 16) | (u32::from(k & 0xff) << 8))
                     .collect();
-                write_coded_image(w, &image, div_round_up(width, g.bits), false, true);
+                write_coded_image(w, &image, div_round_up(width, g.bits), false, true, tuning);
             }
         }
     }
@@ -810,7 +877,13 @@ const fn sub_pixels(a: u32, b: u32) -> u32 {
 /// Write `pixels` (ARGB) as a VP8L image stream: transforms, then the coded
 /// image. Used both for a whole lossless file (after its header) and for an
 /// `ALPH` chunk's alpha, whose size is implicit.
-pub fn write_image_stream(w: &mut BitWriter, pixels: &[u32], width: usize, height: usize) {
+pub fn write_image_stream(
+    w: &mut BitWriter,
+    pixels: &[u32],
+    width: usize,
+    height: usize,
+    tuning: Tuning,
+) {
     let mut palette: Vec<u32> = pixels.to_vec();
     palette.sort_unstable();
     palette.dedup();
@@ -830,7 +903,7 @@ pub fn write_image_stream(w: &mut BitWriter, pixels: &[u32], width: usize, heigh
                 }
             })
             .collect();
-        write_coded_image(w, &deltas, deltas.len(), false, false);
+        write_coded_image(w, &deltas, deltas.len(), false, false, tuning);
         let bits = match palette.len() {
             0..=2 => 3,
             3..=4 => 2,
@@ -852,7 +925,7 @@ pub fn write_image_stream(w: &mut BitWriter, pixels: &[u32], width: usize, heigh
             *p |= 0xff00_0000;
         }
         w.put(1, 0); // no more transforms
-        write_coded_image(w, &packed, packed_width, true, true);
+        write_coded_image(w, &packed, packed_width, true, true, tuning);
         return;
     }
 
@@ -941,27 +1014,177 @@ pub fn write_image_stream(w: &mut BitWriter, pixels: &[u32], width: usize, heigh
             }
         }
     }
-    let residuals: Vec<u32> = (0..src.len())
-        .map(|i| {
-            let (x, y) = (i % width, i / width);
-            let mode = modes[(y >> BLOCK_BITS) * blocks_wide + (x >> BLOCK_BITS)];
-            sub_pixels(src[i], predict_at(mode, i))
-        })
-        .collect();
+    let residuals = if tuning.near_lossless_bits > 0 {
+        near_lossless_residuals(
+            src,
+            pixels,
+            width,
+            height,
+            &modes,
+            blocks_wide,
+            1 << tuning.near_lossless_bits,
+        )
+    } else {
+        (0..src.len())
+            .map(|i| {
+                let (x, y) = (i % width, i / width);
+                let mode = modes[(y >> BLOCK_BITS) * blocks_wide + (x >> BLOCK_BITS)];
+                sub_pixels(src[i], predict_at(mode, i))
+            })
+            .collect()
+    };
     w.put(1, 1);
     w.put(2, 0);
     w.put(3, BLOCK_BITS - 2);
     let mode_image: Vec<u32> = modes.iter().map(|&m| 0xff00_0000 | (m << 8)).collect();
-    write_coded_image(w, &mode_image, blocks_wide, false, true);
+    write_coded_image(w, &mode_image, blocks_wide, false, true, tuning);
 
     // Cross-colour (§3.5.2), on the residuals.
     let (elements, decorrelated) = cross_color(&residuals, width, height);
     w.put(1, 1);
     w.put(2, 1);
     w.put(3, COLOR_BITS - 2);
-    write_coded_image(w, &elements, div_round_up(width, COLOR_BITS), false, true);
+    write_coded_image(
+        w,
+        &elements,
+        div_round_up(width, COLOR_BITS),
+        false,
+        true,
+        tuning,
+    );
     w.put(1, 0); // no more transforms
-    write_coded_image(w, &decorrelated, width, true, true);
+    write_coded_image(w, &decorrelated, width, true, true, tuning);
+}
+
+/// The predictor's residuals for near-lossless coding, after libwebp's
+/// `predictor_enc.c`.
+///
+/// Each residual may be rounded to a multiple of a quantization step,
+/// halved until it is below the largest difference between the pixel and
+/// its four neighbours in `original` (so flat areas, where rounding would
+/// band, stay exact), and never crossing the 0/255 boundary. Prediction
+/// then runs from the pixels the decoder will reconstruct rather than from
+/// the source, so the error does not compound. Fully transparent and fully
+/// opaque alpha is kept exact, as is the image's border.
+fn near_lossless_residuals(
+    src: &[u32],
+    original: &[u32],
+    width: usize,
+    height: usize,
+    modes: &[u32],
+    blocks_wide: usize,
+    max_quantization: u32,
+) -> Vec<u32> {
+    let mut recon = src.to_vec();
+    let mut out = Vec::with_capacity(src.len());
+    for i in 0..src.len() {
+        let (x, y) = (i % width, i / width);
+        let predict = if i == 0 {
+            0xff00_0000
+        } else if y == 0 {
+            recon[i - 1]
+        } else if x == 0 {
+            recon[i - width]
+        } else {
+            let mode = modes[(y >> BLOCK_BITS) * blocks_wide + (x >> BLOCK_BITS)];
+            crate::vp8l::predict(
+                mode,
+                recon[i - 1],
+                recon[i - width],
+                recon[i - width + 1],
+                recon[i - width - 1],
+            )
+        };
+        let interior = x > 0 && y > 0 && x + 1 < width && y + 1 < height;
+        let max_diff = if interior {
+            let p = original[i];
+            [
+                original[i - 1],
+                original[i + 1],
+                original[i - width],
+                original[i + width],
+            ]
+            .into_iter()
+            .map(|n| max_channel_diff(p, n))
+            .max()
+            .unwrap_or(0)
+        } else {
+            0
+        };
+        let residual = near_lossless_pixel(src[i], predict, max_quantization, max_diff);
+        recon[i] = crate::vp8l::add_pixels(predict, residual);
+        out.push(residual);
+    }
+    out
+}
+
+/// The largest per-channel difference between two ARGB pixels.
+fn max_channel_diff(a: u32, b: u32) -> u32 {
+    (0..4)
+        .map(|k| (((a >> (k * 8)) & 0xff) as i32 - ((b >> (k * 8)) & 0xff) as i32).unsigned_abs())
+        .max()
+        .unwrap_or(0)
+}
+
+/// libwebp's `NearLossless`: the residual coding green-subtracted `value`
+/// from `predict`, quantized where the neighbourhood allows.
+fn near_lossless_pixel(value: u32, predict: u32, max_quantization: u32, max_diff: u32) -> u32 {
+    if max_diff <= 2 {
+        return sub_pixels(value, predict);
+    }
+    let mut quantization = max_quantization;
+    while quantization >= max_diff {
+        quantization >>= 1;
+    }
+    let channel = |v: u32, k: u32| ((v >> k) & 0xff) as u8;
+    let alpha = channel(value, 24);
+    let a = if alpha == 0 || alpha == 0xff {
+        alpha.wrapping_sub(channel(predict, 24))
+    } else {
+        near_lossless_component(alpha, channel(predict, 24), 0xff, quantization)
+    };
+    let g = near_lossless_component(channel(value, 8), channel(predict, 8), 0xff, quantization);
+    // Red and blue are stored less green, and the decoder adds back the
+    // green it reconstructs: compensate for how far green moved, so the two
+    // errors do not add up.
+    let new_green = channel(predict, 8).wrapping_add(g);
+    let green_diff = new_green.wrapping_sub(channel(value, 8));
+    let r = near_lossless_component(
+        channel(value, 16).wrapping_sub(green_diff),
+        channel(predict, 16),
+        0xff_u8.wrapping_sub(new_green),
+        quantization,
+    );
+    let b = near_lossless_component(
+        channel(value, 0).wrapping_sub(green_diff),
+        channel(predict, 0),
+        0xff_u8.wrapping_sub(new_green),
+        quantization,
+    );
+    u32::from_be_bytes([a, r, g, b])
+}
+
+/// libwebp's `NearLosslessComponent`: `value - predict`, rounded to a
+/// multiple of `quantization` without wrapping across `boundary`.
+fn near_lossless_component(value: u8, predict: u8, boundary: u8, quantization: u32) -> u8 {
+    let residual = u32::from(value.wrapping_sub(predict));
+    let boundary_residual = u32::from(boundary.wrapping_sub(predict));
+    let lower = residual & !(quantization - 1);
+    let upper = lower + quantization;
+    // Ties go towards the prediction.
+    let bias = u32::from(u32::from(boundary.wrapping_sub(value)) < boundary_residual);
+    let chosen = if residual - lower < upper - residual + bias {
+        if residual > boundary_residual && lower <= boundary_residual {
+            lower + (quantization >> 1)
+        } else {
+            lower
+        }
+    } else if residual <= boundary_residual && upper > boundary_residual {
+        lower + (quantization >> 1)
+    } else {
+        upper
+    };
+    (chosen & 0xff) as u8
 }
 
 /// Cross-colour block size, as log2 of the side.
@@ -1045,14 +1268,20 @@ fn cross_color(pixels: &[u32], width: usize, height: usize) -> (Vec<u32>, Vec<u3
 }
 
 /// A complete `VP8L` chunk payload for `pixels` (ARGB, row-major).
-pub fn encode(pixels: &[u32], width: usize, height: usize, has_alpha: bool) -> Vec<u8> {
+pub fn encode(
+    pixels: &[u32],
+    width: usize,
+    height: usize,
+    has_alpha: bool,
+    tuning: Tuning,
+) -> Vec<u8> {
     let mut w = BitWriter::default();
     w.put(8, 0x2f);
     w.put(14, (width - 1) as u32);
     w.put(14, (height - 1) as u32);
     w.put(1, u32::from(has_alpha));
     w.put(3, 0);
-    write_image_stream(&mut w, pixels, width, height);
+    write_image_stream(&mut w, pixels, width, height, tuning);
     w.finish()
 }
 
@@ -1062,7 +1291,7 @@ mod tests {
     use super::*;
 
     fn round_trip(pixels: &[u32], width: usize, height: usize) {
-        let data = encode(pixels, width, height, true);
+        let data = encode(pixels, width, height, true, Tuning::default());
         let decoded = crate::vp8l::decode(&data, width, height).unwrap();
         assert_eq!(decoded, pixels, "{width}x{height}");
     }

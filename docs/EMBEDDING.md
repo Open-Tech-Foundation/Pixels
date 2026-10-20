@@ -101,6 +101,7 @@ any allocation.
 | `jpeg/png/webp/avif/gif/tiff({ quality, lossless })` | `output(Format::.., EncodeOptions::with_quality(q)?.with_lossless(..))` |
 | `png({ palette, colours, dither, compressionLevel })` | `EncodeOptions::default().with_palette(true).with_colours(n)?.with_dither(d)?.with_compression_level(l)?`; `colours` or `dither` imply `palette`, as in sharp. PNG `quality` and `effort`, which steer libimagequant, have no counterpart: the palette is a median cut |
 | `gif({ colours, dither })` | `with_colours(n)?`, `with_dither(d)?` |
+| `webp({ effort, alphaQuality, nearLossless })` | `with_effort(e)?`, `with_alpha_quality(q)?`, `with_near_lossless(true)` (at `quality`, as in sharp); efforts above 2 give the same lossy file, since the VP8 search has nothing further to try; `smartSubsample` and `preset` have no counterpart |
 | `keepIccProfile` | open with `to_srgb` off; the profile is written to the output |
 
 `output()` narrows pixels to what the format can hold: 16-bit or float input

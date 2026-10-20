@@ -18,6 +18,7 @@
 mod alpha;
 mod decoder;
 mod encoder;
+mod preprocess;
 mod riff;
 mod vp8;
 pub mod vp8l;

@@ -2,7 +2,11 @@
 //!
 //! Lossy by default, through the owned VP8 encoder at
 //! [`EncodeOptions::quality`]; [`EncodeOptions::lossless`] selects the owned
-//! VP8L encoder. Either way the whole image is gathered first: both
+//! VP8L encoder. The rest of sharp's WebP options follow libwebp:
+//! [`EncodeOptions::effort`] is its `method`, [`EncodeOptions::alpha_quality`]
+//! reduces a lossy image's alpha to fewer levels as its `alpha_quality`
+//! does, and [`EncodeOptions::near_lossless`] quantizes lossless residuals
+//! at `quality` as its `near_lossless` does. Either way the whole image is gathered first: both
 //! bitstreams make decisions over the whole picture before the first byte is
 //! final.
 
@@ -150,19 +154,27 @@ impl Encoder for WebPEncoder {
             ));
         }
 
-        let (body, alpha) = if self.options.lossless {
-            encode_lossless(state)
+        let options = self.options;
+        let effort = options.effort.unwrap_or(DEFAULT_EFFORT).min(6);
+        let lossless = options.lossless || options.near_lossless;
+        let (body, alpha) = if lossless {
+            let near = options.near_lossless.then_some(options.quality);
+            encode_lossless(state, effort, near)
         } else {
-            encode_lossy(state, self.options.quality)?
+            encode_lossy(state, options.quality, effort, options.alpha_quality)?
         };
         let (width, height) = (state.descriptor.width, state.descriptor.height);
         // VP8L carries its own alpha; only a lossy ALPH chunk needs VP8X.
-        let needs_vp8x = alpha && !self.options.lossless;
+        let needs_vp8x = alpha && !lossless;
         let file = container(width, height, &body, alpha, needs_vp8x, self.icc.as_deref());
         sink.write_all(&file)?;
         sink.flush()
     }
 }
+
+/// libwebp's default `method`, and the search this encoder made before it
+/// took an effort.
+const DEFAULT_EFFORT: u8 = 4;
 
 /// A RIFF chunk: FourCC, little-endian size, payload, pad to even.
 fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], payload: &[u8]) {
@@ -186,23 +198,37 @@ fn riff(body: &[u8]) -> Vec<u8> {
 
 /// The image chunks of a lossy WebP: a `VP8 ` frame, preceded by an `ALPH`
 /// chunk when the image has any transparency; and whether it does.
-fn encode_lossy(state: &State, quality: u8) -> Result<(Vec<u8>, bool)> {
+fn encode_lossy(
+    state: &State,
+    quality: u8,
+    effort: u8,
+    alpha_quality: u8,
+) -> Result<(Vec<u8>, bool)> {
     let (width, height) = (
         state.descriptor.width as usize,
         state.descriptor.height as usize,
     );
     let channels = state.descriptor.pixel.channels();
     let (planes, alpha) = crate::yuv::from_rgb(&state.pixels, channels, width, height);
-    let vp8 = crate::vp8::encode::encode(
-        &planes,
-        crate::vp8::encode::Params::with_quality(quality.clamp(1, 100)),
-    )?;
+    let mut params = crate::vp8::encode::Params::with_quality(quality.clamp(1, 100));
+    params.intra4 = effort >= 2;
+    let vp8 = crate::vp8::encode::encode(&planes, params)?;
     // An opaque alpha channel is dropped: a simple file says the same thing
     // in fewer bytes and every reader handles it.
-    let alpha = alpha.filter(|a| a.iter().any(|&v| v != 255));
+    let mut alpha = alpha.filter(|a| a.iter().any(|&v| v != 255));
     let mut body = Vec::new();
-    if let Some(alpha) = &alpha {
-        chunk(&mut body, b"ALPH", &encode_alpha(alpha, width, height));
+    if let Some(alpha) = &mut alpha {
+        if alpha_quality < 100 {
+            crate::preprocess::quantize_levels(
+                alpha,
+                crate::preprocess::alpha_levels(alpha_quality),
+            );
+        }
+        chunk(
+            &mut body,
+            b"ALPH",
+            &encode_alpha(alpha, width, height, effort),
+        );
     }
     chunk(&mut body, b"VP8 ", &vp8);
     Ok((body, alpha.is_some()))
@@ -256,31 +282,42 @@ fn to_argb(pixels: &[u8], channels: usize) -> Vec<u32> {
 
 /// The image chunk of a lossless WebP, one `VP8L`, and whether it has
 /// transparency.
-fn encode_lossless(state: &State) -> (Vec<u8>, bool) {
+fn encode_lossless(state: &State, effort: u8, near_lossless: Option<u8>) -> (Vec<u8>, bool) {
     let (width, height) = (
         state.descriptor.width as usize,
         state.descriptor.height as usize,
     );
     let argb = to_argb(&state.pixels, state.descriptor.pixel.channels());
+    let mut tuning = crate::vp8l_encode::Tuning::for_effort(effort);
+    // libwebp skips near-lossless for icons under 64 pixels both ways.
+    if let Some(quality) = near_lossless.filter(|_| width >= 64 || height >= 64) {
+        tuning = tuning.near_lossless(quality);
+    }
     let has_alpha = argb.iter().any(|&p| p >> 24 != 0xff);
     let mut body = Vec::new();
     chunk(
         &mut body,
         b"VP8L",
-        &crate::vp8l_encode::encode(&argb, width, height, has_alpha),
+        &crate::vp8l_encode::encode(&argb, width, height, has_alpha, tuning),
     );
     (body, has_alpha)
 }
 
 /// An `ALPH` chunk payload: no filter, lossless VP8L compression, the alpha
 /// carried in the green channel of an image stream of implicit size.
-fn encode_alpha(alpha: &[u8], width: usize, height: usize) -> Vec<u8> {
+fn encode_alpha(alpha: &[u8], width: usize, height: usize, effort: u8) -> Vec<u8> {
     let argb: Vec<u32> = alpha
         .iter()
         .map(|&a| 0xff00_0000 | (u32::from(a) << 8))
         .collect();
     let mut w = crate::vp8l_encode::BitWriter::default();
-    crate::vp8l_encode::write_image_stream(&mut w, &argb, width, height);
+    crate::vp8l_encode::write_image_stream(
+        &mut w,
+        &argb,
+        width,
+        height,
+        crate::vp8l_encode::Tuning::for_effort(effort),
+    );
     let mut out = vec![1]; // compression 1, filter 0, no preprocessing
     out.extend_from_slice(&w.finish());
     out
@@ -294,6 +331,7 @@ fn encode_alpha(alpha: &[u8], width: usize, height: usize) -> Vec<u8> {
 )]
 mod tests {
     use super::*;
+    use crate::preprocess::{alpha_levels, quantize_levels};
     use otf_pixels_core::ErrorCode;
 
     #[test]
@@ -355,5 +393,150 @@ mod tests {
             .write_header(&descriptor, &mut Vec::new())
             .unwrap_err();
         assert_eq!(error.code(), ErrorCode::Unsupported, "{error}");
+    }
+
+    /// Encode `pixels` with `options`, returning the file.
+    fn encode(descriptor: &ImageDescriptor, pixels: &[u8], options: EncodeOptions) -> Vec<u8> {
+        let mut encoder = WebPEncoder::from_options(&options);
+        let mut out = Vec::new();
+        encoder.write_header(descriptor, &mut out).unwrap();
+        for row in pixels.chunks_exact(descriptor.row_bytes()) {
+            encoder.write_row(row, &mut out).unwrap();
+        }
+        encoder.finish(&mut out).unwrap();
+        out
+    }
+
+    /// Decode a file to RGBA.
+    fn decode(bytes: &[u8]) -> Vec<u8> {
+        use otf_pixels_core::{Decoder, Limits};
+        let mut decoder = crate::WebPDecoder::new(bytes, Limits::default()).unwrap();
+        let descriptor = decoder.descriptor();
+        let mut row = vec![0_u8; descriptor.row_bytes()];
+        let mut out = Vec::new();
+        for _ in 0..descriptor.height {
+            decoder.read_row(&mut row).unwrap();
+            out.extend_from_slice(&row);
+        }
+        out
+    }
+
+    /// A `width` x `height` RGBA image: noise in colour, a ramp in alpha.
+    fn noisy(width: u32, height: u32) -> (ImageDescriptor, Vec<u8>) {
+        let descriptor = ImageDescriptor::new(width, height, PixelFormat::Rgba8).unwrap();
+        let mut seed = 99_u32;
+        let mut pixels = Vec::new();
+        for _y in 0..height {
+            for x in 0..width {
+                for _ in 0..3 {
+                    seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                    pixels.push((seed >> 16) as u8);
+                }
+                pixels.push((x * 255 / (width - 1)) as u8);
+            }
+        }
+        (descriptor, pixels)
+    }
+
+    fn distinct(values: impl Iterator<Item = u8>) -> usize {
+        let mut seen = [false; 256];
+        values.for_each(|v| seen[usize::from(v)] = true);
+        seen.iter().filter(|&&s| s).count()
+    }
+
+    #[test]
+    fn alpha_levels_follow_libwebp() {
+        assert_eq!(alpha_levels(0), 2);
+        assert_eq!(alpha_levels(50), 12);
+        assert_eq!(alpha_levels(70), 16);
+        assert_eq!(alpha_levels(71), 24);
+        assert_eq!(alpha_levels(99), 248);
+    }
+
+    #[test]
+    fn alpha_is_reduced_to_its_levels_keeping_the_ends() {
+        let mut ramp: Vec<u8> = (0..=255).collect();
+        quantize_levels(&mut ramp, 4);
+        assert!(distinct(ramp.iter().copied()) <= 4);
+        assert_eq!((ramp[0], ramp[255]), (0, 255), "the ends are fixed");
+        // Values already within the level count are left alone.
+        let mut few = vec![3, 3, 200, 9];
+        quantize_levels(&mut few, 4);
+        assert_eq!(few, [3, 3, 200, 9]);
+    }
+
+    #[test]
+    fn a_lower_alpha_quality_keeps_fewer_alpha_levels() {
+        let (descriptor, pixels) = noisy(64, 32);
+        let alpha = |quality| {
+            let options = EncodeOptions::default()
+                .with_alpha_quality(quality)
+                .unwrap();
+            let decoded = decode(&encode(&descriptor, &pixels, options));
+            distinct(decoded.chunks_exact(4).map(|p| p[3]))
+        };
+        assert_eq!(alpha(100), 64, "lossless alpha keeps every level");
+        assert!(alpha(0) <= 2);
+        assert!(alpha(50) <= 12);
+    }
+
+    #[test]
+    fn near_lossless_stays_close_and_is_exact_at_full_quality() {
+        let (descriptor, pixels) = noisy(80, 70);
+        let options = EncodeOptions::default().with_near_lossless(true);
+        let bytes = encode(&descriptor, &pixels, options);
+        assert!(
+            bytes.windows(4).any(|w| w == b"VP8L"),
+            "near-lossless is lossless"
+        );
+        let decoded = decode(&bytes);
+        assert_ne!(decoded, pixels, "quality 80 changes something");
+        // Errors are bounded by the largest quantization, 2 at quality 80,
+        // with green's compensation carried into red and blue.
+        for (got, want) in decoded.chunks_exact(4).zip(pixels.chunks_exact(4)) {
+            assert!(
+                got.iter().zip(want).all(|(&g, &w)| g.abs_diff(w) <= 2),
+                "{got:?} {want:?}"
+            );
+        }
+        let exact = EncodeOptions::with_quality(100)
+            .unwrap()
+            .with_near_lossless(true);
+        assert_eq!(decode(&encode(&descriptor, &pixels, exact)), pixels);
+        // An icon is left exact, as libwebp leaves it.
+        let (small, small_pixels) = noisy(32, 32);
+        assert_eq!(
+            decode(&encode(&small, &small_pixels, options)),
+            small_pixels
+        );
+    }
+
+    #[test]
+    fn every_effort_decodes_and_the_default_is_four() {
+        let (descriptor, pixels) = noisy(48, 40);
+        for lossless in [false, true] {
+            let base = EncodeOptions::default().with_lossless(lossless);
+            let default = encode(&descriptor, &pixels, base);
+            assert_eq!(
+                default,
+                encode(&descriptor, &pixels, base.with_effort(4).unwrap())
+            );
+            for effort in 0..=10 {
+                let bytes = encode(&descriptor, &pixels, base.with_effort(effort).unwrap());
+                let decoded = decode(&bytes);
+                if lossless {
+                    assert_eq!(decoded, pixels, "effort {effort}");
+                } else {
+                    assert_eq!(decoded.len(), pixels.len());
+                }
+            }
+        }
+        // The fast lossy search skips 4x4 prediction, which costs bytes on
+        // detail.
+        let lossy = EncodeOptions::default();
+        assert_ne!(
+            encode(&descriptor, &pixels, lossy.with_effort(0).unwrap()),
+            encode(&descriptor, &pixels, lossy)
+        );
     }
 }

@@ -1,11 +1,11 @@
 //! sharp's size-changing output options through the facade: palette PNG
-//! (`palette`, `colours`, `dither`), PNG `compressionLevel`, and GIF
-//! `colours` and `dither`.
+//! (`palette`, `colours`, `dither`), PNG `compressionLevel`, GIF `colours`
+//! and `dither`, and WebP `effort`, `alphaQuality` and `nearLossless`.
 //!
 //! The encoders check exact bitstreams; this checks the options reach them
 //! from `output`, that the files decode, and that defaults are unchanged.
 
-#![cfg(all(feature = "raw", feature = "png", feature = "gif"))]
+#![cfg(all(feature = "raw", feature = "png", feature = "gif", feature = "webp"))]
 #![allow(
     clippy::unwrap_used,
     clippy::indexing_slicing,
@@ -135,4 +135,68 @@ fn out_of_range_options_are_invalid_arguments() {
     ] {
         assert_eq!(error.code(), ErrorCode::InvalidArgument, "{error}");
     }
+}
+
+#[test]
+fn webp_effort_trades_time_for_size_and_keeps_its_default() {
+    let image = || noisy(96, 80, PixelFormat::Rgb8).blur(1.5);
+    for lossless in [false, true] {
+        let options = EncodeOptions::default().with_lossless(lossless);
+        let size =
+            |effort| encode(image(), Format::WebP, options.with_effort(effort).unwrap()).len();
+        assert_eq!(
+            encode(image(), Format::WebP, options),
+            encode(image(), Format::WebP, options.with_effort(4).unwrap()),
+            "the default effort is 4"
+        );
+        assert!(size(6) <= size(0), "lossless {lossless}");
+    }
+}
+
+#[test]
+fn webp_alpha_quality_and_near_lossless_shrink_the_file() {
+    let translucent = || noisy(96, 80, PixelFormat::Rgba8).blur(2.0);
+    let full = encode(translucent(), Format::WebP, EncodeOptions::default());
+    let coarse = encode(
+        translucent(),
+        Format::WebP,
+        EncodeOptions::default().with_alpha_quality(10).unwrap(),
+    );
+    assert!(
+        coarse.len() < full.len(),
+        "{} against {}",
+        coarse.len(),
+        full.len()
+    );
+
+    let photo = || noisy(128, 96, PixelFormat::Rgb8).blur(1.0);
+    let lossless = encode(
+        photo(),
+        Format::WebP,
+        EncodeOptions::default().with_lossless(true),
+    );
+    let near = encode(
+        photo(),
+        Format::WebP,
+        EncodeOptions::with_quality(40)
+            .unwrap()
+            .with_near_lossless(true),
+    );
+    assert!(
+        near.len() < lossless.len(),
+        "{} against {}",
+        near.len(),
+        lossless.len()
+    );
+    // Close to the source, which plain lossy WebP is not held to.
+    let decoded = Image::from_stream(std::io::Cursor::new(near)).unwrap();
+    let got = encode(decoded, Format::Raw, EncodeOptions::default());
+    let want = encode(photo(), Format::Raw, EncodeOptions::default());
+    let worst = got
+        .iter()
+        .zip(&want)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap();
+    assert!(worst <= 16, "near-lossless moved a sample by {worst}");
 }

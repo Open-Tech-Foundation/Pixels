@@ -167,6 +167,10 @@ pub struct EncodeOptions {
     /// lossless. Off by default: such a format encodes lossy at `quality`,
     /// as `cwebp` and sharp do. Formats with one mode ignore it.
     pub lossless: bool,
+    /// CPU spent for a smaller file, 0 (fastest) to 10, in each format's
+    /// own range as sharp defines it: WebP 0–6 (default 4). `None` is the
+    /// format's default.
+    pub effort: Option<u8>,
     /// PNG's DEFLATE level, 0 (store) to 9. `None` derives it from
     /// `quality`, as before this option existed.
     pub compression_level: Option<u8>,
@@ -179,6 +183,13 @@ pub struct EncodeOptions {
     /// How much of the quantization error a palette image diffuses, 0 (none)
     /// to 1 (full Floyd-Steinberg, the default). `None` is 1.
     pub dither: Option<f32>,
+    /// Quality of lossy WebP's alpha channel, 0–100; 100, the default, keeps
+    /// it lossless.
+    pub alpha_quality: u8,
+    /// Lossless WebP that may change pixels a little where it saves bytes,
+    /// by as much as `quality` allows (sharp's `nearLossless`; 100 changes
+    /// nothing). Implies lossless.
+    pub near_lossless: bool,
 }
 
 /// Check `value` lies in `range`, naming `name` if not.
@@ -219,6 +230,19 @@ impl EncodeOptions {
     pub const fn with_lossless(mut self, lossless: bool) -> Self {
         self.lossless = lossless;
         self
+    }
+
+    /// These options with an encoding effort, 0..=10 (see
+    /// [`EncodeOptions::effort`]). A value past a format's own range is
+    /// clamped to it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::InvalidArgument`] above 10.
+    pub fn with_effort(mut self, effort: u8) -> Result<Self> {
+        within("effort", effort.into(), 0..=10)?;
+        self.effort = Some(effort);
+        Ok(self)
     }
 
     /// These options with a PNG DEFLATE level, 0..=9.
@@ -268,6 +292,24 @@ impl EncodeOptions {
         Ok(self)
     }
 
+    /// These options with a lossy WebP alpha quality, 0..=100.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::InvalidArgument`] above 100.
+    pub fn with_alpha_quality(mut self, quality: u8) -> Result<Self> {
+        within("alpha_quality", quality.into(), 0..=100)?;
+        self.alpha_quality = quality;
+        Ok(self)
+    }
+
+    /// These options with near-lossless WebP on or off.
+    #[must_use]
+    pub const fn with_near_lossless(mut self, near_lossless: bool) -> Self {
+        self.near_lossless = near_lossless;
+        self
+    }
+
     /// Whether a PNG should be written as a palette image.
     #[must_use]
     pub const fn wants_palette(&self) -> bool {
@@ -280,10 +322,13 @@ impl Default for EncodeOptions {
         Self {
             quality: Self::DEFAULT_QUALITY,
             lossless: false,
+            effort: None,
             compression_level: None,
             palette: false,
             colours: None,
             dither: None,
+            alpha_quality: 100,
+            near_lossless: false,
         }
     }
 }
