@@ -12,7 +12,10 @@
 //!
 //! The full v1 op set from SPEC §Core ops is here: [`Resize`], [`Crop`],
 //! [`Rotate`], [`Flip`], [`Flop`], [`Modulate`], [`Convolve`], [`Composite`],
-//! [`ExtractChannel`] and [`Flatten`].
+//! [`ExtractChannel`] and [`Flatten`], with sharp's [`Extend`] and the
+//! per-pixel adjustments in `adjust`. [`Trim`] is the exception: its output
+//! shape depends on pixel values, so it searches computed pixels rather
+//! than being an op.
 //!
 //! # Two kinds of op
 //!
@@ -52,6 +55,7 @@ mod adjust;
 mod composite;
 mod convert;
 mod convolve;
+mod extend;
 mod filter;
 mod geometry;
 mod icc;
@@ -59,14 +63,17 @@ mod pointwise;
 mod resample;
 mod resize;
 mod rotate;
+mod trim;
 
 pub use adjust::{EnsureAlpha, Gamma, Greyscale, Linear, Negate, Recomb, Threshold, Tint};
 pub use composite::{Blend, Composite};
 pub use convert::ConvertFormat;
 pub use convolve::{Convolve, Kernel};
+pub use extend::{Extend, ExtendWith};
 pub use filter::{Filter, Run, Weights};
 pub use geometry::{Crop, Flip, Flop};
 pub use icc::{Conversion, ToSrgb, Unconvertible};
 pub use pointwise::{ExtractChannel, Flatten, Modulate};
 pub use resize::{Fit, Position, Resize, ResizeOptions};
 pub use rotate::{Quarter, Rotate};
+pub use trim::Trim;

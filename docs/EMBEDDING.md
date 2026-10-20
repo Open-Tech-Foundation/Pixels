@@ -87,6 +87,8 @@ any allocation.
 | `sharp(input, { page })` | `OpenOptions::with_page(page)`; a page past the end is `InvalidArgument` |
 | `resize(w, h, { fit, position, background, withoutEnlargement, withoutReduction, kernel })` | `resize_with(w, h, ResizeOptions::default().with_fit(..).with_position(..).with_background(..).without_enlargement(..).without_reduction(..).with_filter(..))`, fits `Fill`/`Inside`/`Outside`/`Cover`/`Contain`; `position` is one of sharp's nine gravities (`Position::North` is sharp's `top`/`north`); the `entropy`/`attention` strategies are not implemented |
 | `extract` | `crop` |
+| `extend({ top, right, bottom, left, extendWith, background })` | `extend(Extend::new(top, right, bottom, left).extend_with(ExtendWith::..).with_background(rgba))`; `extend(n)` is `Extend::uniform(n)`; `extendWith` is `Background`, `Copy`, `Repeat` or `Mirror` |
+| `trim({ background, threshold, lineArt })` | `trim(Trim::default().with_background(rgba).with_threshold(t)?.line_art(..))`; `info.trimOffsetLeft`/`Top` are `Image::trim_offset()`, negated. `trim` runs the pipeline before it when called and holds the result in memory, so put it after a reducing resize |
 | `rotate()` (auto) / `rotate(90)` | `auto_orient` / `rotate(degrees)`, multiples of 90 (other angles are `InvalidArgument` in v1) |
 | `flip` / `flop` | `flip` / `flop` |
 | `modulate`, `blur`, `sharpen`, `convolve` | same names; `modulate({ lightness })` is `Modulate::with_lightness`, added to luma rather than Lab L* |

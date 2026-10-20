@@ -132,9 +132,10 @@ pub use otf_pixels_core::{
     Sink, Source, TileShape, evaluate as evaluate_reference,
 };
 pub use otf_pixels_ops::{
-    Blend, Composite, Conversion, ConvertFormat, Convolve, Crop, EnsureAlpha, ExtractChannel,
-    Filter, Fit, Flatten, Flip, Flop, Gamma, Greyscale, Kernel, Linear, Modulate, Negate, Position,
-    Quarter, Recomb, Resize, ResizeOptions, Rotate, Threshold, Tint, ToSrgb, Unconvertible,
+    Blend, Composite, Conversion, ConvertFormat, Convolve, Crop, EnsureAlpha, Extend, ExtendWith,
+    ExtractChannel, Filter, Fit, Flatten, Flip, Flop, Gamma, Greyscale, Kernel, Linear, Modulate,
+    Negate, Position, Quarter, Recomb, Resize, ResizeOptions, Rotate, Threshold, Tint, ToSrgb,
+    Trim, Unconvertible,
 };
 
 #[cfg(feature = "raw")]
@@ -283,6 +284,8 @@ pub struct Image {
     animation: Option<Arc<Animation>>,
     /// Pages in the source document, at least 1.
     pages: u32,
+    /// Where the last [`Image::trim`] cut, in the image it trimmed.
+    trim_offset: Option<(u32, u32)>,
 }
 
 impl Image {
@@ -516,6 +519,7 @@ impl Image {
             icc: None,
             animation: None,
             pages: 1,
+            trim_offset: None,
             inner: Ok(otf_pixels_core::Image::from_producer(producer, format)),
         }
     }
@@ -799,6 +803,86 @@ impl Image {
         self.apply(Arc::new(Flatten::onto(red, green, blue)))
     }
 
+    /// Grow the canvas by a margin on each side (sharp's `extend`).
+    ///
+    /// As in sharp, a translucent background on an image without alpha adds
+    /// an opaque alpha channel first, so the margin can be translucent.
+    #[must_use]
+    pub fn extend(self, options: Extend) -> Self {
+        if options.method() == ExtendWith::Background && options.background()[3] < 255 {
+            self.ensure_alpha(1.0).apply(Arc::new(options))
+        } else {
+            self.apply(Arc::new(options))
+        }
+    }
+
+    /// Cut away a border of near-background pixels (sharp's `trim`).
+    ///
+    /// The background is the top-left pixel's colour unless `options` give
+    /// one; see [`Trim`] for what counts as near. An image that is all
+    /// background is left as it is, as sharp leaves it, and
+    /// [`Image::trim_offset`] says where the cut was.
+    ///
+    /// This is the one chaining method that does work when it is called:
+    /// the size of the result depends on its pixels, which are not known
+    /// until the pipeline so far has run. It runs on [`Scheduler::global`],
+    /// and the result is held in memory, so place `trim` after any resize
+    /// that makes the image smaller. Errors are still deferred to the
+    /// terminal, like every other chaining method's.
+    #[must_use]
+    pub fn trim(self, options: Trim) -> Self {
+        self.trimmed(options).unwrap_or_else(Self::failed)
+    }
+
+    /// [`Image::trim`], with its error surfaced.
+    fn trimmed(self, options: Trim) -> Result<Self> {
+        let format = self.metadata()?.format;
+        // Rewritten as a terminal would, so a resize before the trim still
+        // decodes a JPEG at a reduced size.
+        let (graph, _) = otf_pixels_core::shrink_on_load(self.graph()?)?;
+        let descriptor = graph.descriptor();
+        let mut pixels = TileBuf::for_image(&descriptor)?;
+        {
+            let mut view = pixels.as_tile_mut()?;
+            default_scheduler()?.run(&graph, |region, tile| {
+                otf_pixels_core::copy_region(tile, &mut view, region)
+            })?;
+        }
+
+        let (pixels, cut) = match options.find(&pixels.as_tile()?)? {
+            Some(kept) if kept != descriptor.region() => {
+                let mut part = TileBuf::zeroed(kept, descriptor.pixel)?;
+                otf_pixels_core::copy_region(&pixels.as_tile()?, &mut part.as_tile_mut()?, kept)?;
+                let size = Region::from_size(kept.width, kept.height);
+                (
+                    TileBuf::from_vec(size, descriptor.pixel, part.into_bytes())?,
+                    kept,
+                )
+            }
+            _ => (pixels, descriptor.region()),
+        };
+        let trimmed = descriptor.resized(cut.width, cut.height)?;
+        let source = BufferSource::new(trimmed, Arc::new(pixels))?;
+        Ok(Self {
+            inner: Ok(otf_pixels_core::Image::from_producer(
+                Arc::new(source),
+                format,
+            )),
+            icc: self.icc,
+            animation: self.animation,
+            pages: self.pages,
+            trim_offset: Some((cut.x, cut.y)),
+        })
+    }
+
+    /// Where the last [`Image::trim`] cut: the left and top of the kept box
+    /// in the image it trimmed, or `None` if this pipeline was not trimmed.
+    /// sharp reports these negated, as `trimOffsetLeft` and `trimOffsetTop`.
+    #[must_use]
+    pub const fn trim_offset(&self) -> Option<(u32, u32)> {
+        self.trim_offset
+    }
+
     /// Draw `overlay` over this image at `(x, y)`.
     ///
     /// This is the join point for two branches of a graph: both pipelines stay
@@ -813,7 +897,8 @@ impl Image {
     pub fn composite_with(self, overlay: Self, x: i64, y: i64, blend: Blend) -> Self {
         // The base's profile describes the result; the overlay's pixels are
         // composited as they are.
-        let (icc, animation, pages) = (self.icc, self.animation, self.pages);
+        let (icc, animation, pages, trim_offset) =
+            (self.icc, self.animation, self.pages, self.trim_offset);
         let (base, over) = match (self.inner, overlay.inner) {
             (Ok(base), Ok(over)) => (base, over),
             // The first error wins, matching how a single chain behaves.
@@ -825,6 +910,7 @@ impl Image {
             icc,
             animation,
             pages,
+            trim_offset,
         }
     }
 
@@ -840,6 +926,7 @@ impl Image {
             icc: None,
             animation: None,
             pages: 1,
+            trim_offset: None,
         }
     }
 
@@ -956,6 +1043,7 @@ impl Image {
             icc: self.icc,
             animation: self.animation,
             pages: self.pages,
+            trim_offset: self.trim_offset,
             inner: match self.inner {
                 Ok(image) => image.apply(op).map_err(Arc::new),
                 // An earlier failure short-circuits: later ops never run.
@@ -1132,10 +1220,7 @@ impl Output {
         let scheduler = match (&self.shared, self.scheduler) {
             (Some(shared), _) => Arc::clone(shared),
             (None, Some(options)) => Arc::new(Scheduler::new(options)?),
-            (None, None) if otf_pixels_core::ThreadPool::on_worker_thread() => {
-                Arc::new(Scheduler::with_defaults()?)
-            }
-            (None, None) => Scheduler::global()?,
+            (None, None) => default_scheduler()?,
         };
         let mut rows = RowAssembler::new(descriptor);
         let mut stats = scheduler.run(&image, |region, tile| {
@@ -1196,6 +1281,18 @@ impl Output {
         let mut buffer = Vec::with_capacity(hint);
         self.write(&mut buffer)?;
         Ok(buffer)
+    }
+}
+
+/// The scheduler a run uses when its caller named none: the global pool,
+/// unless the run starts on one of that pool's workers. A run blocks its
+/// caller, so one started there would hold a thread the pool needs, and it
+/// gets a private pool instead.
+fn default_scheduler() -> Result<Arc<Scheduler>> {
+    if otf_pixels_core::ThreadPool::on_worker_thread() {
+        Ok(Arc::new(Scheduler::with_defaults()?))
+    } else {
+        Scheduler::global()
     }
 }
 

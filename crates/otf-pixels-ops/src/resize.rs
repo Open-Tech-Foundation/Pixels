@@ -507,7 +507,7 @@ impl Binding {
 }
 
 /// One pixel of `rgba` in `format`'s bytes.
-fn background_pixel(format: PixelFormat, rgba: [u8; 4]) -> Vec<u8> {
+pub(crate) fn background_pixel(format: PixelFormat, rgba: [u8; 4]) -> Vec<u8> {
     let [r, g, b, a] = rgba;
     let luma = ((u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114 + 500) / 1000) as u8;
     let samples: Vec<u8> = match format.layout() {

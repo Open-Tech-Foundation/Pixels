@@ -38,6 +38,16 @@ versioning: [SemVer](https://semver.org/).
   5–7%.
 
 ### Added
+- sharp's `extend` and `trim`. `extend(Extend::new(top, right, bottom,
+  left))` grows the canvas, filling the margin with a colour (the default,
+  opaque black) or, with `extend_with`, by copying the edge, repeating the
+  image or mirroring it (`ExtendWith`), at every pixel format. A translucent
+  background adds alpha to an image without it, as in sharp. `trim(Trim)`
+  cuts away a border near the top-left pixel's colour (or a given one),
+  with sharp's threshold of 10, its 3x3 median unless `line_art`, and its
+  separate search of the alpha channel; `Image::trim_offset` says where the
+  cut was. Because the box depends on pixel values, `trim` runs the
+  pipeline before it when called and holds the result in memory.
 - sharp's per-pixel adjustments: `negate`, `gamma`, `linear` (and
   `linear_per_channel`), `threshold`, `tint`, `greyscale`, `recomb` (3x3 and
   4x4), `ensure_alpha`, `remove_alpha`, `extract_channel_named` (by
