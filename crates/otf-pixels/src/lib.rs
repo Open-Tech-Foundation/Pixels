@@ -286,6 +286,8 @@ pub struct Image {
     pages: u32,
     /// Where the last [`Image::trim`] cut, in the image it trimmed.
     trim_offset: Option<(u32, u32)>,
+    /// The source's EXIF block, written only when an output asks for it.
+    exif: Option<Arc<[u8]>>,
 }
 
 impl Image {
@@ -482,6 +484,12 @@ impl Image {
         let icc = decoder.icc_profile().map(Vec::from);
         let animation = decoder.animation().map(Arc::new);
         let pages = decoder.pages();
+        let mut exif = decoder.exif().map(<[u8]>::to_vec);
+        // Pixels turned upright are described by an upright tag, as sharp
+        // resets it; a block without the tag is copied as it is.
+        if let Some(block) = exif.as_mut().filter(|_| options.auto_orient) {
+            Orientation::Normal.write_to_exif_block(block);
+        }
         if options.animated && animation.is_some() {
             return Err(PixelsError::unsupported(format!(
                 "{format}: multi-frame (animated) pipelines are not implemented yet; \
@@ -491,6 +499,7 @@ impl Image {
         let mut image = Self::from_decoder(decoder, format).with_icc_profile(icc);
         image.animation = animation;
         image.pages = pages;
+        image.exif = exif.map(Arc::from);
         if options.to_srgb {
             image = image.to_srgb();
         }
@@ -520,6 +529,7 @@ impl Image {
             animation: None,
             pages: 1,
             trim_offset: None,
+            exif: None,
             inner: Ok(otf_pixels_core::Image::from_producer(producer, format)),
         }
     }
@@ -872,6 +882,7 @@ impl Image {
             animation: self.animation,
             pages: self.pages,
             trim_offset: Some((cut.x, cut.y)),
+            exif: self.exif,
         })
     }
 
@@ -918,8 +929,13 @@ impl Image {
     fn composite_by(self, overlay: Self, op: Composite) -> Self {
         // The base's profile describes the result; the overlay's pixels are
         // composited as they are.
-        let (icc, animation, pages, trim_offset) =
-            (self.icc, self.animation, self.pages, self.trim_offset);
+        let (icc, animation, pages, trim_offset, exif) = (
+            self.icc,
+            self.animation,
+            self.pages,
+            self.trim_offset,
+            self.exif,
+        );
         let (base, over) = match (self.inner, overlay.inner) {
             (Ok(base), Ok(over)) => (base, over),
             // The first error wins, matching how a single chain behaves.
@@ -932,6 +948,7 @@ impl Image {
             animation,
             pages,
             trim_offset,
+            exif,
         }
     }
 
@@ -948,6 +965,7 @@ impl Image {
             animation: None,
             pages: 1,
             trim_offset: None,
+            exif: None,
         }
     }
 
@@ -1046,6 +1064,25 @@ impl Image {
         }
     }
 
+    /// The source's EXIF block, TIFF-structured, if it had one.
+    ///
+    /// Outputs drop it unless [`EncodeOptions::keep_exif`] is set. When
+    /// [`OpenOptions::auto_orient`] turned the pixels upright, its
+    /// Orientation tag already says so.
+    #[must_use]
+    pub fn exif(&self) -> Option<&[u8]> {
+        self.exif.as_deref()
+    }
+
+    /// Replace the EXIF block an output with [`EncodeOptions::keep_exif`]
+    /// writes, or with `None` remove it (sharp's `withExif`, given whole).
+    /// `exif` is TIFF-structured, from its `II` or `MM` byte-order mark.
+    #[must_use]
+    pub fn with_exif(mut self, exif: Option<Vec<u8>>) -> Self {
+        self.exif = exif.map(Arc::from);
+        self
+    }
+
     /// Declare the ICC profile the pixels are in, or with `None` drop it and
     /// call them sRGB. Only the label changes, never a pixel.
     #[must_use]
@@ -1065,6 +1102,7 @@ impl Image {
             animation: self.animation,
             pages: self.pages,
             trim_offset: self.trim_offset,
+            exif: self.exif,
             inner: match self.inner {
                 Ok(image) => image.apply(op).map_err(Arc::new),
                 // An earlier failure short-circuits: later ops never run.
@@ -1207,6 +1245,15 @@ pub struct Output {
 }
 
 impl Output {
+    /// The EXIF block this output writes: the image's, if the options keep
+    /// it.
+    fn exif(&self) -> Option<&[u8]> {
+        self.image
+            .exif
+            .as_deref()
+            .filter(|_| self.options.keep_exif)
+    }
+
     /// The format this output will be encoded as.
     #[must_use]
     pub const fn format(&self) -> Format {
@@ -1297,6 +1344,7 @@ impl Output {
         let descriptor = image.descriptor();
         let mut encoder = encoder_for(self.format, self.options)?;
         encoder.set_icc_profile(self.image.icc.as_deref())?;
+        encoder.set_exif(self.exif())?;
         encoder.write_header(&descriptor, &mut sink)?;
 
         // The scheduler delivers tiles; an encoder wants whole rows in order.
@@ -1344,6 +1392,7 @@ impl Output {
         let descriptor = image.descriptor();
         let mut encoder = encoder_for(self.format, self.options)?;
         encoder.set_icc_profile(self.image.icc.as_deref())?;
+        encoder.set_exif(self.exif())?;
         let mut sink = Vec::with_capacity(descriptor.byte_len().unwrap_or_default());
         encoder.write_header(&descriptor, &mut sink)?;
         otf_pixels_core::evaluate_rows(&image, |_, row| encoder.write_row(row, &mut sink))?;

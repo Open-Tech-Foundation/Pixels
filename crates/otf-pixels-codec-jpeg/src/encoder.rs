@@ -69,6 +69,8 @@ pub struct JpegEncoder {
     state: Option<State>,
     /// The ICC profile to embed after the JFIF header, if any.
     icc: Option<Vec<u8>>,
+    /// The EXIF block to write as `APP1`, if any.
+    exif: Option<Vec<u8>>,
 }
 
 /// Everything fixed once the descriptor is known.
@@ -225,6 +227,7 @@ impl JpegEncoder {
             subsampling: Subsampling::Both,
             state: None,
             icc: None,
+            exif: None,
         }
     }
 
@@ -254,6 +257,7 @@ impl JpegEncoder {
             },
             state: None,
             icc: None,
+            exif: None,
         })
     }
 
@@ -581,6 +585,10 @@ fn write_huffman_table(
     payload.extend_from_slice(values);
 }
 
+/// The largest EXIF block an `APP1` segment holds: 65,535 less the length
+/// field and the identifier.
+const MAX_EXIF: usize = 65_535 - 2 - 6;
+
 impl Encoder for JpegEncoder {
     fn set_icc_profile(&mut self, profile: Option<&[u8]>) -> Result<()> {
         if self.state.is_some() {
@@ -597,6 +605,20 @@ impl Encoder for JpegEncoder {
             )));
         }
         self.icc = profile.map(<[u8]>::to_vec);
+        Ok(())
+    }
+
+    /// The block goes in an `APP1` segment, which holds at most 65,527
+    /// bytes after its `Exif\0\0` identifier. A larger block, which no
+    /// JPEG could have carried, is not written, as libvips drops it.
+    fn set_exif(&mut self, exif: Option<&[u8]>) -> Result<()> {
+        if self.state.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "exif",
+                "the EXIF block must be set before write_header",
+            ));
+        }
+        self.exif = exif.filter(|e| e.len() <= MAX_EXIF).map(<[u8]>::to_vec);
         Ok(())
     }
 
@@ -649,6 +671,11 @@ impl Encoder for JpegEncoder {
             ],
             sink,
         )?;
+        if let Some(exif) = &self.exif {
+            let mut payload = b"Exif\0\0".to_vec();
+            payload.extend_from_slice(exif);
+            write_segment(marker::APP1, &payload, sink)?;
+        }
         // The profile, in as many APP2 segments as it takes.
         if let Some(profile) = &self.icc {
             for segment in icc_segments(profile) {

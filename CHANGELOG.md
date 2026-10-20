@@ -42,6 +42,17 @@ versioning: [SemVer](https://semver.org/).
   5–7%.
 
 ### Added
+- sharp's `keepExif`. `EncodeOptions::with_keep_exif(true)` copies the
+  source's EXIF block into a JPEG (`APP1`), PNG (`eXIf`), WebP (`EXIF`, with
+  `VP8X`) or AVIF (an `Exif` item described by `cdsc`) output; by default
+  it is still stripped. The JPEG, PNG, WebP and AVIF decoders read the block
+  (`Decoder::exif`, a new trait method defaulting to none), and when
+  `auto_orient` turns the pixels upright its Orientation tag is reset to 1
+  (`Orientation::write_to_exif_block`), so viewers do not rotate the image
+  twice. `Image::exif` reads it and `Image::with_exif` replaces it.
+  `Encoder::set_exif` is a new trait method defaulting to ignoring the
+  block, which GIF, TIFF and raw do. A block over JPEG's 64 KB segment is
+  dropped, as libvips drops it. Pillow and libavif read the blocks written.
 - `chromaSubsampling` for JPEG and AVIF, and AVIF `effort`, as in sharp.
   `EncodeOptions::with_chroma_subsampling(ChromaSubsampling::Yuv444)` (or
   `Yuv420`) overrides JPEG's choice by quality (4:2:0 below 90, 4:4:4 from

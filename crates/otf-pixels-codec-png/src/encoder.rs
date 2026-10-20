@@ -40,6 +40,8 @@ pub struct PngEncoder {
     state: Option<State>,
     /// The ICC profile to write as `iCCP`, if any.
     icc: Option<Vec<u8>>,
+    /// The EXIF block to write as `eXIf`, if any.
+    exif: Option<Vec<u8>>,
 }
 
 /// Everything fixed once the descriptor is known.
@@ -76,6 +78,7 @@ impl PngEncoder {
             palette: None,
             state: None,
             icc: None,
+            exif: None,
         }
     }
 
@@ -249,6 +252,7 @@ fn encode_palette(
     dither: f32,
     level: Level,
     icc: Option<&[u8]>,
+    exif: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
     let width = descriptor.width as usize;
     let (entries, indices): (Vec<[u8; 4]>, Vec<u8>) = if descriptor.pixel.layout().has_alpha() {
@@ -299,6 +303,9 @@ fn encode_palette(
         iccp.extend(zlib_compress(profile, level).map_err(crate::compress_error)?);
         write_chunk(&mut out, b"iCCP", &iccp);
     }
+    if let Some(exif) = exif {
+        write_chunk(&mut out, b"eXIf", exif);
+    }
     let plte: Vec<u8> = entries.iter().flat_map(|e| [e[0], e[1], e[2]]).collect();
     write_chunk(&mut out, b"PLTE", &plte);
     // tRNS lists alphas up to the last translucent entry; the rest are
@@ -322,6 +329,17 @@ impl Encoder for PngEncoder {
             ));
         }
         self.icc = profile.map(<[u8]>::to_vec);
+        Ok(())
+    }
+
+    fn set_exif(&mut self, exif: Option<&[u8]>) -> Result<()> {
+        if self.state.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "exif",
+                "the EXIF block must be set before write_header",
+            ));
+        }
+        self.exif = exif.map(<[u8]>::to_vec);
         Ok(())
     }
 
@@ -382,6 +400,10 @@ impl Encoder for PngEncoder {
             let mut iccp = b"ICC Profile\0\0".to_vec();
             iccp.extend(zlib_compress(profile, self.level).map_err(crate::compress_error)?);
             write_chunk(&mut chunk, b"iCCP", &iccp);
+        }
+        if let Some(exif) = &self.exif {
+            // eXIf goes before the image data (§11.3.6.1).
+            write_chunk(&mut chunk, b"eXIf", exif);
         }
         sink.write_all(&chunk)?;
 
@@ -461,6 +483,7 @@ impl Encoder for PngEncoder {
                 dither,
                 self.level,
                 self.icc.as_deref(),
+                self.exif.as_deref(),
             )?;
             sink.write_all(&file)?;
             return sink.flush();

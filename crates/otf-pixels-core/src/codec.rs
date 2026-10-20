@@ -205,6 +205,10 @@ pub struct EncodeOptions {
     /// Chroma sampling for JPEG and AVIF. `None` is each format's default:
     /// for JPEG 4:2:0 below quality 90 and 4:4:4 from it, for AVIF 4:2:0.
     pub chroma_subsampling: Option<ChromaSubsampling>,
+    /// Copy the source's EXIF block into the output (sharp's `keepExif`),
+    /// where the format has a place for one: JPEG, PNG, WebP and AVIF. Off
+    /// by default, which strips camera data and location from uploads.
+    pub keep_exif: bool,
 }
 
 /// Check `value` lies in `range`, naming `name` if not.
@@ -332,6 +336,13 @@ impl EncodeOptions {
         self
     }
 
+    /// These options keeping the source's EXIF, or not.
+    #[must_use]
+    pub const fn with_keep_exif(mut self, keep: bool) -> Self {
+        self.keep_exif = keep;
+        self
+    }
+
     /// Whether a PNG should be written as a palette image.
     #[must_use]
     pub const fn wants_palette(&self) -> bool {
@@ -352,6 +363,7 @@ impl Default for EncodeOptions {
             alpha_quality: 100,
             near_lossless: false,
             chroma_subsampling: None,
+            keep_exif: false,
         }
     }
 }
@@ -432,6 +444,16 @@ pub trait Decoder: Send + fmt::Debug {
     /// after the header is parsed; a profile stored after the image data is
     /// not seen.
     fn icc_profile(&self) -> Option<&[u8]> {
+        None
+    }
+
+    /// The embedded EXIF block, if the file carries one: the TIFF-structured
+    /// bytes from the byte-order mark (`II` or `MM`), without the `Exif\0\0`
+    /// identifier a JPEG wraps it in.
+    ///
+    /// Reported for an encoder to copy, like [`Decoder::icc_profile`]; its
+    /// orientation is what [`Decoder::orientation`] reports.
+    fn exif(&self) -> Option<&[u8]> {
         None
     }
 
@@ -518,6 +540,21 @@ pub trait Encoder: Send {
     /// been written.
     fn set_icc_profile(&mut self, profile: Option<&[u8]>) -> Result<()> {
         let _ = profile;
+        Ok(())
+    }
+
+    /// Embed `exif` (TIFF-structured bytes, as [`Decoder::exif`] gives
+    /// them) as the image's EXIF block, or write none.
+    ///
+    /// Called before [`Encoder::write_header`]. The default ignores it, which
+    /// is right for a format with nowhere to put one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::InvalidArgument`] if the header has already
+    /// been written.
+    fn set_exif(&mut self, exif: Option<&[u8]>) -> Result<()> {
+        let _ = exif;
         Ok(())
     }
 

@@ -22,6 +22,8 @@ pub struct WebPEncoder {
     options: EncodeOptions,
     /// The ICC profile to write as `ICCP`, if any.
     icc: Option<Vec<u8>>,
+    /// The EXIF block to write as `EXIF`, if any.
+    exif: Option<Vec<u8>>,
 }
 
 impl Default for WebPEncoder {
@@ -55,6 +57,7 @@ impl WebPEncoder {
             state: None,
             options: *options,
             icc: None,
+            exif: None,
         }
     }
 }
@@ -78,6 +81,17 @@ impl Encoder for WebPEncoder {
             ));
         }
         self.icc = profile.map(<[u8]>::to_vec);
+        Ok(())
+    }
+
+    fn set_exif(&mut self, exif: Option<&[u8]>) -> Result<()> {
+        if self.state.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "exif",
+                "the EXIF block must be set before write_header",
+            ));
+        }
+        self.exif = exif.map(<[u8]>::to_vec);
         Ok(())
     }
 
@@ -166,7 +180,15 @@ impl Encoder for WebPEncoder {
         let (width, height) = (state.descriptor.width, state.descriptor.height);
         // VP8L carries its own alpha; only a lossy ALPH chunk needs VP8X.
         let needs_vp8x = alpha && !lossless;
-        let file = container(width, height, &body, alpha, needs_vp8x, self.icc.as_deref());
+        let file = container(
+            width,
+            height,
+            &body,
+            alpha,
+            needs_vp8x,
+            self.icc.as_deref(),
+            self.exif.as_deref(),
+        );
         sink.write_all(&file)?;
         sink.flush()
     }
@@ -235,8 +257,8 @@ fn encode_lossy(
 }
 
 /// The whole file: the image chunks alone in a simple file, or behind a
-/// `VP8X` header (and an `ICCP` chunk) when the alpha needs one or there is a
-/// profile.
+/// `VP8X` header (with an `ICCP` chunk before them and an `EXIF` chunk
+/// after) when the alpha needs one or there is metadata.
 fn container(
     width: u32,
     height: u32,
@@ -244,12 +266,16 @@ fn container(
     alpha: bool,
     needs_vp8x: bool,
     icc: Option<&[u8]>,
+    exif: Option<&[u8]>,
 ) -> Vec<u8> {
-    if !needs_vp8x && icc.is_none() {
+    if !needs_vp8x && icc.is_none() && exif.is_none() {
         return riff(image);
     }
-    // VP8X flags: ICC 0x20, alpha 0x10; then the canvas size less one.
-    let flags = if icc.is_some() { 0x20 } else { 0 } | if alpha { 0x10 } else { 0 };
+    // VP8X flags: ICC 0x20, alpha 0x10, EXIF 0x08; then the canvas size
+    // less one.
+    let flags = if icc.is_some() { 0x20 } else { 0 }
+        | if alpha { 0x10 } else { 0 }
+        | if exif.is_some() { 0x08 } else { 0 };
     let mut vp8x = vec![flags, 0, 0, 0];
     vp8x.extend_from_slice(&(width - 1).to_le_bytes()[..3]);
     vp8x.extend_from_slice(&(height - 1).to_le_bytes()[..3]);
@@ -259,6 +285,9 @@ fn container(
         chunk(&mut body, b"ICCP", profile);
     }
     body.extend_from_slice(image);
+    if let Some(exif) = exif {
+        chunk(&mut body, b"EXIF", exif);
+    }
     riff(&body)
 }
 

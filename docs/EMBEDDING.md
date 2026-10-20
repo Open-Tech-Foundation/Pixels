@@ -103,12 +103,19 @@ any allocation.
 | `gif({ colours, dither })` | `with_colours(n)?`, `with_dither(d)?` |
 | `webp({ effort, alphaQuality, nearLossless })` | `with_effort(e)?`, `with_alpha_quality(q)?`, `with_near_lossless(true)` (at `quality`, as in sharp); efforts above 2 give the same lossy file, since the VP8 search has nothing further to try; `smartSubsample` and `preset` have no counterpart |
 | `jpeg({ chromaSubsampling })`, `avif({ chromaSubsampling, effort })` | `with_chroma_subsampling(ChromaSubsampling::Yuv444)` for `'4:4:4'`, `Yuv420` for `'4:2:0'`; `with_effort(e)?`. sharp's AVIF default is 4:4:4 and ours 4:2:0, so pass `Yuv444` to match it. AVIF effort above 4 searches no further |
+| `keepExif()`, `withExif(exif)` | `EncodeOptions::with_keep_exif(true)`; `Image::with_exif(Some(block))` |
 | `keepIccProfile` | open with `to_srgb` off; the profile is written to the output |
 
 `output()` narrows pixels to what the format can hold: 16-bit or float input
 is written as 8-bit JPEG, WebP, AVIF or GIF, and as 16-bit PNG or TIFF. JPEG
-and GIF composite partial transparency over black. EXIF and XMP are not
-written to outputs, which also strips location data from uploads.
+and GIF composite partial transparency over black. EXIF is not written unless an output asks for it with
+`EncodeOptions::with_keep_exif(true)` (sharp's `keepExif`), so by default
+location data is stripped from uploads. Kept, it is copied from a JPEG, PNG,
+WebP or AVIF source into a JPEG, PNG, WebP or AVIF output, with its
+Orientation tag reset to 1 when `auto_orient` turned the pixels upright.
+`Image::exif()` reads the block and `Image::with_exif` replaces it (sharp's
+`withExif`, given as a whole TIFF-structured block). TIFF sources and
+outputs carry no separate block, and XMP is never written.
 
 ## Animation
 

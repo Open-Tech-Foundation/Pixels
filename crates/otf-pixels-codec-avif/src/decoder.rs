@@ -88,6 +88,8 @@ pub struct AvifDecoder {
     frame_data: Option<Vec<u8>>,
     /// The alpha auxiliary item, when there is one and it can be decoded.
     alpha: Option<AlphaItem>,
+    /// The primary item's EXIF block, from an `Exif` item describing it.
+    exif: Option<Vec<u8>>,
     /// The reconstructed interleaved raster, produced on the first row read.
     raster: Option<Vec<u8>>,
     /// Rows already served.
@@ -116,11 +118,13 @@ impl AvifDecoder {
         };
         let pixel = pixel_format(&info);
         let descriptor = ImageDescriptor::with_limits(info.width, info.height, pixel, &limits)?;
+        let exif = locate_exif(&bytes);
         Ok(Self {
             descriptor,
             info,
             frame_data,
             alpha,
+            exif,
             raster: None,
             row: 0,
         })
@@ -265,6 +269,26 @@ fn locate_primary_frame(bytes: &[u8]) -> Result<Vec<u8>> {
         .primary_item()
         .ok_or_else(|| PixelsError::malformed("avif", "the file names no primary image item"))?;
     Ok(meta.item_data(bytes, primary)?.into_owned())
+}
+
+/// The EXIF block of the item that describes the primary item (a `cdsc`
+/// reference from an `Exif` item), past its TIFF header offset.
+///
+/// Metadata never fails a decode: anything malformed is just no EXIF.
+fn locate_exif(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut reader = Reader::new(bytes);
+    reader.next_box();
+    let meta = Meta::parse(reader.find(b"meta").ok()??).ok()?;
+    let primary = meta.primary_item()?.id;
+    let item = meta.items.iter().find(|item| {
+        item.kind == FourCc::new(b"Exif") && meta.referenced(item.id, b"cdsc").contains(&primary)
+    })?;
+    let data = meta.item_data(bytes, item).ok()?;
+    // ISO/IEC 23008-12 A.2.1: a 32-bit offset to the TIFF header, then the
+    // block.
+    let offset = u32::from_be_bytes(data.get(..4)?.try_into().ok()?);
+    let start = 4_usize.checked_add(usize::try_from(offset).ok()?)?;
+    Some(data.get(start..)?.to_vec())
 }
 
 /// Locate the primary item's alpha auxiliary item, if it has one.
@@ -504,6 +528,11 @@ impl Decoder for AvifDecoder {
 
     fn icc_profile(&self) -> Option<&[u8]> {
         self.info.icc.as_deref()
+    }
+
+    /// The EXIF block of an `Exif` item describing the primary image.
+    fn exif(&self) -> Option<&[u8]> {
+        self.exif.as_deref()
     }
 
     fn capability(&self) -> DecodeCapability {

@@ -77,6 +77,8 @@ pub struct JpegDecoder<S: Source> {
     inner: Box<Engine<S>>,
     /// The ICC profile from the `APP2` segments before the scan.
     icc: Option<Vec<u8>>,
+    /// The EXIF block from the first EXIF `APP1` segment.
+    exif: Option<Vec<u8>>,
 }
 
 impl<S: Source> JpegDecoder<S> {
@@ -113,7 +115,8 @@ impl<S: Source> JpegDecoder<S> {
     pub fn with_scale(source: S, limits: Limits, scale: Scale) -> Result<Self> {
         let mut inner = Box::new(Engine::with_scale(source, limits, scale)?);
         let icc = inner.icc.take();
-        Ok(Self { inner, icc })
+        let exif = inner.exif.take();
+        Ok(Self { inner, icc, exif })
     }
 
     /// The resolution this decoder produces, as eighths of full size.
@@ -137,6 +140,11 @@ impl<S: Source + std::fmt::Debug> Decoder for JpegDecoder<S> {
     /// The ICC profile, joined from its `APP2` segments.
     fn icc_profile(&self) -> Option<&[u8]> {
         self.icc.as_deref()
+    }
+
+    /// The EXIF block, from the first EXIF `APP1` segment.
+    fn exif(&self) -> Option<&[u8]> {
+        self.exif.as_deref()
     }
 
     /// The EXIF orientation, from the first EXIF `APP1` segment.
@@ -181,6 +189,8 @@ struct Engine<S: Source> {
     orientation: Option<Orientation>,
     /// The ICC profile, until [`JpegDecoder`] takes it.
     icc: Option<Vec<u8>>,
+    /// The EXIF block, until [`JpegDecoder`] takes it.
+    exif: Option<Vec<u8>>,
     planes: Vec<Plane>,
     /// One output-width row per component, reused for every row: the
     /// component's samples at output resolution, ready for colour conversion.
@@ -261,6 +271,7 @@ impl<S: Source> Engine<S> {
         let mut ac_tables: [Option<HuffmanTable>; 4] = [None, None, None, None];
         let mut restart_interval = 0_u16;
         let mut orientation = None;
+        let mut exif: Option<Vec<u8>> = None;
         let mut icc = IccChunks::default();
         let mut adobe = None;
         let mut frame: Option<Frame> = None;
@@ -319,6 +330,9 @@ impl<S: Source> Engine<S> {
                     let payload = reader.read_segment()?;
                     // The first EXIF block wins; later ones are thumbnails.
                     orientation = orientation.or_else(|| exif_orientation(&payload));
+                    if exif.is_none() {
+                        exif = payload.strip_prefix(b"Exif\0\0").map(<[u8]>::to_vec);
+                    }
                 }
                 marker::APP2 => icc.push(&reader.read_segment()?),
                 marker::APP14 => {
@@ -450,6 +464,7 @@ impl<S: Source> Engine<S> {
             restarts_left: u32::from(restart_interval),
             orientation,
             icc: icc.assemble(),
+            exif,
             limits,
             planes: Vec::new(),
             expanded: Vec::new(),

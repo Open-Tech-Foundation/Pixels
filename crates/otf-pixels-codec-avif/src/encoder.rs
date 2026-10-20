@@ -37,6 +37,8 @@ pub struct AvifEncoder {
     options: EncodeOptions,
     /// The ICC profile for a `colr` of type `prof`, if any.
     icc: Option<Vec<u8>>,
+    /// The EXIF block for an `Exif` item, if any.
+    exif: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -66,6 +68,7 @@ impl AvifEncoder {
             state: None,
             options: *options,
             icc: None,
+            exif: None,
         }
     }
 }
@@ -79,6 +82,17 @@ impl Encoder for AvifEncoder {
             ));
         }
         self.icc = profile.map(<[u8]>::to_vec);
+        Ok(())
+    }
+
+    fn set_exif(&mut self, exif: Option<&[u8]>) -> Result<()> {
+        if self.state.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "exif",
+                "the EXIF block must be set before write_header",
+            ));
+        }
+        self.exif = exif.map(<[u8]>::to_vec);
         Ok(())
     }
 
@@ -164,7 +178,12 @@ impl Encoder for AvifEncoder {
                 ),
             ));
         }
-        let bytes = encode(state, &self.options, self.icc.as_deref())?;
+        let bytes = encode(
+            state,
+            &self.options,
+            self.icc.as_deref(),
+            self.exif.as_deref(),
+        )?;
         sink.write_all(&bytes)?;
         sink.flush()
     }
@@ -236,7 +255,12 @@ fn to_planes(
     (vec![y, average(&u_full), average(&v_full)], alpha)
 }
 
-fn encode(state: &State, options: &EncodeOptions, icc: Option<&[u8]>) -> Result<Vec<u8>> {
+fn encode(
+    state: &State,
+    options: &EncodeOptions,
+    icc: Option<&[u8]>,
+    exif: Option<&[u8]>,
+) -> Result<Vec<u8>> {
     let (width, height) = (state.descriptor.width, state.descriptor.height);
     let subsampled = options.chroma_subsampling != Some(ChromaSubsampling::Yuv444);
     let effort = options.effort.unwrap_or(DEFAULT_EFFORT).min(9);
@@ -284,6 +308,7 @@ fn encode(state: &State, options: &EncodeOptions, icc: Option<&[u8]>) -> Result<
         &colour,
         alpha.as_ref(),
         icc,
+        exif,
     ))
 }
 
@@ -326,6 +351,7 @@ fn container(
     colour: &CodedStill,
     alpha: Option<&CodedStill>,
     icc: Option<&[u8]>,
+    exif: Option<&[u8]>,
 ) -> Vec<u8> {
     let ftyp = bx(b"ftyp", b"avif\0\0\0\0avifmif1miaf");
     let ispe = {
@@ -384,34 +410,56 @@ fn container(
 
     let hdlr = full(b"hdlr", 0, 0, b"\0\0\0\0pict\0\0\0\0\0\0\0\0\0\0\0\0\0");
     let pitm = full(b"pitm", 0, 0, &1_u16.to_be_bytes());
-    let infe = |item: u16| {
+    let infe = |item: u16, kind: &[u8; 4]| {
         let mut p = item.to_be_bytes().to_vec();
         p.extend_from_slice(&[0, 0]);
-        p.extend_from_slice(b"av01");
+        p.extend_from_slice(kind);
         p.push(0); // item_name
         full(b"infe", 2, 0, &p)
     };
-    let items: Vec<&CodedStill> = std::iter::once(colour).chain(alpha).collect();
+    // Items 1 (colour) and 2 (alpha) are coded images; an EXIF block is the
+    // next, its data a zero offset to the TIFF header and then the block
+    // (ISO/IEC 23008-12 A.2.1).
+    let exif_data = exif.map(|block| [&[0_u8; 4][..], block].concat());
+    let mut items: Vec<(&[u8; 4], &[u8])> = std::iter::once(colour)
+        .chain(alpha)
+        .map(|coded| (b"av01", coded.data.as_slice()))
+        .collect();
+    if let Some(data) = &exif_data {
+        items.push((b"Exif", data));
+    }
     let iinf = {
         let mut p = (items.len() as u16).to_be_bytes().to_vec();
-        for i in 0..items.len() {
-            p.extend_from_slice(&infe(i as u16 + 1));
+        for (i, (kind, _)) in items.iter().enumerate() {
+            p.extend_from_slice(&infe(i as u16 + 1, kind));
         }
         full(b"iinf", 0, 0, &p)
     };
-    // auxl: the alpha item (2) is auxiliary to the colour item (1).
-    let iref = alpha.map(|_| full(b"iref", 0, 0, &bx(b"auxl", &[0, 2, 0, 1, 0, 1])));
+    // auxl: the alpha item (2) is auxiliary to the colour item (1); cdsc:
+    // the EXIF item describes it.
+    let mut references = Vec::new();
+    if alpha.is_some() {
+        references.extend(bx(b"auxl", &[0, 2, 0, 1, 0, 1]));
+    }
+    if exif.is_some() {
+        let id = items.len() as u16;
+        references.extend(bx(
+            b"cdsc",
+            &[&id.to_be_bytes()[..], &[0, 1, 0, 1]].concat(),
+        ));
+    }
+    let iref = (!references.is_empty()).then(|| full(b"iref", 0, 0, &references));
     // iloc v0 with 4-byte offsets and lengths, no base offset.
     let iloc = |mdat_start: u32| {
         let mut p = vec![0x44, 0x00];
         p.extend_from_slice(&(items.len() as u16).to_be_bytes());
         let mut offset = mdat_start;
-        for (i, item) in items.iter().enumerate() {
+        for (i, (_, data)) in items.iter().enumerate() {
             p.extend_from_slice(&(i as u16 + 1).to_be_bytes());
             p.extend_from_slice(&[0, 0, 0, 1]); // data_reference_index, extent_count
             p.extend_from_slice(&offset.to_be_bytes());
-            p.extend_from_slice(&(item.data.len() as u32).to_be_bytes());
-            offset += item.data.len() as u32;
+            p.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            offset += data.len() as u32;
         }
         full(b"iloc", 0, 0, &p)
     };
@@ -427,7 +475,7 @@ fn container(
     let mdat_start = (ftyp.len() + meta(0).len() + 8) as u32;
     let mdat_payload: Vec<u8> = items
         .iter()
-        .flat_map(|item| item.data.iter().copied())
+        .flat_map(|(_, data)| data.iter().copied())
         .collect();
     [ftyp, meta(mdat_start), bx(b"mdat", &mdat_payload)].concat()
 }

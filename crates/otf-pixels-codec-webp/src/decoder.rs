@@ -29,6 +29,8 @@ pub struct WebPDecoder {
     row: u32,
     /// From the `EXIF` chunk, if there is one.
     orientation: Orientation,
+    /// The `EXIF` chunk's block.
+    exif: Option<Vec<u8>>,
     /// The `ICCP` chunk, if there is one.
     icc: Option<Vec<u8>>,
     /// The animation's frames and timing, for an animated file.
@@ -90,6 +92,9 @@ impl WebPDecoder {
         let descriptor =
             ImageDescriptor::with_limits(container.width, container.height, pixel, &limits)?;
         let icc = container.icc.map(<[u8]>::to_vec);
+        let exif = container
+            .exif
+            .map(|block| block.strip_prefix(b"Exif\0\0").unwrap_or(block).to_vec());
         let animation = Animation::new(container.frame_durations_ms.clone(), container.loop_count);
         Ok(Self {
             descriptor,
@@ -97,6 +102,7 @@ impl WebPDecoder {
             pixels: None,
             row: 0,
             orientation,
+            exif,
             icc,
             animation,
         })
@@ -194,6 +200,11 @@ impl Decoder for WebPDecoder {
 
     fn icc_profile(&self) -> Option<&[u8]> {
         self.icc.as_deref()
+    }
+
+    /// The `EXIF` chunk's block.
+    fn exif(&self) -> Option<&[u8]> {
+        self.exif.as_deref()
     }
 
     fn animation(&self) -> Option<Animation> {

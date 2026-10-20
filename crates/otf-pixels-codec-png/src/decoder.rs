@@ -84,6 +84,8 @@ pub struct PngDecoder<S: Source> {
     /// Everything read before the image data, until a decode path takes it.
     prelude: Option<Prelude<S>>,
     orientation: Orientation,
+    /// The `eXIf` block, if it fit in [`EXIF_PREFIX`].
+    exif: Option<Vec<u8>>,
     /// The `iCCP` profile, decompressed.
     icc: Option<Vec<u8>>,
     /// The decoded image in output format, produced on first row read.
@@ -153,6 +155,7 @@ impl<S: Source> PngDecoder<S> {
         let mut palette: Option<Vec<[u8; 3]>> = None;
         let mut transparency: Option<Transparency> = None;
         let mut orientation = None;
+        let mut exif: Option<Vec<u8>> = None;
         let mut icc = None;
         loop {
             let kind = chunks.open_next()?;
@@ -171,19 +174,25 @@ impl<S: Source> PngDecoder<S> {
                     chunks.close()?;
                 }
                 b"eXIf" => {
-                    let mut exif = vec![0_u8; EXIF_PREFIX];
+                    // One byte past the cap tells a block too large to keep
+                    // apart from one that fits.
+                    let mut block = vec![0_u8; EXIF_PREFIX + 1];
                     let mut filled = 0;
-                    while let Some(rest) = exif.get_mut(filled..) {
+                    while let Some(rest) = block.get_mut(filled..).filter(|r| !r.is_empty()) {
                         match chunks.read_payload(rest)? {
                             0 => break,
                             n => filled += n,
                         }
                     }
-                    exif.truncate(filled);
+                    block.truncate(filled);
                     chunks.skip_payload()?;
                     chunks.close()?;
                     // The first one wins; §11.3.6.1 permits only one.
-                    orientation = orientation.or_else(|| Orientation::from_exif_block(&exif));
+                    orientation = orientation.or_else(|| Orientation::from_exif_block(&block));
+                    if exif.is_none() && filled <= EXIF_PREFIX {
+                        let bare = block.strip_prefix(b"Exif\0\0").unwrap_or(&block);
+                        exif = Some(bare.to_vec());
+                    }
                 }
                 b"iCCP" => {
                     // One byte past the cap tells an oversized chunk apart.
@@ -239,6 +248,7 @@ impl<S: Source> PngDecoder<S> {
             }),
             orientation: orientation.unwrap_or_default(),
             icc,
+            exif,
             raster: None,
             stream: None,
             row: 0,
@@ -1007,6 +1017,11 @@ impl<S: Source + std::fmt::Debug> Decoder for PngDecoder<S> {
     /// From an `iCCP` chunk before the image data.
     fn icc_profile(&self) -> Option<&[u8]> {
         self.icc.as_deref()
+    }
+
+    /// The `eXIf` block, unless it was larger than 64 KiB.
+    fn exif(&self) -> Option<&[u8]> {
+        self.exif.as_deref()
     }
 
     fn capability(&self) -> DecodeCapability {

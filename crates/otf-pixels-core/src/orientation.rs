@@ -171,6 +171,75 @@ impl Orientation {
         }
         None
     }
+
+    /// Set the Orientation tag of the EXIF block `exif` to this orientation,
+    /// in place, returning whether the block had one to set.
+    ///
+    /// `exif` is TIFF-structured, with or without the `Exif\0\0`
+    /// identifier. Only IFD0's existing tag is rewritten: nothing is added,
+    /// and a malformed block is left alone. This is how a copied block is
+    /// kept truthful once the pixels it describes have been turned upright.
+    pub fn write_to_exif_block(self, exif: &mut [u8]) -> bool {
+        let start = if exif.starts_with(b"Exif\0\0") { 6 } else { 0 };
+        let Some(tiff) = exif.get_mut(start..) else {
+            return false;
+        };
+        let Some(at) = orientation_entry(tiff) else {
+            return false;
+        };
+        let big_endian = tiff.first() == Some(&b'M');
+        let value = u16::from(self.exif());
+        let bytes = if big_endian {
+            value.to_be_bytes()
+        } else {
+            value.to_le_bytes()
+        };
+        match tiff.get_mut(at + 8..at + 10) {
+            Some(slot) => {
+                slot.copy_from_slice(&bytes);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Where IFD0's Orientation entry starts in TIFF-structured `tiff`.
+fn orientation_entry(tiff: &[u8]) -> Option<usize> {
+    let big_endian = match tiff.get(..2)? {
+        b"MM" => true,
+        b"II" => false,
+        _ => return None,
+    };
+    let short = |at: usize| -> Option<u16> {
+        let bytes = [*tiff.get(at)?, *tiff.get(at.checked_add(1)?)?];
+        Some(if big_endian {
+            u16::from_be_bytes(bytes)
+        } else {
+            u16::from_le_bytes(bytes)
+        })
+    };
+    let long = |at: usize| -> Option<u32> {
+        let b = tiff.get(at..at.checked_add(4)?)?;
+        let bytes = [*b.first()?, *b.get(1)?, *b.get(2)?, *b.get(3)?];
+        Some(if big_endian {
+            u32::from_be_bytes(bytes)
+        } else {
+            u32::from_le_bytes(bytes)
+        })
+    };
+    if short(2)? != 42 {
+        return None;
+    }
+    let ifd = usize::try_from(long(4)?).ok()?;
+    for entry in 0..usize::from(short(ifd)?) {
+        let at = ifd.checked_add(2)?.checked_add(entry.checked_mul(12)?)?;
+        if short(at)? == 0x0112 {
+            tiff.get(at..at.checked_add(12)?)?;
+            return Some(at);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -295,6 +364,29 @@ mod tests {
             Orientation::from_exif_block(bare),
             Some(Orientation::Rotate270)
         );
+    }
+
+    #[test]
+    fn the_orientation_tag_is_rewritten_in_place() {
+        let mut little =
+            b"Exif\0\0II*\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0".to_vec();
+        assert!(Orientation::Normal.write_to_exif_block(&mut little));
+        assert_eq!(
+            Orientation::from_exif_block(&little),
+            Some(Orientation::Normal)
+        );
+        let mut big = b"MM\0*\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0\x03\0\0".to_vec();
+        assert!(Orientation::Rotate90.write_to_exif_block(&mut big));
+        assert_eq!(
+            Orientation::from_exif_block(&big),
+            Some(Orientation::Rotate90)
+        );
+        // Nothing to rewrite in a block without the tag, or a broken one.
+        let mut untagged = b"II*\0\x08\0\0\0\x01\0\x10\x01\x03\0\x01\0\0\0\x06\0\0\0".to_vec();
+        let before = untagged.clone();
+        assert!(!Orientation::Normal.write_to_exif_block(&mut untagged));
+        assert_eq!(untagged, before);
+        assert!(!Orientation::Normal.write_to_exif_block(&mut b"II*\0\xff\0\0\0".to_vec()));
     }
 
     #[test]
