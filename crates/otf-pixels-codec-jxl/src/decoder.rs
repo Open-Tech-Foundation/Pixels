@@ -57,6 +57,12 @@ impl JxlDecoder {
         let contents = container::parse(&bytes)?;
         let exif = contents.exif;
         let codestream = contents.codestream;
+        // Limits first: the size is the attacker's to state, and walking the
+        // frame headers sizes their tables of contents by it.
+        let header = crate::decode::header::ImageHeader::parse(
+            &mut crate::decode::reader::BitReader::new(&codestream),
+        )?;
+        ImageDescriptor::with_limits(header.width, header.height, PixelFormat::Rgba8, &limits)?;
         let (header, icc, durations) = render::probe(&codestream)?;
         let (width, height) = (header.width, header.height);
         let alpha = header.alpha().is_some();

@@ -71,28 +71,28 @@ dependencies = [
 
 [[package]]
 name = "otf-pixels-codec-avif"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "otf-pixels-core",
 ]
 
 [[package]]
 name = "otf-pixels-codec-jpeg"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "otf-pixels-core",
 ]
 
 [[package]]
 name = "otf-pixels-codec-jxl"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "otf-pixels-core",
 ]
 
 [[package]]
 name = "otf-pixels-codec-png"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "otf-pixels-compress",
  "otf-pixels-core",
@@ -100,11 +100,11 @@ dependencies = [
 
 [[package]]
 name = "otf-pixels-compress"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "otf-pixels-core"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "otf-pixels-fuzz"

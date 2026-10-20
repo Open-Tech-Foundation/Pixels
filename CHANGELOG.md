@@ -6,6 +6,13 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- JPEG XL: a header claiming a vast image no longer panics (an overflow
+  counting its groups, found by the `jxl_decode` fuzz target). The decoder
+  checks `Limits` before reading any frame header, group counts saturate,
+  and a table of contents longer than the bits left in the file is refused
+  before anything is sized by it.
+
 ## [0.4.0] - 2026-10-20
 
 ### Changed

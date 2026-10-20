@@ -828,13 +828,13 @@ impl FrameHeader {
     #[must_use]
     pub fn num_groups(&self) -> u32 {
         let (x, y) = self.groups();
-        x * y
+        x.saturating_mul(y)
     }
 
     #[must_use]
     pub fn num_lf_groups(&self) -> u32 {
         let (x, y) = self.lf_groups();
-        x * y
+        x.saturating_mul(y)
     }
 
     /// Each pass's range of Modular channel shifts, `[min, max)`.
@@ -894,8 +894,14 @@ impl Toc {
         let entries = if groups == 1 && h.num_passes == 1 {
             1
         } else {
-            1 + h.num_lf_groups() + 1 + h.num_passes * groups
+            2_u64 + u64::from(h.num_lf_groups()) + u64::from(h.num_passes) * u64::from(groups)
         };
+        // Every entry's size takes at least 12 bits, so a table longer than
+        // the bits left is a lie, refused before anything is sized by it.
+        if entries.saturating_mul(12) > r.remaining() as u64 {
+            return Err(malformed("a table of contents runs past the codestream"));
+        }
+        let entries = u32::try_from(entries).map_err(|_| malformed("too many sections"))?;
         let permutation = if r.bool()? {
             let mut d = Decoder::parse(r, 8)?;
             d.begin(r)?;

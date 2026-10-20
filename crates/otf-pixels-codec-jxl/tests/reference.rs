@@ -146,3 +146,13 @@ fn limits_are_enforced_at_the_header() {
     let limits = Limits::default().with_max_pixels(1000);
     assert!(JxlDecoder::new(&fixture("photo_d1.jxl")[..], limits).is_err());
 }
+
+/// Found by the fuzzer: a header claiming a vast image, whose group count
+/// overflowed while the frame headers were walked, before the limits were
+/// checked.
+#[test]
+fn a_vast_claimed_size_is_refused_before_its_frames_are_read() {
+    let bytes = [0xFF, 0x0A, 0x7E, 0xFF, 0x0A, 0x0A, 0x3D, 0x37];
+    assert!(JxlDecoder::new(&bytes[..], Limits::default()).is_err());
+    assert!(JxlDecoder::new(&bytes[..], Limits::default().with_max_pixels(u64::MAX)).is_err());
+}
