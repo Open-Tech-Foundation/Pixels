@@ -31,9 +31,61 @@ use crate::huffman::HuffmanTable;
 use crate::idct::{self, Scale};
 use crate::progressive::{Coefficients, MAX_SCANS, Tables};
 use otf_pixels_core::{
-    Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, Orientation, PixelFormat,
-    PixelsError, Result, Source,
+    Codec, Comment, DecodeCapability, Decoder, Density, Format, ImageDescriptor, Limits,
+    Orientation, PixelFormat, PixelsError, ResolutionUnit, Result, Source, SourceInfo,
 };
+
+/// The identifier an XMP `APP1` segment starts with (XMP part 3, §1.1.3).
+const XMP_ID: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
+
+/// The density a JFIF `APP0` segment states: units, then X and Y.
+fn jfif_density(payload: &[u8]) -> Option<Density> {
+    let rest = payload.strip_prefix(b"JFIF\0")?;
+    let (&unit, rest) = rest.get(2..)?.split_first()?;
+    let x = u16::from_be_bytes([*rest.first()?, *rest.get(1)?]);
+    let y = u16::from_be_bytes([*rest.get(2)?, *rest.get(3)?]);
+    let unit = match unit {
+        1 => ResolutionUnit::Inch,
+        2 => ResolutionUnit::Centimetre,
+        // Aspect ratio only: no density.
+        _ => return None,
+    };
+    Some(Density {
+        x: f64::from(x),
+        y: f64::from(y),
+        unit,
+    })
+}
+
+/// sharp's spelling of a frame's chroma subsampling, from the first
+/// component's sampling factors against the others'.
+fn chroma_name(frame: &Frame) -> Option<&'static str> {
+    let [luma, chroma, ..] = &frame.components[..] else {
+        return None;
+    };
+    let (h, v) = (luma.h / chroma.h.max(1), luma.v / chroma.v.max(1));
+    let base = match (h, v) {
+        (1, 1) => "4:4:4",
+        (2, 1) => "4:2:2",
+        (2, 2) => "4:2:0",
+        (1, 2) => "4:4:0",
+        (4, 1) => "4:1:1",
+        (4, 2) => "4:1:0",
+        _ => return None,
+    };
+    Some(if frame.components.len() == 4 {
+        match base {
+            "4:4:4" => "4:4:4:4",
+            "4:2:2" => "4:2:2:4",
+            "4:2:0" => "4:2:0:4",
+            "4:4:0" => "4:4:0:4",
+            "4:1:1" => "4:1:1:4",
+            _ => "4:1:0:4",
+        }
+    } else {
+        base
+    })
+}
 
 /// The most blocks a single MCU may contain (ITU-T T.81 §B.2.3).
 ///
@@ -79,6 +131,10 @@ pub struct JpegDecoder<S: Source> {
     icc: Option<Vec<u8>>,
     /// The EXIF block from the first EXIF `APP1` segment.
     exif: Option<Vec<u8>>,
+    /// The XMP packet from the first XMP `APP1` segment.
+    xmp: Option<Vec<u8>>,
+    /// Density, subsampling and the rest of what the header says.
+    info: SourceInfo,
 }
 
 impl<S: Source> JpegDecoder<S> {
@@ -116,7 +172,15 @@ impl<S: Source> JpegDecoder<S> {
         let mut inner = Box::new(Engine::with_scale(source, limits, scale)?);
         let icc = inner.icc.take();
         let exif = inner.exif.take();
-        Ok(Self { inner, icc, exif })
+        let xmp = inner.xmp.take();
+        let info = std::mem::take(&mut inner.info);
+        Ok(Self {
+            inner,
+            icc,
+            exif,
+            xmp,
+            info,
+        })
     }
 
     /// The resolution this decoder produces, as eighths of full size.
@@ -145,6 +209,18 @@ impl<S: Source + std::fmt::Debug> Decoder for JpegDecoder<S> {
     /// The EXIF block, from the first EXIF `APP1` segment.
     fn exif(&self) -> Option<&[u8]> {
         self.exif.as_deref()
+    }
+
+    /// The XMP packet, from the first XMP `APP1` segment. The extended XMP
+    /// a packet over 64 KB spills into is not joined.
+    fn xmp(&self) -> Option<&[u8]> {
+        self.xmp.as_deref()
+    }
+
+    /// Progressive, chroma subsampling, density (JFIF, else EXIF) and
+    /// `COM` comments before the first scan.
+    fn source_info(&self) -> SourceInfo {
+        self.info.clone()
     }
 
     /// The EXIF orientation, from the first EXIF `APP1` segment.
@@ -191,6 +267,10 @@ struct Engine<S: Source> {
     icc: Option<Vec<u8>>,
     /// The EXIF block, until [`JpegDecoder`] takes it.
     exif: Option<Vec<u8>>,
+    /// The XMP packet, until [`JpegDecoder`] takes it.
+    xmp: Option<Vec<u8>>,
+    /// What the header says, until [`JpegDecoder`] takes it.
+    info: SourceInfo,
     planes: Vec<Plane>,
     /// One output-width row per component, reused for every row: the
     /// component's samples at output resolution, ready for colour conversion.
@@ -272,6 +352,9 @@ impl<S: Source> Engine<S> {
         let mut restart_interval = 0_u16;
         let mut orientation = None;
         let mut exif: Option<Vec<u8>> = None;
+        let mut xmp: Option<Vec<u8>> = None;
+        let mut jfif = None;
+        let mut comments = Vec::new();
         let mut icc = IccChunks::default();
         let mut adobe = None;
         let mut frame: Option<Frame> = None;
@@ -333,6 +416,22 @@ impl<S: Source> Engine<S> {
                     if exif.is_none() {
                         exif = payload.strip_prefix(b"Exif\0\0").map(<[u8]>::to_vec);
                     }
+                    if xmp.is_none() {
+                        xmp = payload.strip_prefix(XMP_ID).map(<[u8]>::to_vec);
+                    }
+                }
+                marker::APP0 => {
+                    let payload = reader.read_segment()?;
+                    jfif = jfif.or_else(|| jfif_density(&payload));
+                }
+                marker::COM => {
+                    let payload = reader.read_segment()?;
+                    let text = String::from_utf8(payload.clone())
+                        .unwrap_or_else(|_| payload.iter().map(|&c| char::from(c)).collect());
+                    comments.push(Comment {
+                        keyword: String::new(),
+                        text: text.trim_end_matches('\0').to_owned(),
+                    });
                 }
                 marker::APP2 => icc.push(&reader.read_segment()?),
                 marker::APP14 => {
@@ -358,7 +457,8 @@ impl<S: Source> Engine<S> {
                 // JFIF density, colour profiles, comments and vendor
                 // extensions all live here, and refusing them would fail
                 // files every viewer opens.
-                marker::APP0..=marker::APP15 | marker::COM => reader.skip_segment()?,
+                // APP3 to APP13 and APP15; the others are read above.
+                0xE3..=0xED | marker::APP15 => reader.skip_segment()?,
                 code if marker::is_standalone(code) => {}
                 _ => reader.skip_segment()?,
             }
@@ -373,6 +473,15 @@ impl<S: Source> Engine<S> {
             check_baseline_scan(&scan)?;
         }
 
+        let mut info = SourceInfo::default();
+        info.density = jfif.or_else(|| {
+            exif.as_deref()
+                .and_then(otf_pixels_core::Density::from_exif_block)
+        });
+        info.progressive = progressive;
+        info.bits_per_sample = Some(frame.precision);
+        info.chroma_subsampling = chroma_name(&frame);
+        info.comments = comments;
         let colour = colour_model(&frame, adobe)?;
         let pixel = match colour {
             Colour::Grayscale => PixelFormat::Gray8,
@@ -465,6 +574,8 @@ impl<S: Source> Engine<S> {
             orientation,
             icc: icc.assemble(),
             exif,
+            xmp,
+            info,
             limits,
             planes: Vec::new(),
             expanded: Vec::new(),

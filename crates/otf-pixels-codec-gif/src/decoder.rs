@@ -23,8 +23,9 @@
 
 use otf_pixels_compress::LzwDecoder;
 use otf_pixels_core::{
-    Animation, Codec, DecodeCapability, Decoder, Format, ImageDescriptor as CoreDescriptor, Limits,
-    PixelFormat, PixelsError, Result, Source,
+    Animation, Background, Codec, Comment, DecodeCapability, Decoder, Format,
+    ImageDescriptor as CoreDescriptor, Limits, PixelFormat, PixelsError, Result, Source,
+    SourceInfo,
 };
 
 use crate::format::{
@@ -92,6 +93,8 @@ pub struct GifDecoder<S: Source> {
     pending: Option<Pending>,
     /// The RGBA the canvas reverts to under `Disposal::Background`.
     background: [u8; 4],
+    /// Palette, interlace, background and comments.
+    info: SourceInfo,
 }
 
 /// What the frame just drawn asked to happen before the next one.
@@ -156,7 +159,7 @@ impl<S: Source> GifDecoder<S> {
                 )));
             }
         }
-        let animation = scan_animation(&rest);
+        let (animation, comments, interlaced) = scan_animation(&rest);
 
         let canvas_len = descriptor
             .byte_len()
@@ -169,6 +172,14 @@ impl<S: Source> GifDecoder<S> {
         let background = global
             .get(screen.background as usize)
             .map_or([0, 0, 0, 0], |c| [c[0], c[1], c[2], 255]);
+        let mut info = SourceInfo::default();
+        info.palette = true;
+        info.progressive = interlaced;
+        info.bits_per_sample = Some(8);
+        info.comments = comments;
+        info.background = global
+            .get(screen.background as usize)
+            .map(|c| Background::Rgb(c[0].into(), c[1].into(), c[2].into()));
 
         Ok(Self {
             descriptor,
@@ -185,6 +196,7 @@ impl<S: Source> GifDecoder<S> {
             finished: false,
             pending: None,
             background,
+            info,
         })
     }
 
@@ -508,8 +520,11 @@ type Bytes = std::io::Cursor<Vec<u8>>;
 /// and collect their delays and the `NETSCAPE2.0` loop count, skipping the
 /// pixel data. `None` for a still image. A stream that breaks off counts the
 /// frames before the break: that is a decode error, reported when pixels are
-/// read, not a reason to misreport what came before.
-fn scan_animation(stream: &[u8]) -> Option<Animation> {
+/// read, not a reason to misreport what came before. Comment extensions are
+/// collected on the way, and whether the first frame is interlaced.
+fn scan_animation(stream: &[u8]) -> (Option<Animation>, Vec<Comment>, bool) {
+    let mut comments = Vec::new();
+    let mut interlaced = None;
     let mut source = stream;
     let mut delays = Vec::new();
     let mut delay = 0_u32;
@@ -529,6 +544,11 @@ fn scan_animation(stream: &[u8]) -> Option<Animation> {
                     label::GRAPHIC_CONTROL => {
                         delay = u32::from(GraphicControl::parse(&payload).delay_centiseconds) * 10;
                     }
+                    0xFE => comments.push(Comment {
+                        keyword: String::new(),
+                        text: String::from_utf8(payload.clone())
+                            .unwrap_or_else(|_| payload.iter().map(|&c| char::from(c)).collect()),
+                    }),
                     // The application block's identifier is its first
                     // sub-block; the loop count is sub-block 1 of the data.
                     0xFF if payload.starts_with(b"NETSCAPE2.0")
@@ -549,6 +569,7 @@ fn scan_animation(stream: &[u8]) -> Option<Animation> {
                 let Ok(image) = ImageDescriptor::parse(&bytes) else {
                     break;
                 };
+                interlaced = interlaced.or(Some(image.interlaced));
                 let table = image.local_table_size * 3;
                 let mut code_size = [0_u8; 1];
                 if source.len() < table + 1 {
@@ -566,7 +587,11 @@ fn scan_animation(stream: &[u8]) -> Option<Animation> {
             _ => break,
         }
     }
-    Animation::new(delays, loop_count)
+    (
+        Animation::new(delays, loop_count),
+        comments,
+        interlaced.unwrap_or(false),
+    )
 }
 
 /// Map a stored row index to its position in an interlaced frame.
@@ -609,6 +634,12 @@ impl<S: Source + std::fmt::Debug> Decoder for GifDecoder<S> {
 
     fn animation(&self) -> Option<Animation> {
         self.animation.clone()
+    }
+
+    /// Palette, the first frame's interlace, the screen's background colour
+    /// and comment extensions. XMP is not read.
+    fn source_info(&self) -> SourceInfo {
+        self.info.clone()
     }
 
     fn read_row(&mut self, out: &mut [u8]) -> Result<()> {

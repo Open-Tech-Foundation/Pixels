@@ -23,7 +23,8 @@
 //! the palette, and usually much smaller.
 
 use otf_pixels_core::{
-    EncodeOptions, Encoder, ImageDescriptor, PixelFormat, PixelsError, Result, Sink,
+    Density, EncodeOptions, Encoder, ImageDescriptor, PixelFormat, PixelsError, ResolutionUnit,
+    Result, Sink,
 };
 
 use crate::format::{ColorType, Filter, SIGNATURE, apply_filter, write_chunk};
@@ -42,6 +43,64 @@ pub struct PngEncoder {
     icc: Option<Vec<u8>>,
     /// The EXIF block to write as `eXIf`, if any.
     exif: Option<Vec<u8>>,
+    /// The XMP packet to write as an `iTXt` chunk, if any.
+    xmp: Option<Vec<u8>>,
+    /// The resolution to write as `pHYs`, if any.
+    density: Option<Density>,
+}
+
+/// The ICC profile, EXIF block, XMP packet and density to write.
+type Ancillary<'a> = (
+    Option<&'a [u8]>,
+    Option<&'a [u8]>,
+    Option<&'a [u8]>,
+    Option<Density>,
+);
+
+/// The ancillary chunks that go before the image data: `iCCP`, `pHYs`,
+/// `eXIf` and the XMP `iTXt`.
+fn write_metadata(
+    out: &mut Vec<u8>,
+    level: Level,
+    icc: Option<&[u8]>,
+    exif: Option<&[u8]>,
+    xmp: Option<&[u8]>,
+    density: Option<Density>,
+) -> Result<()> {
+    if let Some(profile) = icc {
+        // iCCP (§11.3.3.3): a name, NUL, method 0, the zlib stream.
+        let mut iccp = b"ICC Profile\0\0".to_vec();
+        iccp.extend(zlib_compress(profile, level).map_err(crate::compress_error)?);
+        write_chunk(out, b"iCCP", &iccp);
+    }
+    if let Some(d) = density {
+        // pHYs (§11.3.5.3) counts pixels per metre.
+        let per_metre = |v: f64| {
+            (v * if d.unit == ResolutionUnit::Inch {
+                100.0 / 2.54
+            } else {
+                100.0
+            })
+            .round()
+            .clamp(0.0, f64::from(u32::MAX)) as u32
+        };
+        let mut phys = per_metre(d.x).to_be_bytes().to_vec();
+        phys.extend_from_slice(&per_metre(d.y).to_be_bytes());
+        phys.push(1);
+        write_chunk(out, b"pHYs", &phys);
+    }
+    if let Some(exif) = exif {
+        // eXIf goes before the image data (§11.3.6.1).
+        write_chunk(out, b"eXIf", exif);
+    }
+    if let Some(xmp) = xmp {
+        // iTXt keyed for XMP, uncompressed, no language or translation, as
+        // the XMP specification (part 3, §1.1.5) asks.
+        let mut itxt = b"XML:com.adobe.xmp\0\0\0\0\0".to_vec();
+        itxt.extend_from_slice(xmp);
+        write_chunk(out, b"iTXt", &itxt);
+    }
+    Ok(())
 }
 
 /// Everything fixed once the descriptor is known.
@@ -79,6 +138,8 @@ impl PngEncoder {
             state: None,
             icc: None,
             exif: None,
+            xmp: None,
+            density: None,
         }
     }
 
@@ -251,8 +312,7 @@ fn encode_palette(
     colours: usize,
     dither: f32,
     level: Level,
-    icc: Option<&[u8]>,
-    exif: Option<&[u8]>,
+    metadata: Ancillary<'_>,
 ) -> Result<Vec<u8>> {
     let width = descriptor.width as usize;
     let (entries, indices): (Vec<[u8; 4]>, Vec<u8>) = if descriptor.pixel.layout().has_alpha() {
@@ -298,14 +358,8 @@ fn encode_palette(
     ihdr.extend_from_slice(&descriptor.height.to_be_bytes());
     ihdr.extend_from_slice(&[bit_depth, ColorType::Palette.to_byte(), 0, 0, 0]);
     write_chunk(&mut out, b"IHDR", &ihdr);
-    if let Some(profile) = icc {
-        let mut iccp = b"ICC Profile\0\0".to_vec();
-        iccp.extend(zlib_compress(profile, level).map_err(crate::compress_error)?);
-        write_chunk(&mut out, b"iCCP", &iccp);
-    }
-    if let Some(exif) = exif {
-        write_chunk(&mut out, b"eXIf", exif);
-    }
+    let (icc, exif, xmp, density) = metadata;
+    write_metadata(&mut out, level, icc, exif, xmp, density)?;
     let plte: Vec<u8> = entries.iter().flat_map(|e| [e[0], e[1], e[2]]).collect();
     write_chunk(&mut out, b"PLTE", &plte);
     // tRNS lists alphas up to the last translucent entry; the rest are
@@ -340,6 +394,28 @@ impl Encoder for PngEncoder {
             ));
         }
         self.exif = exif.map(<[u8]>::to_vec);
+        Ok(())
+    }
+
+    fn set_xmp(&mut self, xmp: Option<&[u8]>) -> Result<()> {
+        if self.state.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "xmp",
+                "the XMP packet must be set before write_header",
+            ));
+        }
+        self.xmp = xmp.map(<[u8]>::to_vec);
+        Ok(())
+    }
+
+    fn set_density(&mut self, density: Option<Density>) -> Result<()> {
+        if self.state.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "density",
+                "the density must be set before write_header",
+            ));
+        }
+        self.density = density;
         Ok(())
     }
 
@@ -395,16 +471,14 @@ impl Encoder for PngEncoder {
         ihdr.extend_from_slice(&[0, 0, 0]);
         let mut chunk = Vec::new();
         write_chunk(&mut chunk, b"IHDR", &ihdr);
-        if let Some(profile) = &self.icc {
-            // iCCP (§11.3.3.3): a name, NUL, method 0, the zlib stream.
-            let mut iccp = b"ICC Profile\0\0".to_vec();
-            iccp.extend(zlib_compress(profile, self.level).map_err(crate::compress_error)?);
-            write_chunk(&mut chunk, b"iCCP", &iccp);
-        }
-        if let Some(exif) = &self.exif {
-            // eXIf goes before the image data (§11.3.6.1).
-            write_chunk(&mut chunk, b"eXIf", exif);
-        }
+        write_metadata(
+            &mut chunk,
+            self.level,
+            self.icc.as_deref(),
+            self.exif.as_deref(),
+            self.xmp.as_deref(),
+            self.density,
+        )?;
         sink.write_all(&chunk)?;
 
         let row_bytes = desc.row_bytes();
@@ -482,8 +556,12 @@ impl Encoder for PngEncoder {
                 colours,
                 dither,
                 self.level,
-                self.icc.as_deref(),
-                self.exif.as_deref(),
+                (
+                    self.icc.as_deref(),
+                    self.exif.as_deref(),
+                    self.xmp.as_deref(),
+                    self.density,
+                ),
             )?;
             sink.write_all(&file)?;
             return sink.flush();

@@ -154,6 +154,120 @@ impl Metadata {
     }
 }
 
+/// A resolution's unit, as the file states it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ResolutionUnit {
+    /// Pixels per inch.
+    Inch,
+    /// Pixels per centimetre.
+    Centimetre,
+}
+
+/// How densely the image is meant to be printed or shown (sharp's
+/// `density`, `resolutionUnit`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Density {
+    /// Horizontal pixels per `unit`.
+    pub x: f64,
+    /// Vertical pixels per `unit`.
+    pub y: f64,
+    /// The unit the file states.
+    pub unit: ResolutionUnit,
+}
+
+impl Density {
+    /// A density of `dpi` both ways, per inch.
+    #[must_use]
+    pub const fn dpi(dpi: f64) -> Self {
+        Self {
+            x: dpi,
+            y: dpi,
+            unit: ResolutionUnit::Inch,
+        }
+    }
+
+    /// The density an EXIF block states in IFD0 (`XResolution`,
+    /// `YResolution`, `ResolutionUnit`), or `None` if it states none.
+    #[must_use]
+    pub fn from_exif_block(exif: &[u8]) -> Option<Self> {
+        let tree = crate::exif::Exif::parse(exif)?;
+        let x = tree.rational(0x011A)?;
+        let y = tree.rational(0x011B).unwrap_or(x);
+        let unit = match tree.integer(0x0128).unwrap_or(2) {
+            3 => ResolutionUnit::Centimetre,
+            2 => ResolutionUnit::Inch,
+            _ => return None,
+        };
+        (x > 0.0 && y > 0.0).then_some(Self { x, y, unit })
+    }
+
+    /// The horizontal density in pixels per inch, sharp's `density`.
+    #[must_use]
+    pub fn x_dpi(&self) -> f64 {
+        match self.unit {
+            ResolutionUnit::Inch => self.x,
+            ResolutionUnit::Centimetre => self.x * 2.54,
+        }
+    }
+
+    /// The vertical density in pixels per inch.
+    #[must_use]
+    pub fn y_dpi(&self) -> f64 {
+        match self.unit {
+            ResolutionUnit::Inch => self.y,
+            ResolutionUnit::Centimetre => self.y * 2.54,
+        }
+    }
+}
+
+/// A text entry a file carries, such as PNG's `tEXt` (sharp's `comments`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Comment {
+    /// The entry's keyword, empty where the format has none.
+    pub keyword: String,
+    /// Its text.
+    pub text: String,
+}
+
+/// The colour a file names as its background, in its own samples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Background {
+    /// A grey level.
+    Grey(u16),
+    /// Red, green and blue.
+    Rgb(u16, u16, u16),
+}
+
+/// What a decoder learned about its file from the header, beyond the pixel
+/// layout: the facts sharp's `metadata()` reports per format. Every field is
+/// empty for a format with no notion of it.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
+pub struct SourceInfo {
+    /// The stated resolution, if any (JPEG's JFIF or EXIF, PNG's `pHYs`,
+    /// TIFF's tags).
+    pub density: Option<Density>,
+    /// Progressive JPEG, or interlaced PNG and GIF.
+    pub progressive: bool,
+    /// Samples are indices into a palette (PNG colour type 3, GIF, TIFF
+    /// palette).
+    pub palette: bool,
+    /// Bits per stored sample, which may be fewer than the output's (a
+    /// 10-bit AVIF, a 4-bit PNG).
+    pub bits_per_sample: Option<u8>,
+    /// Chroma subsampling as sharp spells it (`"4:2:0"`, `"4:4:4"`, ...),
+    /// for formats that subsample.
+    pub chroma_subsampling: Option<&'static str>,
+    /// The background colour the file names (PNG `bKGD`, GIF's).
+    pub background: Option<Background>,
+    /// The compression scheme, where a format has several (TIFF, AVIF).
+    pub compression: Option<&'static str>,
+    /// Text entries (PNG `tEXt`, `zTXt`, `iTXt`; GIF and JPEG comments).
+    pub comments: Vec<Comment>,
+}
+
 /// How an encoder samples chroma (sharp's `chromaSubsampling`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -212,6 +326,10 @@ pub struct EncodeOptions {
     /// where the format has a place for one: JPEG, PNG, WebP and AVIF. Off
     /// by default, which strips camera data and location from uploads.
     pub keep_exif: bool,
+    /// Copy the source's XMP packet into the output (sharp's `keepXmp`),
+    /// where the format has a place for one: JPEG, PNG, WebP, TIFF, AVIF
+    /// and JPEG XL. Off by default, as for EXIF.
+    pub keep_xmp: bool,
     /// Write JPEG as progressive (sharp's `progressive`): a coarse picture
     /// first, sharpened by later scans, and usually a little smaller. The
     /// encoder then holds the image's coefficients rather than streaming.
@@ -350,6 +468,22 @@ impl EncodeOptions {
         self
     }
 
+    /// These options with `keep_xmp` replaced.
+    #[must_use]
+    pub const fn with_keep_xmp(mut self, keep: bool) -> Self {
+        self.keep_xmp = keep;
+        self
+    }
+
+    /// These options keeping EXIF and XMP both (sharp's `keepMetadata`;
+    /// the ICC profile is always kept).
+    #[must_use]
+    pub const fn with_keep_metadata(mut self, keep: bool) -> Self {
+        self.keep_exif = keep;
+        self.keep_xmp = keep;
+        self
+    }
+
     /// These options with progressive JPEG on or off.
     #[must_use]
     pub const fn with_progressive(mut self, progressive: bool) -> Self {
@@ -378,6 +512,7 @@ impl Default for EncodeOptions {
             near_lossless: false,
             chroma_subsampling: None,
             keep_exif: false,
+            keep_xmp: false,
             progressive: false,
         }
     }
@@ -470,6 +605,20 @@ pub trait Decoder: Send + fmt::Debug {
     /// orientation is what [`Decoder::orientation`] reports.
     fn exif(&self) -> Option<&[u8]> {
         None
+    }
+
+    /// The embedded XMP packet, if the file carries one: the XML as stored,
+    /// from `<?xpacket` or `<x:xmpmeta`.
+    ///
+    /// Reported for an encoder to copy, like [`Decoder::exif`].
+    fn xmp(&self) -> Option<&[u8]> {
+        None
+    }
+
+    /// What the header said beyond the pixel layout. Known after the header
+    /// is parsed, like [`Decoder::descriptor`].
+    fn source_info(&self) -> SourceInfo {
+        SourceInfo::default()
     }
 
     /// Decode the next row, top to bottom, into `out`.
@@ -570,6 +719,36 @@ pub trait Encoder: Send {
     /// been written.
     fn set_exif(&mut self, exif: Option<&[u8]>) -> Result<()> {
         let _ = exif;
+        Ok(())
+    }
+
+    /// Embed `xmp`, an XMP packet as [`Decoder::xmp`] gives it, or write
+    /// none.
+    ///
+    /// Called before [`Encoder::write_header`]. The default ignores it, which
+    /// is right for a format with nowhere to put one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::InvalidArgument`] if the header has already
+    /// been written.
+    fn set_xmp(&mut self, xmp: Option<&[u8]>) -> Result<()> {
+        let _ = xmp;
+        Ok(())
+    }
+
+    /// Record `density` as the image's resolution, or write the format's
+    /// default.
+    ///
+    /// Called before [`Encoder::write_header`]. The default ignores it, for
+    /// a format with no resolution field.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::InvalidArgument`] if the header has already
+    /// been written.
+    fn set_density(&mut self, density: Option<Density>) -> Result<()> {
+        let _ = density;
         Ok(())
     }
 

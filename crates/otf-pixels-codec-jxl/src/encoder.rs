@@ -39,6 +39,10 @@ pub struct JxlEncoder {
     state: Option<State>,
     /// `None` for lossless; otherwise the Butteraugli-style distance.
     distance: Option<f32>,
+    /// The EXIF block for an `Exif` box, if any.
+    exif: Option<Vec<u8>>,
+    /// The XMP packet for an `xml ` box, if any.
+    xmp: Option<Vec<u8>>,
 }
 
 impl Default for JxlEncoder {
@@ -61,6 +65,8 @@ impl JxlEncoder {
         Self {
             state: None,
             distance: Some(1.0),
+            exif: None,
+            xmp: None,
         }
     }
 
@@ -70,6 +76,8 @@ impl JxlEncoder {
         Self {
             state: None,
             distance: None,
+            exif: None,
+            xmp: None,
         }
     }
 
@@ -80,6 +88,8 @@ impl JxlEncoder {
         Self {
             state: None,
             distance: Some(distance),
+            exif: None,
+            xmp: None,
         }
     }
 
@@ -289,7 +299,57 @@ fn encode(descriptor: &ImageDescriptor, pixels: &[u8]) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// An ISO-BMFF box.
+fn bx(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut out = u32::try_from(payload.len() + 8)
+        .unwrap_or(u32::MAX)
+        .to_be_bytes()
+        .to_vec();
+    out.extend_from_slice(kind);
+    out.extend_from_slice(payload);
+    out
+}
+
+/// The codestream in the container (ISO/IEC 18181-2), beside an `Exif`
+/// box (a zero offset to the TIFF header, then the block) and an `xml ` box.
+fn contained(codestream: &[u8], exif: Option<&[u8]>, xmp: Option<&[u8]>) -> Vec<u8> {
+    let mut out = crate::decode::container::CONTAINER_SIGNATURE.to_vec();
+    out.extend(bx(b"ftyp", b"jxl \0\0\0\0jxl "));
+    if let Some(exif) = exif {
+        out.extend(bx(b"Exif", &[&[0_u8; 4][..], exif].concat()));
+    }
+    if let Some(xmp) = xmp {
+        out.extend(bx(b"xml ", xmp));
+    }
+    out.extend(bx(b"jxlc", codestream));
+    out
+}
+
 impl Encoder for JxlEncoder {
+    /// Written in an `Exif` box, which puts the file in the container.
+    fn set_exif(&mut self, exif: Option<&[u8]>) -> Result<()> {
+        if self.state.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "exif",
+                "the EXIF block must be set before write_header",
+            ));
+        }
+        self.exif = exif.map(<[u8]>::to_vec);
+        Ok(())
+    }
+
+    /// Written in an `xml ` box, which puts the file in the container.
+    fn set_xmp(&mut self, xmp: Option<&[u8]>) -> Result<()> {
+        if self.state.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "xmp",
+                "the XMP packet must be set before write_header",
+            ));
+        }
+        self.xmp = xmp.map(<[u8]>::to_vec);
+        Ok(())
+    }
+
     fn write_header(&mut self, desc: &ImageDescriptor, _sink: &mut dyn Sink) -> Result<()> {
         if self.state.is_some() {
             return Err(PixelsError::invalid_argument(
@@ -365,6 +425,11 @@ impl Encoder for JxlEncoder {
                 encode_lossy(&state.descriptor, &state.pixels, distance)?
             }
             _ => encode(&state.descriptor, &state.pixels)?,
+        };
+        let bytes = if self.exif.is_some() || self.xmp.is_some() {
+            contained(&bytes, self.exif.as_deref(), self.xmp.as_deref())
+        } else {
+            bytes
         };
         sink.write_all(&bytes)?;
         sink.flush()

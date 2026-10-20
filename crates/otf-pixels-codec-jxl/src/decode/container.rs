@@ -23,6 +23,8 @@ pub struct Contents {
     pub codestream: Vec<u8>,
     /// The `Exif` box's TIFF-structured block, without its offset.
     pub exif: Option<Vec<u8>>,
+    /// The first `xml ` box: the XMP packet.
+    pub xmp: Option<Vec<u8>>,
 }
 
 /// Whether `prefix` starts a JPEG XL file.
@@ -41,6 +43,7 @@ pub fn parse(file: &[u8]) -> Result<Contents> {
         return Ok(Contents {
             codestream: file.to_vec(),
             exif: None,
+            xmp: None,
         });
     }
     if !file.starts_with(&CONTAINER_SIGNATURE) {
@@ -88,6 +91,7 @@ pub fn parse(file: &[u8]) -> Result<Contents> {
                     out.exif = payload.get(skip.saturating_add(4)..).map(<[u8]>::to_vec);
                 }
             }
+            b"xml " if out.xmp.is_none() => out.xmp = Some(payload.to_vec()),
             _ => {}
         }
         at = end;

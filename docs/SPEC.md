@@ -26,6 +26,14 @@ implementation detail and may change without notice.
   `InvalidArgument`. Counting reads each directory's size and link only, and
   stops quietly at a broken link, a loop or 65,535 pages, so a file whose
   first page is sound always opens. Writing multi-page files is not in v1.
+- Metadata: `Image::source_metadata()` reports what sharp's `metadata()`
+  does, from the headers alone (SPEC §Guarantees 3): stored size, depth,
+  alpha, orientation, pages, animation, density, interlace/progressive,
+  palette, chroma subsampling, background, compression, text comments, and
+  the ICC, EXIF and XMP bytes. Metadata never fails a decode: a malformed
+  block or chunk is reported as absent. EXIF and XMP are written only when
+  an output keeps them, density when set or kept; see EMBEDDING.md for
+  where each format puts them. PNG text after the image data is not read.
 - Animation (GIF, WebP, JPEG XL): v1 processes the **first frame**, as sharp does by
   default, and reports what the file holds through `Image::animation` (frame
   count, loop count, per-frame durations). `OpenOptions::animated` is reserved

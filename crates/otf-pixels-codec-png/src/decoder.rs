@@ -23,8 +23,8 @@
 //! leave no choice.
 
 use otf_pixels_core::{
-    Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, Orientation, PixelFormat,
-    PixelsError, Result, Source,
+    Background, Codec, Comment, DecodeCapability, Decoder, Density, Format, ImageDescriptor,
+    Limits, Orientation, PixelFormat, PixelsError, ResolutionUnit, Result, Source, SourceInfo,
 };
 
 use crate::format::{
@@ -76,6 +76,67 @@ fn parse_iccp(data: &[u8]) -> Option<Vec<u8>> {
     zlib_decompress(compressed, MAX_ICC).ok()
 }
 
+/// The largest text chunk read, compressed or not; a larger one is skipped.
+const MAX_TEXT: usize = 1 << 20;
+
+/// The XMP keyword (XMP specification part 3, §1.1.5).
+const XMP_KEYWORD: &[u8] = b"XML:com.adobe.xmp";
+
+/// A `tEXt`, `zTXt` or `iTXt` payload (§11.3.4) as its keyword and text,
+/// Latin-1 for the first two and UTF-8 for `iTXt`.
+fn parse_text(kind: &[u8; 4], data: &[u8]) -> Option<(Vec<u8>, String)> {
+    let nul = data
+        .iter()
+        .position(|&b| b == 0)
+        .filter(|&n| (1..=79).contains(&n))?;
+    let keyword = data.get(..nul)?.to_vec();
+    let rest = data.get(nul + 1..)?;
+    let latin1 = |b: &[u8]| b.iter().map(|&c| char::from(c)).collect::<String>();
+    match kind {
+        b"tEXt" => Some((keyword, latin1(rest))),
+        b"zTXt" => {
+            let (&method, compressed) = rest.split_first()?;
+            (method == 0).then_some(())?;
+            Some((
+                keyword,
+                latin1(&zlib_decompress(compressed, MAX_TEXT).ok()?),
+            ))
+        }
+        _ => {
+            let (&compressed, rest) = rest.split_first()?;
+            let (&method, rest) = rest.split_first()?;
+            let lang = rest.iter().position(|&b| b == 0)?;
+            let rest = rest.get(lang + 1..)?;
+            let translated = rest.iter().position(|&b| b == 0)?;
+            let text = rest.get(translated + 1..)?;
+            let text = if compressed == 1 {
+                (method == 0).then_some(())?;
+                zlib_decompress(text, MAX_TEXT).ok()?
+            } else {
+                text.to_vec()
+            };
+            Some((keyword, String::from_utf8(text).ok()?))
+        }
+    }
+}
+
+/// Up to `cap + 1` bytes of the open chunk's payload, the rest skipped and
+/// the chunk closed; one byte past the cap tells an oversized chunk apart.
+fn read_capped<S: Source>(chunks: &mut ChunkStream<S>, cap: usize) -> Result<Vec<u8>> {
+    let mut data = vec![0_u8; cap + 1];
+    let mut filled = 0;
+    while let Some(rest) = data.get_mut(filled..).filter(|r| !r.is_empty()) {
+        match chunks.read_payload(rest)? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    data.truncate(filled);
+    chunks.skip_payload()?;
+    chunks.close()?;
+    Ok(data)
+}
+
 /// Decodes a PNG stream.
 #[derive(Debug)]
 pub struct PngDecoder<S: Source> {
@@ -88,6 +149,10 @@ pub struct PngDecoder<S: Source> {
     exif: Option<Vec<u8>>,
     /// The `iCCP` profile, decompressed.
     icc: Option<Vec<u8>>,
+    /// The XMP packet from an `iTXt` chunk.
+    xmp: Option<Vec<u8>>,
+    /// Density, background, text and the rest of what the header says.
+    info: SourceInfo,
     /// The decoded image in output format, produced on first row read.
     ///
     /// Only used by the interlaced path; a non-interlaced image never
@@ -157,6 +222,9 @@ impl<S: Source> PngDecoder<S> {
         let mut orientation = None;
         let mut exif: Option<Vec<u8>> = None;
         let mut icc = None;
+        let mut xmp = None;
+        let mut info = SourceInfo::default();
+        let mut background_index = None;
         loop {
             let kind = chunks.open_next()?;
             match &kind {
@@ -213,6 +281,57 @@ impl<S: Source> PngDecoder<S> {
                         icc = icc.or_else(|| parse_iccp(&data));
                     }
                 }
+                kind @ (b"tEXt" | b"zTXt" | b"iTXt") => {
+                    let kind = *kind;
+                    let data = read_capped(&mut chunks, MAX_TEXT)?;
+                    // Unreadable text is metadata lost, not an image refused.
+                    if let Some((keyword, text)) = (data.len() <= MAX_TEXT)
+                        .then(|| parse_text(&kind, &data))
+                        .flatten()
+                    {
+                        if keyword == XMP_KEYWORD {
+                            xmp = xmp.or(Some(text.into_bytes()));
+                        } else {
+                            info.comments.push(Comment {
+                                keyword: keyword.iter().map(|&c| char::from(c)).collect(),
+                                text,
+                            });
+                        }
+                    }
+                }
+                b"pHYs" => {
+                    let data = read_capped(&mut chunks, 9)?;
+                    if let [x0, x1, x2, x3, y0, y1, y2, y3, 1] = data[..] {
+                        // Pixels per metre, reported per centimetre.
+                        let x = f64::from(u32::from_be_bytes([x0, x1, x2, x3])) / 100.0;
+                        let y = f64::from(u32::from_be_bytes([y0, y1, y2, y3])) / 100.0;
+                        info.density = Some(Density {
+                            x,
+                            y,
+                            unit: ResolutionUnit::Centimetre,
+                        });
+                    }
+                }
+                b"bKGD" => {
+                    let data = read_capped(&mut chunks, 6)?;
+                    let word = |i: usize| {
+                        data.get(i..i + 2)
+                            .and_then(|b| <[u8; 2]>::try_from(b).ok())
+                            .map(u16::from_be_bytes)
+                    };
+                    info.background = match data.len() {
+                        1 => {
+                            background_index = data.first().copied();
+                            None
+                        }
+                        2 => word(0).map(Background::Grey),
+                        6 => match (word(0), word(2), word(4)) {
+                            (Some(r), Some(g), Some(b)) => Some(Background::Rgb(r, g, b)),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                }
                 b"IDAT" => break,
                 b"IEND" => {
                     return Err(PixelsError::malformed("png", "no IDAT data"));
@@ -237,6 +356,14 @@ impl<S: Source> PngDecoder<S> {
             ));
         }
         let descriptor = header.descriptor(transparency.is_some(), &limits)?;
+        if let (Some(i), Some(entries)) = (background_index, &palette) {
+            info.background = entries
+                .get(usize::from(i))
+                .map(|&[r, g, b]| Background::Rgb(r.into(), g.into(), b.into()));
+        }
+        info.progressive = header.interlaced;
+        info.palette = header.color_type == ColorType::Palette;
+        info.bits_per_sample = Some(header.bit_depth);
 
         Ok(Self {
             header,
@@ -249,6 +376,8 @@ impl<S: Source> PngDecoder<S> {
             orientation: orientation.unwrap_or_default(),
             icc,
             exif,
+            xmp,
+            info,
             raster: None,
             stream: None,
             row: 0,
@@ -1022,6 +1151,17 @@ impl<S: Source + std::fmt::Debug> Decoder for PngDecoder<S> {
     /// The `eXIf` block, unless it was larger than 64 KiB.
     fn exif(&self) -> Option<&[u8]> {
         self.exif.as_deref()
+    }
+
+    /// From an `iTXt` chunk keyed `XML:com.adobe.xmp` before the image data.
+    fn xmp(&self) -> Option<&[u8]> {
+        self.xmp.as_deref()
+    }
+
+    /// Interlace, palette, bit depth, and `pHYs`, `bKGD` and text chunks
+    /// before the image data.
+    fn source_info(&self) -> SourceInfo {
+        self.info.clone()
     }
 
     fn capability(&self) -> DecodeCapability {

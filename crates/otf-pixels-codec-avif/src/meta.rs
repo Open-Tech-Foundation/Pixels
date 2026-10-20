@@ -68,6 +68,9 @@ pub struct Item {
     /// Whether the item is marked hidden and so must not be displayed on its
     /// own. An alpha plane is normally hidden.
     pub hidden: bool,
+    /// A `mime` item's content type (`application/rdf+xml` for XMP); empty
+    /// for other kinds.
+    pub content_type: String,
     /// How this item's extents are addressed.
     pub construction: Construction,
     /// The runs of bytes that make up the item, in order.
@@ -314,16 +317,17 @@ impl Meta {
 ///
 /// An item present in one but not the other is dropped: without a type it
 /// cannot be interpreted, and without extents it has no bytes.
-fn join(infos: Vec<(u32, FourCc, String, bool)>, locations: Vec<Located>) -> Vec<Item> {
+fn join(infos: Vec<InfoRow>, locations: Vec<Located>) -> Vec<Item> {
     infos
         .into_iter()
-        .filter_map(|(id, kind, name, hidden)| {
+        .filter_map(|(id, kind, name, hidden, content_type)| {
             let located = locations.iter().find(|located| located.id == id)?;
             Some(Item {
                 id,
                 kind,
                 name,
                 hidden,
+                content_type,
                 construction: located.construction,
                 extents: located.extents.clone(),
             })
@@ -349,8 +353,11 @@ fn parse_pitm(mut payload: Reader<'_>) -> Result<u32> {
     }
 }
 
-/// Parse `iinf` into `(id, type, name, hidden)` rows.
-fn parse_iinf(mut payload: Reader<'_>) -> Result<Vec<(u32, FourCc, String, bool)>> {
+/// An `infe` row: id, type, name, hidden, and a `mime` item's content type.
+type InfoRow = (u32, FourCc, String, bool, String);
+
+/// Parse `iinf` into rows.
+fn parse_iinf(mut payload: Reader<'_>) -> Result<Vec<InfoRow>> {
     let (version, _flags) = payload.full_box()?;
     let count = if version == 0 {
         u32::from(payload.u16()?)
@@ -382,7 +389,7 @@ fn parse_iinf(mut payload: Reader<'_>) -> Result<Vec<(u32, FourCc, String, bool)
 }
 
 /// Parse one `infe` item information entry.
-fn parse_infe(mut payload: Reader<'_>) -> Result<(u32, FourCc, String, bool)> {
+fn parse_infe(mut payload: Reader<'_>) -> Result<InfoRow> {
     let (version, flags) = payload.full_box()?;
     // Versions 0 and 1 predate typed items and cannot describe an `av01`
     // item at all; every AVIF uses version 2 or 3.
@@ -402,7 +409,13 @@ fn parse_infe(mut payload: Reader<'_>) -> Result<(u32, FourCc, String, bool)> {
     let name = payload.cstring()?.to_owned();
     // Flag bit 0 marks the item hidden.
     let hidden = flags & 1 == 1;
-    Ok((id, kind, name, hidden))
+    // A `mime` item names its content type next; unreadable is untyped.
+    let content_type = if kind == FourCc::new(b"mime") {
+        payload.cstring().map(str::to_owned).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    Ok((id, kind, name, hidden, content_type))
 }
 
 /// Parse `iloc`, the item location table.

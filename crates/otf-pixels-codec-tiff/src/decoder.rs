@@ -33,7 +33,9 @@ use otf_pixels_core::{
 };
 
 use crate::ifd::{ByteOrder, Directory, directory_chain, parse_header, probe as probe_header};
-use crate::image::{Layout, Photometric, TiffImage};
+use crate::image::{Compression, Layout, Photometric, TiffImage};
+use otf_pixels_core::exif::Exif;
+use otf_pixels_core::{Density, ResolutionUnit, SourceInfo};
 
 /// Decodes a TIFF stream.
 #[derive(Debug)]
@@ -49,6 +51,36 @@ pub struct TiffDecoder {
     /// reads touch each chunk's rows consecutively. A larger cache belongs to
     /// the scheduler, which already has one.
     cached: Option<(usize, Vec<u8>)>,
+    /// The page's metadata tags and Exif/GPS directories, as an EXIF block.
+    exif: Option<Vec<u8>>,
+    /// The page's XMP packet (tag 700).
+    xmp: Option<Vec<u8>>,
+    /// Density, compression, bit depth and palette.
+    info: SourceInfo,
+}
+
+/// The IFD0 tags an EXIF block describes the image with, as opposed to the
+/// ones that lay out its pixels: these move between a TIFF's own directory
+/// and an EXIF block.
+pub(crate) const fn is_metadata_tag(tag: u16) -> bool {
+    matches!(
+        tag,
+        269 | 270
+            | 271
+            | 272
+            | 274
+            | 282
+            | 283
+            | 285
+            | 296
+            | 305
+            | 306
+            | 315
+            | 316
+            | 318
+            | 319
+            | 33_432
+    )
 }
 
 impl TiffDecoder {
@@ -108,12 +140,49 @@ impl TiffDecoder {
         let directory = Directory::parse(&data, order, offset)?;
         let image = TiffImage::from_directory(&directory, order, &limits)?;
 
+        // Metadata is read leniently: a broken tag is metadata lost.
+        let tree = Exif::parse_directory(&data, Some(offset));
+        let xmp = tree
+            .as_ref()
+            .and_then(|t| t.get(700))
+            .map(|e| e.data.clone());
+        let mut info = SourceInfo::default();
+        if let Some(t) = &tree {
+            info.density = match (t.rational(282), t.integer(296).unwrap_or(2)) {
+                (Some(x), unit @ (2 | 3)) if x > 0.0 => Some(Density {
+                    x,
+                    y: t.rational(283).filter(|&y| y > 0.0).unwrap_or(x),
+                    unit: if unit == 3 {
+                        ResolutionUnit::Centimetre
+                    } else {
+                        ResolutionUnit::Inch
+                    },
+                }),
+                _ => None,
+            };
+        }
+        let exif = tree
+            .map(|t| t.retain(is_metadata_tag))
+            .filter(|t| !t.ifd0.is_empty())
+            .map(|t| t.to_bytes());
+        info.bits_per_sample = u8::try_from(image.bits_per_sample).ok();
+        info.palette = image.photometric == Photometric::Palette;
+        info.compression = Some(match image.compression {
+            Compression::None => "none",
+            Compression::Lzw => "lzw",
+            Compression::Deflate => "deflate",
+            Compression::PackBits => "packbits",
+        });
+
         Ok(Self {
             data,
             image,
             pages,
             row: 0,
             cached: None,
+            exif,
+            xmp,
+            info,
         })
     }
 
@@ -399,6 +468,23 @@ impl Decoder for TiffDecoder {
 
     fn icc_profile(&self) -> Option<&[u8]> {
         self.image.icc.as_deref()
+    }
+
+    /// The page's descriptive tags (make, model, date, resolution,
+    /// orientation, ...) and its Exif and GPS directories, laid out as an
+    /// EXIF block.
+    fn exif(&self) -> Option<&[u8]> {
+        self.exif.as_deref()
+    }
+
+    /// The page's XMP packet, tag 700.
+    fn xmp(&self) -> Option<&[u8]> {
+        self.xmp.as_deref()
+    }
+
+    /// Density, compression, bit depth and palette.
+    fn source_info(&self) -> SourceInfo {
+        self.info.clone()
     }
 
     fn capability(&self) -> DecodeCapability {

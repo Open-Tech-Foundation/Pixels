@@ -6,6 +6,35 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- sharp's `metadata()`: `Image::source_metadata()` reads, from the headers
+  alone, the file's format and size, stored and oriented dimensions, pixel
+  format, channels, alpha, bits per sample, orientation, pages, animation,
+  density (JPEG JFIF or EXIF, PNG `pHYs`, TIFF tags), progressive or
+  interlaced, palette, chroma subsampling (JPEG, AVIF), background (PNG
+  `bKGD`, GIF), compression (TIFF, WebP, AVIF, JPEG XL), comments (PNG
+  `tEXt`/`zTXt`/`iTXt`, JPEG `COM`, GIF), and the ICC, EXIF and XMP bytes.
+  Decoders report the format-specific part through the new
+  `Decoder::source_info` and `Decoder::xmp`.
+- sharp's `stats()`: `Image::stats()` gives each channel's min, max (with
+  positions), sum, sum of squares, mean and standard deviation, and the
+  image's opacity, entropy, sharpness and dominant colour.
+- XMP: read from JPEG, PNG, WebP, TIFF, AVIF and JPEG XL, and written to
+  them with `EncodeOptions::keep_xmp` (sharp's `keepXmp`) or
+  `Image::with_xmp` (`withXmp`); `with_keep_metadata` keeps EXIF, XMP and
+  density together (`keepMetadata`). `Encoder::set_xmp` carries it.
+- Density output, sharp's `withMetadata({ density })`:
+  `Image::with_density` writes JPEG's JFIF density, PNG's `pHYs` and TIFF's
+  resolution tags (`Encoder::set_density`).
+- EXIF for TIFF and JPEG XL: a TIFF's descriptive tags and Exif and GPS
+  directories are read as an EXIF block and written back into an output
+  TIFF's directory; JPEG XL output carries EXIF and XMP in the container's
+  `Exif` and `xml ` boxes. `otf_pixels_core::exif` parses, re-orders and
+  lays out EXIF blocks for this.
+- Pillow-written fixtures (`scripts/regenerate-metadata-fixtures.py`)
+  check XMP, EXIF, density and PNG text read from another implementation;
+  Pillow, libavif and libjxl read back what Pixels writes.
+
 ### Fixed
 - JPEG XL: a header claiming a vast image no longer panics (an overflow
   counting its groups, found by the `jxl_decode` fuzz target). The decoder

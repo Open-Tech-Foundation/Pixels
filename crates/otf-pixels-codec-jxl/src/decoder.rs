@@ -8,7 +8,7 @@
 
 use otf_pixels_core::{
     Animation, Codec, Decoder, Format, ImageDescriptor, Limits, Orientation, PixelFormat,
-    PixelsError, Result, Source,
+    PixelsError, Result, Source, SourceInfo,
 };
 
 use crate::decode::{container, header::ExtraKind, render};
@@ -28,6 +28,8 @@ pub struct JxlDecoder {
     orientation: Orientation,
     icc: Option<Vec<u8>>,
     exif: Option<Vec<u8>>,
+    xmp: Option<Vec<u8>>,
+    info: SourceInfo,
     animation: Option<Animation>,
 }
 
@@ -56,6 +58,7 @@ impl JxlDecoder {
         }
         let contents = container::parse(&bytes)?;
         let exif = contents.exif;
+        let xmp = contents.xmp;
         let codestream = contents.codestream;
         // Limits first: the size is the attacker's to state, and walking the
         // frame headers sizes their tables of contents by it.
@@ -96,6 +99,11 @@ impl JxlDecoder {
         let orientation = Orientation::from_exif(header.orientation as u16).unwrap_or_default();
         // XYB images are delivered as sRGB, so their profile does not apply.
         let icc = if header.xyb { None } else { icc };
+        let mut info = SourceInfo::default();
+        info.bits_per_sample = u8::try_from(header.bit_depth.bits).ok();
+        // XYB is how libjxl codes lossy images; lossless keeps the colour
+        // space it was given.
+        info.compression = Some(if header.xyb { "lossy" } else { "lossless" });
         Ok(Self {
             descriptor,
             codestream,
@@ -104,6 +112,8 @@ impl JxlDecoder {
             orientation,
             icc,
             exif,
+            xmp,
+            info,
             animation,
         })
     }
@@ -164,6 +174,16 @@ impl Decoder for JxlDecoder {
 
     fn exif(&self) -> Option<&[u8]> {
         self.exif.as_deref()
+    }
+
+    /// The container's `xml ` box.
+    fn xmp(&self) -> Option<&[u8]> {
+        self.xmp.as_deref()
+    }
+
+    /// Bit depth, and lossy (XYB) or lossless.
+    fn source_info(&self) -> SourceInfo {
+        self.info.clone()
     }
 
     fn animation(&self) -> Option<Animation> {

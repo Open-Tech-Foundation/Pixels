@@ -113,11 +113,13 @@
 //!   resize with sharp's five fit modes, modulate, convolve/blur/sharpen,
 //!   composite, flatten, channel extraction, pixel-format and sRGB
 //!   conversion.
-//! - **Metadata**: EXIF/HEIF orientation applied on open; ICC profiles
+//! - **Metadata**: everything sharp's `metadata()` reports, from the
+//!   headers alone ([`Image::source_metadata`]), and its `stats()`
+//!   ([`Image::stats`]); EXIF/HEIF orientation applied on open; ICC profiles
 //!   converted to sRGB or carried to the output; animation reported, with
-//!   the first frame processed. EXIF is written only when an output keeps
-//!   it ([`EncodeOptions::keep_exif`]), so location data is stripped from
-//!   uploads by default; XMP is never written.
+//!   the first frame processed. EXIF and XMP are written only when an output
+//!   keeps them ([`EncodeOptions::keep_exif`], [`EncodeOptions::keep_xmp`]),
+//!   so location data is stripped from uploads by default.
 //!
 //! Not yet: multi-frame (animated) pipelines and arbitrary-angle rotation.
 //! Each will arrive as an addition, not a change:
@@ -126,11 +128,15 @@
 use otf_pixels_core::{BufferSource, Op, Prefixed, Producer, TileBuf};
 use std::sync::Arc;
 
+mod metadata;
+pub use metadata::{ChannelStats, SourceMetadata, Stats};
+
 pub use otf_pixels_core::{
-    AccessPattern, Animation, ChannelLayout, ChromaSubsampling, Codec, ColorModel, Decoder,
-    EncodeOptions, Encoder, ErrorCode, Format, ImageDescriptor, Limit, Limits, Metadata,
-    Orientation, PixelFormat, PixelsError, PlanOptions, Region, Result, RunStats, SampleKind,
-    Scheduler, SchedulerOptions, Sink, Source, TileShape, evaluate as evaluate_reference,
+    AccessPattern, Animation, Background, ChannelLayout, ChromaSubsampling, Codec, ColorModel,
+    Comment, Decoder, Density, EncodeOptions, Encoder, ErrorCode, Format, ImageDescriptor, Limit,
+    Limits, Metadata, Orientation, PixelFormat, PixelsError, PlanOptions, Region, ResolutionUnit,
+    Result, RunStats, SampleKind, Scheduler, SchedulerOptions, Sink, Source, SourceInfo, TileShape,
+    evaluate as evaluate_reference,
 };
 pub use otf_pixels_ops::{
     Blend, Composite, Conversion, ConvertFormat, Convolve, Crop, EnsureAlpha, Extend, ExtendWith,
@@ -292,6 +298,13 @@ pub struct Image {
     trim_offset: Option<(u32, u32)>,
     /// The source's EXIF block, written only when an output asks for it.
     exif: Option<Arc<[u8]>>,
+    /// The source's XMP packet, written only when an output asks for it.
+    xmp: Option<Arc<[u8]>>,
+    /// The resolution [`Image::with_density`] set, written by every output
+    /// whose format has a place for one.
+    density: Option<Density>,
+    /// What the source file said about itself, for a decoded image.
+    source: Option<Arc<SourceMetadata>>,
 }
 
 impl Image {
@@ -359,7 +372,12 @@ impl Image {
             let detail = std::io::Error::new(kind, format!("{}: {e}", path.display()));
             PixelsError::io("opening image file", detail)
         })?;
-        Self::from_stream_with(std::io::BufReader::new(file), options)
+        let size = file.metadata().ok().map(|m| m.len());
+        let mut image = Self::from_stream_with(std::io::BufReader::new(file), options)?;
+        if let Some(source) = image.source.as_mut() {
+            Arc::make_mut(source).size = size;
+        }
+        Ok(image)
     }
 
     /// Build an image from a byte stream, identifying its format from the
@@ -494,6 +512,9 @@ impl Image {
         let icc = decoder.icc_profile().map(Vec::from);
         let animation = decoder.animation().map(Arc::new);
         let pages = decoder.pages();
+        let xmp = decoder.xmp().map(Arc::<[u8]>::from);
+        let info = decoder.source_info();
+        let stored = decoder.descriptor();
         let mut exif = decoder.exif().map(<[u8]>::to_vec);
         // Pixels turned upright are described by an upright tag, as sharp
         // resets it; a block without the tag is copied as it is.
@@ -506,10 +527,23 @@ impl Image {
                  open with `animated` off to process the first frame"
             )));
         }
+        let source = SourceMetadata::new(
+            format,
+            stored,
+            orientation,
+            pages,
+            animation.as_deref().cloned(),
+            icc.as_deref(),
+            decoder.exif(),
+            xmp.clone(),
+            info,
+        );
         let mut image = Self::from_decoder(decoder, format).with_icc_profile(icc);
         image.animation = animation;
         image.pages = pages;
         image.exif = exif.map(Arc::from);
+        image.xmp = xmp;
+        image.source = Some(Arc::new(source));
         if options.to_srgb {
             image = image.to_srgb();
         }
@@ -540,6 +574,9 @@ impl Image {
             pages: 1,
             trim_offset: None,
             exif: None,
+            xmp: None,
+            density: None,
+            source: None,
             inner: Ok(otf_pixels_core::Image::from_producer(producer, format)),
         }
     }
@@ -882,10 +919,10 @@ impl Image {
             _ => (pixels, descriptor.region()),
         };
         let trimmed = descriptor.resized(cut.width, cut.height)?;
-        let source = BufferSource::new(trimmed, Arc::new(pixels))?;
+        let buffer = BufferSource::new(trimmed, Arc::new(pixels))?;
         Ok(Self {
             inner: Ok(otf_pixels_core::Image::from_producer(
-                Arc::new(source),
+                Arc::new(buffer),
                 format,
             )),
             icc: self.icc,
@@ -893,6 +930,9 @@ impl Image {
             pages: self.pages,
             trim_offset: Some((cut.x, cut.y)),
             exif: self.exif,
+            xmp: self.xmp,
+            density: self.density,
+            source: self.source,
         })
     }
 
@@ -946,6 +986,7 @@ impl Image {
             self.trim_offset,
             self.exif,
         );
+        let (xmp, density, source) = (self.xmp, self.density, self.source);
         let (base, over) = match (self.inner, overlay.inner) {
             (Ok(base), Ok(over)) => (base, over),
             // The first error wins, matching how a single chain behaves.
@@ -959,6 +1000,9 @@ impl Image {
             pages,
             trim_offset,
             exif,
+            xmp,
+            density,
+            source,
         }
     }
 
@@ -976,6 +1020,9 @@ impl Image {
             pages: 1,
             trim_offset: None,
             exif: None,
+            xmp: None,
+            density: None,
+            source: None,
         }
     }
 
@@ -1093,6 +1140,67 @@ impl Image {
         self
     }
 
+    /// The source's XMP packet, if it had one.
+    ///
+    /// Outputs drop it unless [`EncodeOptions::keep_xmp`] is set, as for
+    /// EXIF.
+    #[must_use]
+    pub fn xmp(&self) -> Option<&[u8]> {
+        self.xmp.as_deref()
+    }
+
+    /// Replace the XMP packet an output with [`EncodeOptions::keep_xmp`]
+    /// writes, or with `None` remove it (sharp's `withXmp`).
+    #[must_use]
+    pub fn with_xmp(mut self, xmp: Option<Vec<u8>>) -> Self {
+        self.xmp = xmp.map(Arc::from);
+        self
+    }
+
+    /// The resolution outputs will write, if one was set with
+    /// [`Image::with_density`].
+    #[must_use]
+    pub const fn density(&self) -> Option<Density> {
+        self.density
+    }
+
+    /// Write `density` as the output's resolution (sharp's
+    /// `withMetadata({ density })`): JPEG's JFIF header, PNG's `pHYs`, TIFF's
+    /// resolution tags. Without it an output writes the source's density only
+    /// when it keeps the metadata ([`EncodeOptions::with_keep_metadata`]).
+    #[must_use]
+    pub const fn with_density(mut self, density: Option<Density>) -> Self {
+        self.density = density;
+        self
+    }
+
+    /// What the source file says about itself (sharp's `metadata()`): its
+    /// format and stored size, depth, alpha, orientation, density, pages and
+    /// animation, palette, interlace and subsampling, background, comments,
+    /// and its EXIF, ICC and XMP. Read from the headers; decodes nothing.
+    /// `None` for an image that did not come from a file.
+    #[must_use]
+    pub fn source_metadata(&self) -> Option<&SourceMetadata> {
+        self.source.as_deref()
+    }
+
+    /// Pixel statistics of this pipeline's result (sharp's `stats()`): per
+    /// channel extremes, sums, mean and deviation, whether it is opaque, its
+    /// entropy and sharpness, and its dominant colour. A terminal: it runs
+    /// the pipeline.
+    ///
+    /// # Errors
+    ///
+    /// As [`Output::bytes`].
+    pub fn stats(&self) -> Result<Stats> {
+        let descriptor = self.descriptor()?;
+        let pixels = self
+            .clone()
+            .output(Format::Raw, EncodeOptions::default())
+            .bytes()?;
+        Ok(Stats::of(&descriptor, &pixels))
+    }
+
     /// Declare the ICC profile the pixels are in, or with `None` drop it and
     /// call them sRGB. Only the label changes, never a pixel.
     #[must_use]
@@ -1113,6 +1221,9 @@ impl Image {
             pages: self.pages,
             trim_offset: self.trim_offset,
             exif: self.exif,
+            xmp: self.xmp,
+            density: self.density,
+            source: self.source,
             inner: match self.inner {
                 Ok(image) => image.apply(op).map_err(Arc::new),
                 // An earlier failure short-circuits: later ops never run.
@@ -1255,13 +1366,18 @@ pub struct Output {
 }
 
 impl Output {
-    /// The EXIF block this output writes: the image's, if the options keep
-    /// it.
-    fn exif(&self) -> Option<&[u8]> {
-        self.image
-            .exif
-            .as_deref()
-            .filter(|_| self.options.keep_exif)
+    /// Hand the encoder the metadata this output writes: the profile always;
+    /// EXIF and XMP if the options keep them; the density set on the image,
+    /// or the source's when the options keep all metadata.
+    fn describe(&self, encoder: &mut dyn Encoder) -> Result<()> {
+        let options = self.options;
+        encoder.set_icc_profile(self.image.icc.as_deref())?;
+        encoder.set_exif(self.image.exif.as_deref().filter(|_| options.keep_exif))?;
+        encoder.set_xmp(self.image.xmp.as_deref().filter(|_| options.keep_xmp))?;
+        let kept = (options.keep_exif && options.keep_xmp)
+            .then(|| self.image.source.as_ref().and_then(|s| s.density))
+            .flatten();
+        encoder.set_density(self.image.density.or(kept))
     }
 
     /// The format this output will be encoded as.
@@ -1353,8 +1469,7 @@ impl Output {
         let (image, reduction) = otf_pixels_core::shrink_on_load(encodable.graph()?)?;
         let descriptor = image.descriptor();
         let mut encoder = encoder_for(self.format, self.options)?;
-        encoder.set_icc_profile(self.image.icc.as_deref())?;
-        encoder.set_exif(self.exif())?;
+        self.describe(encoder.as_mut())?;
         encoder.write_header(&descriptor, &mut sink)?;
 
         // The scheduler delivers tiles; an encoder wants whole rows in order.
@@ -1401,8 +1516,7 @@ impl Output {
         let (image, _) = otf_pixels_core::shrink_on_load(encodable.graph()?)?;
         let descriptor = image.descriptor();
         let mut encoder = encoder_for(self.format, self.options)?;
-        encoder.set_icc_profile(self.image.icc.as_deref())?;
-        encoder.set_exif(self.exif())?;
+        self.describe(encoder.as_mut())?;
         let mut sink = Vec::with_capacity(descriptor.byte_len().unwrap_or_default());
         encoder.write_header(&descriptor, &mut sink)?;
         otf_pixels_core::evaluate_rows(&image, |_, row| encoder.write_row(row, &mut sink))?;

@@ -35,8 +35,8 @@ use crate::huffman::HuffmanEncoder;
 use crate::progressive_encode::Coefficients;
 use crate::tables;
 use otf_pixels_core::{
-    ChromaSubsampling, EncodeOptions, Encoder, ImageDescriptor, PixelFormat, PixelsError, Result,
-    Sink,
+    ChromaSubsampling, Density, EncodeOptions, Encoder, ImageDescriptor, PixelFormat, PixelsError,
+    ResolutionUnit, Result, Sink,
 };
 
 /// How much the chroma channels are subsampled relative to luma.
@@ -81,6 +81,10 @@ pub struct JpegEncoder {
     icc: Option<Vec<u8>>,
     /// The EXIF block to write as `APP1`, if any.
     exif: Option<Vec<u8>>,
+    /// The XMP packet to write as `APP1`, if any.
+    xmp: Option<Vec<u8>>,
+    /// The resolution to write in the JFIF header, if any.
+    density: Option<Density>,
 }
 
 /// Everything fixed once the descriptor is known.
@@ -243,6 +247,8 @@ impl JpegEncoder {
             state: None,
             icc: None,
             exif: None,
+            xmp: None,
+            density: None,
         }
     }
 
@@ -274,6 +280,8 @@ impl JpegEncoder {
             state: None,
             icc: None,
             exif: None,
+            xmp: None,
+            density: None,
         })
     }
 
@@ -692,6 +700,12 @@ fn write_huffman_table(
 /// field and the identifier.
 const MAX_EXIF: usize = 65_535 - 2 - 6;
 
+/// The identifier an XMP `APP1` segment starts with.
+const XMP_ID: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
+
+/// The largest XMP packet one `APP1` segment holds.
+const MAX_XMP: usize = 65_535 - 2 - XMP_ID.len();
+
 impl Encoder for JpegEncoder {
     fn set_icc_profile(&mut self, profile: Option<&[u8]>) -> Result<()> {
         if self.state.is_some() {
@@ -722,6 +736,33 @@ impl Encoder for JpegEncoder {
             ));
         }
         self.exif = exif.filter(|e| e.len() <= MAX_EXIF).map(<[u8]>::to_vec);
+        Ok(())
+    }
+
+    /// The packet goes in one `APP1` segment, which holds at most 65,504
+    /// bytes after its identifier; a larger one is not written (extended XMP,
+    /// spread over several segments, is not).
+    fn set_xmp(&mut self, xmp: Option<&[u8]>) -> Result<()> {
+        if self.state.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "xmp",
+                "the XMP packet must be set before write_header",
+            ));
+        }
+        self.xmp = xmp.filter(|x| x.len() <= MAX_XMP).map(<[u8]>::to_vec);
+        Ok(())
+    }
+
+    /// Written in the JFIF header, rounded to whole pixels per inch or
+    /// centimetre.
+    fn set_density(&mut self, density: Option<Density>) -> Result<()> {
+        if self.state.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "density",
+                "the density must be set before write_header",
+            ));
+        }
+        self.density = density;
         Ok(())
     }
 
@@ -760,23 +801,34 @@ impl Encoder for JpegEncoder {
 
         sink.write_all(&[0xFF, marker::SOI])?;
 
-        // A JFIF header. Nothing here needs it — the density fields are the
-        // only content and they say "no units" — but its absence makes some
+        // A JFIF header. Nothing here needs it — without a density it says
+        // "no units", an aspect ratio of 1:1 — but its absence makes some
         // consumers guess at the colour model rather than assume YCbCr.
-        write_segment(
-            marker::APP0,
-            &[
-                b'J', b'F', b'I', b'F', 0, // identifier
-                1, 2, // version 1.02
-                0, // density units: none
-                0, 1, 0, 1, // pixel aspect ratio 1:1
-                0, 0, // no thumbnail
-            ],
-            sink,
-        )?;
+        let (unit, x, y) = match self.density {
+            None => (0, 1, 1),
+            Some(d) => {
+                let unit = if d.unit == ResolutionUnit::Centimetre {
+                    2
+                } else {
+                    1
+                };
+                let round = |v: f64| v.round().clamp(1.0, f64::from(u16::MAX)) as u16;
+                (unit, round(d.x), round(d.y))
+            }
+        };
+        let mut jfif = vec![b'J', b'F', b'I', b'F', 0, 1, 2, unit];
+        jfif.extend_from_slice(&x.to_be_bytes());
+        jfif.extend_from_slice(&y.to_be_bytes());
+        jfif.extend_from_slice(&[0, 0]); // no thumbnail
+        write_segment(marker::APP0, &jfif, sink)?;
         if let Some(exif) = &self.exif {
             let mut payload = b"Exif\0\0".to_vec();
             payload.extend_from_slice(exif);
+            write_segment(marker::APP1, &payload, sink)?;
+        }
+        if let Some(xmp) = &self.xmp {
+            let mut payload = XMP_ID.to_vec();
+            payload.extend_from_slice(xmp);
             write_segment(marker::APP1, &payload, sink)?;
         }
         // The profile, in as many APP2 segments as it takes.

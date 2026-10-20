@@ -39,6 +39,8 @@ pub struct AvifEncoder {
     icc: Option<Vec<u8>>,
     /// The EXIF block for an `Exif` item, if any.
     exif: Option<Vec<u8>>,
+    /// The XMP packet for a `mime` item, if any.
+    xmp: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -69,6 +71,7 @@ impl AvifEncoder {
             options: *options,
             icc: None,
             exif: None,
+            xmp: None,
         }
     }
 }
@@ -93,6 +96,17 @@ impl Encoder for AvifEncoder {
             ));
         }
         self.exif = exif.map(<[u8]>::to_vec);
+        Ok(())
+    }
+
+    fn set_xmp(&mut self, xmp: Option<&[u8]>) -> Result<()> {
+        if self.state.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "xmp",
+                "the XMP packet must be set before write_header",
+            ));
+        }
+        self.xmp = xmp.map(<[u8]>::to_vec);
         Ok(())
     }
 
@@ -183,6 +197,7 @@ impl Encoder for AvifEncoder {
             &self.options,
             self.icc.as_deref(),
             self.exif.as_deref(),
+            self.xmp.as_deref(),
         )?;
         sink.write_all(&bytes)?;
         sink.flush()
@@ -260,6 +275,7 @@ fn encode(
     options: &EncodeOptions,
     icc: Option<&[u8]>,
     exif: Option<&[u8]>,
+    xmp: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
     let (width, height) = (state.descriptor.width, state.descriptor.height);
     let subsampled = options.chroma_subsampling != Some(ChromaSubsampling::Yuv444);
@@ -309,6 +325,7 @@ fn encode(
         alpha.as_ref(),
         icc,
         exif,
+        xmp,
     ))
 }
 
@@ -344,6 +361,10 @@ fn av1c(coded: &CodedStill, mono: bool) -> Vec<u8> {
 }
 
 /// The items' properties, in `ipco` order (1-based indices for `ipma`).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the image, its alpha and each kind of metadata"
+)]
 fn container(
     width: u32,
     height: u32,
@@ -352,6 +373,7 @@ fn container(
     alpha: Option<&CodedStill>,
     icc: Option<&[u8]>,
     exif: Option<&[u8]>,
+    xmp: Option<&[u8]>,
 ) -> Vec<u8> {
     let ftyp = bx(b"ftyp", b"avif\0\0\0\0avifmif1miaf");
     let ispe = {
@@ -415,6 +437,9 @@ fn container(
         p.extend_from_slice(&[0, 0]);
         p.extend_from_slice(kind);
         p.push(0); // item_name
+        if kind == b"mime" {
+            p.extend_from_slice(b"application/rdf+xml\0");
+        }
         full(b"infe", 2, 0, &p)
     };
     // Items 1 (colour) and 2 (alpha) are coded images; an EXIF block is the
@@ -427,6 +452,10 @@ fn container(
         .collect();
     if let Some(data) = &exif_data {
         items.push((b"Exif", data));
+    }
+    // An XMP packet is a `mime` item of type `application/rdf+xml`.
+    if let Some(data) = xmp {
+        items.push((b"mime", data));
     }
     let iinf = {
         let mut p = (items.len() as u16).to_be_bytes().to_vec();
@@ -441,12 +470,14 @@ fn container(
     if alpha.is_some() {
         references.extend(bx(b"auxl", &[0, 2, 0, 1, 0, 1]));
     }
-    if exif.is_some() {
-        let id = items.len() as u16;
-        references.extend(bx(
-            b"cdsc",
-            &[&id.to_be_bytes()[..], &[0, 1, 0, 1]].concat(),
-        ));
+    for (i, (kind, _)) in items.iter().enumerate() {
+        if matches!(*kind, b"Exif" | b"mime") {
+            let id = i as u16 + 1;
+            references.extend(bx(
+                b"cdsc",
+                &[&id.to_be_bytes()[..], &[0, 1, 0, 1]].concat(),
+            ));
+        }
     }
     let iref = (!references.is_empty()).then(|| full(b"iref", 0, 0, &references));
     // iloc v0 with 4-byte offsets and lengths, no base offset.

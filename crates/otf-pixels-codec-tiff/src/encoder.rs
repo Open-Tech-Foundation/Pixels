@@ -21,10 +21,13 @@
 
 use otf_pixels_compress::{Level, zlib_compress};
 use otf_pixels_core::{
-    EncodeOptions, Encoder, ImageDescriptor, PixelFormat, PixelsError, Result, Sink,
+    Density, EncodeOptions, Encoder, ImageDescriptor, PixelFormat, PixelsError, ResolutionUnit,
+    Result, Sink,
 };
 
+use crate::decoder::is_metadata_tag;
 use crate::ifd::{ByteOrder, tag};
+use otf_pixels_core::exif::{Exif, ExifEntry};
 
 /// How an encoder arranges pixels in the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -59,6 +62,12 @@ pub struct TiffEncoder {
     state: Option<State>,
     /// The ICC profile to store in tag 34675, if any.
     icc: Option<Vec<u8>>,
+    /// The EXIF block whose tags join the directory, if any.
+    exif: Option<Vec<u8>>,
+    /// The XMP packet to write as tag 700, if any.
+    xmp: Option<Vec<u8>>,
+    /// The resolution to write, if any.
+    density: Option<Density>,
 }
 
 #[derive(Debug)]
@@ -86,6 +95,9 @@ impl TiffEncoder {
             deflate: None,
             state: None,
             icc: None,
+            exif: None,
+            xmp: None,
+            density: None,
         }
     }
 
@@ -237,6 +249,23 @@ impl TiffEncoder {
 /// The tags a baseline TIFF needs, as (tag, type code, values).
 type Field = (u16, u16, Vec<u32>);
 
+/// A tag beyond the baseline ones, its values already encoded.
+#[derive(Debug)]
+enum Extra {
+    /// A field type, count and the values' bytes, little-endian.
+    Raw(u16, u32, Vec<u8>),
+    /// A sub-directory (Exif, GPS), written after the values.
+    Sub(Vec<ExifEntry>),
+}
+
+/// A RATIONAL's eight bytes, little-endian, for `value` to 1/10000.
+fn rational(value: f64) -> Vec<u8> {
+    let n = (value * 10_000.0).round().clamp(0.0, f64::from(u32::MAX)) as u32;
+    let mut out = n.to_le_bytes().to_vec();
+    out.extend_from_slice(&10_000_u32.to_le_bytes());
+    out
+}
+
 impl Encoder for TiffEncoder {
     fn set_icc_profile(&mut self, profile: Option<&[u8]>) -> Result<()> {
         if self.state.is_some() {
@@ -246,6 +275,42 @@ impl Encoder for TiffEncoder {
             ));
         }
         self.icc = profile.map(<[u8]>::to_vec);
+        Ok(())
+    }
+
+    /// The block's descriptive tags and its Exif and GPS directories join
+    /// the image's own directory, as TIFF keeps EXIF; layout tags in it are
+    /// ignored, and IFD1's thumbnail is dropped.
+    fn set_exif(&mut self, exif: Option<&[u8]>) -> Result<()> {
+        if self.state.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "exif",
+                "the EXIF block must be set before write_header",
+            ));
+        }
+        self.exif = exif.map(<[u8]>::to_vec);
+        Ok(())
+    }
+
+    fn set_xmp(&mut self, xmp: Option<&[u8]>) -> Result<()> {
+        if self.state.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "xmp",
+                "the XMP packet must be set before write_header",
+            ));
+        }
+        self.xmp = xmp.map(<[u8]>::to_vec);
+        Ok(())
+    }
+
+    fn set_density(&mut self, density: Option<Density>) -> Result<()> {
+        if self.state.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "density",
+                "the density must be set before write_header",
+            ));
+        }
+        self.density = density;
         Ok(())
     }
 
@@ -363,11 +428,43 @@ impl Encoder for TiffEncoder {
                 profile.iter().map(|&b| u32::from(b)).collect(),
             ));
         }
+        let mut extras: Vec<(u16, Extra)> = Vec::new();
+        if let Some(tree) = self.exif.as_deref().and_then(Exif::parse) {
+            let tree = tree.with_byte_order(false).retain(is_metadata_tag);
+            for e in tree.ifd0 {
+                match e.sub {
+                    // Only the Exif and GPS directories belong in IFD0.
+                    Some(sub) if e.tag == 0x8769 || e.tag == 0x8825 => {
+                        extras.push((e.tag, Extra::Sub(sub)))
+                    }
+                    Some(_) => {}
+                    None => extras.push((e.tag, Extra::Raw(e.kind, e.count, e.data))),
+                }
+            }
+        }
+        if let Some(d) = self.density {
+            extras.retain(|(t, _)| !matches!(t, 282 | 283 | 296));
+            extras.push((282, Extra::Raw(5, 1, rational(d.x))));
+            extras.push((283, Extra::Raw(5, 1, rational(d.y))));
+            let unit: u16 = if d.unit == ResolutionUnit::Centimetre {
+                3
+            } else {
+                2
+            };
+            extras.push((296, Extra::Raw(3, 1, unit.to_le_bytes().to_vec())));
+        }
+        if let Some(xmp) = &self.xmp {
+            let count = u32::try_from(xmp.len()).unwrap_or(u32::MAX);
+            extras.push((700, Extra::Raw(1, count, xmp.clone())));
+        }
+        // A tag the baseline set already has wins over a copied one.
+        extras.retain(|(t, _)| !fields.iter().any(|(f, _, _)| f == t));
         // Tags must appear in ascending order; readers are entitled to binary
         // search, and libtiff warns loudly about files that get this wrong.
         fields.sort_by_key(|(tag, _, _)| *tag);
+        extras.sort_by_key(|(tag, _)| *tag);
 
-        let out = assemble(order, &fields, &state.chunks)?;
+        let out = assemble(order, &fields, &extras, &state.chunks)?;
         sink.write_all(&out)?;
         sink.flush()?;
 
@@ -378,8 +475,13 @@ impl Encoder for TiffEncoder {
 }
 
 /// Lay out header, directory, value heap and pixel data.
-fn assemble(order: ByteOrder, fields: &[Field], chunks: &[Vec<u8>]) -> Result<Vec<u8>> {
-    let count = fields.len();
+fn assemble(
+    order: ByteOrder,
+    fields: &[Field],
+    extras: &[(u16, Extra)],
+    chunks: &[Vec<u8>],
+) -> Result<Vec<u8>> {
+    let count = fields.len() + extras.len();
     let directory_at = 8_usize;
     let directory_size = 2 + count * 12 + 4;
     let heap_at = directory_at + directory_size;
@@ -401,6 +503,44 @@ fn assemble(order: ByteOrder, fields: &[Field], chunks: &[Vec<u8>]) -> Result<Ve
             }
         } else {
             value_offsets.push(None);
+        }
+    }
+
+    // The extra tags' values, then their sub-directories, each on an even
+    // boundary.
+    let writer = Exif {
+        big_endian: false,
+        ifd0: Vec::new(),
+    };
+    let mut extra_entries: Vec<(u16, u16, u32, [u8; 4])> = Vec::with_capacity(extras.len());
+    for (tag_id, extra) in extras {
+        match extra {
+            Extra::Raw(kind, n, bytes) if bytes.len() <= 4 => {
+                let mut inline = [0_u8; 4];
+                for (slot, &b) in inline.iter_mut().zip(bytes) {
+                    *slot = b;
+                }
+                extra_entries.push((*tag_id, *kind, *n, inline));
+            }
+            Extra::Raw(kind, n, bytes) => {
+                let at = (heap_at + heap.len()) as u32;
+                heap.extend_from_slice(bytes);
+                if heap.len() % 2 == 1 {
+                    heap.push(0);
+                }
+                extra_entries.push((*tag_id, *kind, *n, at.to_le_bytes()));
+            }
+            Extra::Sub(_) => extra_entries.push((*tag_id, 4, 1, [0; 4])),
+        }
+    }
+    for ((_, extra), entry) in extras.iter().zip(&mut extra_entries) {
+        if let Extra::Sub(entries) = extra {
+            let at = (heap_at + heap.len()) as u32;
+            heap.extend_from_slice(&writer.sub_directory_bytes(entries, at));
+            if heap.len() % 2 == 1 {
+                heap.push(0);
+            }
+            entry.3 = at.to_le_bytes();
         }
     }
 
@@ -450,6 +590,24 @@ fn assemble(order: ByteOrder, fields: &[Field], chunks: &[Vec<u8>]) -> Result<Ve
                 directory.extend_from_slice(inline.get(..4).unwrap_or(&[0; 4]));
             }
         }
+    }
+    for (tag_id, kind, n, value) in &extra_entries {
+        directory.extend_from_slice(&order.write_u16(*tag_id));
+        directory.extend_from_slice(&order.write_u16(*kind));
+        directory.extend_from_slice(&order.write_u32(*n));
+        directory.extend_from_slice(value);
+    }
+    // Both lists are sorted; the directory as a whole must be.
+    let mut entries: Vec<[u8; 12]> = directory
+        .get(2..)
+        .unwrap_or_default()
+        .chunks_exact(12)
+        .map(|c| <[u8; 12]>::try_from(c).unwrap_or([0; 12]))
+        .collect();
+    entries.sort_by_key(|e| order.u16(e, 0));
+    directory.truncate(2);
+    for e in entries {
+        directory.extend_from_slice(&e);
     }
     directory.extend_from_slice(&order.write_u32(0));
 

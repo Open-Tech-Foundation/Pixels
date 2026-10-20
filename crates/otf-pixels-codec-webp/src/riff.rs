@@ -59,6 +59,8 @@ pub struct Container<'a> {
     pub exif: Option<&'a [u8]>,
     /// The `ICCP` chunk's payload: the ICC profile.
     pub icc: Option<&'a [u8]>,
+    /// The first `XMP ` chunk's payload: the XMP packet.
+    pub xmp: Option<&'a [u8]>,
     /// From `ANIM`: how many times an animation plays, 0 for forever.
     pub loop_count: u32,
     /// Each `ANMF` frame's duration in milliseconds; empty for a still.
@@ -218,6 +220,7 @@ fn simple(width: u32, height: u32, has_alpha: bool, bitstream: Bitstream<'_>) ->
         },
         exif: None,
         icc: None,
+        xmp: None,
         loop_count: 0,
         frame_durations_ms: Vec::new(),
     }
@@ -244,6 +247,7 @@ fn extended<'a>(
     let mut alpha: Option<&'a [u8]> = None;
     let mut exif: Option<&'a [u8]> = None;
     let mut icc: Option<&'a [u8]> = None;
+    let mut xmp: Option<&'a [u8]> = None;
     let mut loop_count = 0;
     let mut frame_durations_ms = Vec::new();
     for chunk in chunks {
@@ -251,6 +255,7 @@ fn extended<'a>(
         match &chunk.kind {
             b"EXIF" => exif = exif.or(Some(chunk.payload)),
             b"ICCP" => icc = icc.or(Some(chunk.payload)),
+            b"XMP " => xmp = xmp.or(Some(chunk.payload)),
             // ANIM (§2.7.1): background colour, then a 16-bit loop count.
             b"ANIM" if animated => {
                 if let [_, _, _, _, lo, hi, ..] = chunk.payload {
@@ -304,6 +309,7 @@ fn extended<'a>(
         frame,
         exif,
         icc,
+        xmp,
         loop_count,
         frame_durations_ms,
     })

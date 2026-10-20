@@ -7,7 +7,7 @@
 
 use otf_pixels_core::{
     Animation, Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, Orientation,
-    PixelFormat, PixelsError, Result, Source,
+    PixelFormat, PixelsError, Result, Source, SourceInfo,
 };
 
 /// The most compressed bytes read before a file is called hostile.
@@ -33,6 +33,10 @@ pub struct WebPDecoder {
     exif: Option<Vec<u8>>,
     /// The `ICCP` chunk, if there is one.
     icc: Option<Vec<u8>>,
+    /// The `XMP ` chunk, if there is one.
+    xmp: Option<Vec<u8>>,
+    /// Density (from the EXIF block) and lossless/lossy.
+    info: SourceInfo,
     /// The animation's frames and timing, for an animated file.
     animation: Option<Animation>,
 }
@@ -92,6 +96,16 @@ impl WebPDecoder {
         let descriptor =
             ImageDescriptor::with_limits(container.width, container.height, pixel, &limits)?;
         let icc = container.icc.map(<[u8]>::to_vec);
+        let xmp = container.xmp.map(<[u8]>::to_vec);
+        let mut info = SourceInfo::default();
+        info.density = container
+            .exif
+            .and_then(otf_pixels_core::Density::from_exif_block);
+        info.bits_per_sample = Some(8);
+        info.compression = Some(match container.bitstream {
+            crate::riff::Bitstream::Lossless(_) => "lossless",
+            crate::riff::Bitstream::Lossy { .. } => "lossy",
+        });
         let exif = container
             .exif
             .map(|block| block.strip_prefix(b"Exif\0\0").unwrap_or(block).to_vec());
@@ -104,6 +118,8 @@ impl WebPDecoder {
             orientation,
             exif,
             icc,
+            xmp,
+            info,
             animation,
         })
     }
@@ -205,6 +221,16 @@ impl Decoder for WebPDecoder {
     /// The `EXIF` chunk's block.
     fn exif(&self) -> Option<&[u8]> {
         self.exif.as_deref()
+    }
+
+    /// The `XMP ` chunk.
+    fn xmp(&self) -> Option<&[u8]> {
+        self.xmp.as_deref()
+    }
+
+    /// Lossless or lossy, and the density the EXIF block states.
+    fn source_info(&self) -> SourceInfo {
+        self.info.clone()
     }
 
     fn animation(&self) -> Option<Animation> {

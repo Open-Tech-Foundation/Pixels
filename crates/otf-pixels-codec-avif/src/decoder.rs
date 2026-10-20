@@ -26,7 +26,7 @@ use crate::props::{Av1Config, Colour, Subsampling};
 use crate::yuv::{Depths, Layout, YuvMatrix, identity_to_rgb, plane_to_grey, yuv_to_rgb};
 use otf_pixels_core::{
     Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, Orientation, PixelFormat,
-    PixelsError, Result, Source,
+    PixelsError, Result, Source, SourceInfo,
 };
 
 /// The most container bytes read before a file is called hostile.
@@ -90,6 +90,8 @@ pub struct AvifDecoder {
     alpha: Option<AlphaItem>,
     /// The primary item's EXIF block, from an `Exif` item describing it.
     exif: Option<Vec<u8>>,
+    /// The primary item's XMP packet, from a `mime` item describing it.
+    xmp: Option<Vec<u8>>,
     /// The reconstructed interleaved raster, produced on the first row read.
     raster: Option<Vec<u8>>,
     /// Rows already served.
@@ -119,12 +121,14 @@ impl AvifDecoder {
         let pixel = pixel_format(&info);
         let descriptor = ImageDescriptor::with_limits(info.width, info.height, pixel, &limits)?;
         let exif = locate_exif(&bytes);
+        let xmp = locate_xmp(&bytes);
         Ok(Self {
             descriptor,
             info,
             frame_data,
             alpha,
             exif,
+            xmp,
             raster: None,
             row: 0,
         })
@@ -289,6 +293,21 @@ fn locate_exif(bytes: &[u8]) -> Option<Vec<u8>> {
     let offset = u32::from_be_bytes(data.get(..4)?.try_into().ok()?);
     let start = 4_usize.checked_add(usize::try_from(offset).ok()?)?;
     Some(data.get(start..)?.to_vec())
+}
+
+/// The XMP packet of a `mime` item of type `application/rdf+xml` that
+/// describes the primary item. Metadata never fails a decode.
+fn locate_xmp(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut reader = Reader::new(bytes);
+    reader.next_box();
+    let meta = Meta::parse(reader.find(b"meta").ok()??).ok()?;
+    let primary = meta.primary_item()?.id;
+    let item = meta.items.iter().find(|item| {
+        item.kind == FourCc::new(b"mime")
+            && item.content_type == "application/rdf+xml"
+            && meta.referenced(item.id, b"cdsc").contains(&primary)
+    })?;
+    Some(meta.item_data(bytes, item).ok()?.to_vec())
 }
 
 /// Locate the primary item's alpha auxiliary item, if it has one.
@@ -533,6 +552,25 @@ impl Decoder for AvifDecoder {
     /// The EXIF block of an `Exif` item describing the primary image.
     fn exif(&self) -> Option<&[u8]> {
         self.exif.as_deref()
+    }
+
+    /// The XMP packet of a `mime` item describing the primary image.
+    fn xmp(&self) -> Option<&[u8]> {
+        self.xmp.as_deref()
+    }
+
+    /// Bit depth, chroma subsampling, and AV1 compression.
+    fn source_info(&self) -> SourceInfo {
+        let mut info = SourceInfo::default();
+        info.bits_per_sample = Some(self.info.config.bit_depth);
+        info.compression = Some("av1");
+        info.chroma_subsampling = match self.info.config.subsampling {
+            Subsampling::Monochrome => None,
+            Subsampling::Yuv420 => Some("4:2:0"),
+            Subsampling::Yuv422 => Some("4:2:2"),
+            Subsampling::Yuv444 => Some("4:4:4"),
+        };
+        info
     }
 
     fn capability(&self) -> DecodeCapability {

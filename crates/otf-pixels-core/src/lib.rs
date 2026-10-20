@@ -52,6 +52,7 @@ mod cache;
 mod codec;
 mod error;
 mod eval;
+pub mod exif;
 mod geometry;
 mod graph;
 mod io;
@@ -70,8 +71,8 @@ pub mod testing;
 
 pub use cache::{CacheStats, TileCache, TileKey};
 pub use codec::{
-    Animation, ChromaSubsampling, Codec, DecodeCapability, Decoder, EncodeOptions, Encoder, Format,
-    Metadata,
+    Animation, Background, ChromaSubsampling, Codec, Comment, DecodeCapability, Decoder, Density,
+    EncodeOptions, Encoder, Format, Metadata, ResolutionUnit, SourceInfo,
 };
 pub use error::{ErrorCode, Limit, PixelsError, Result};
 pub use eval::{demand, evaluate, evaluate_rows};

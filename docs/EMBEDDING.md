@@ -83,7 +83,8 @@ any allocation.
 
 | sharp | otf-pixels |
 |---|---|
-| `metadata()` | `Image::metadata()`, `Image::animation()`, `Image::icc_profile()`; `pages` is `Image::pages()` |
+| `metadata()` | `Image::source_metadata()`, read from the headers alone: `format`, `size` (opened from a path), `width`/`height` as stored (`oriented_width()`/`oriented_height()` for sharp's `autoOrient`), `pixel`, `channels`, `has_alpha`, `bits_per_sample`, `orientation`, `pages`, `animation` (sharp's `loop` and `delay`), `density` (`x_dpi()`; `unit` is `resolutionUnit`), `progressive` (JPEG, or interlaced PNG/GIF), `palette`, `chroma_subsampling`, `background`, `compression`, `comments` (PNG text chunks, JPEG and GIF comments), `has_profile()`, and the `icc`, `exif` and `xmp` bytes. `Image::metadata()` is the pipeline's current shape |
+| `stats()` | `Image::stats()`, a terminal: per channel `min`, `max`, `sum`, `squares_sum`, `mean`, `stdev` (sample), `min_x`/`min_y`/`max_x`/`max_y`; `is_opaque`, `entropy`, `sharpness` and `dominant`, computed as libvips computes them |
 | `sharp(input, { page })` | `OpenOptions::with_page(page)`; a page past the end is `InvalidArgument` |
 | `resize(w, h, { fit, position, background, withoutEnlargement, withoutReduction, kernel })` | `resize_with(w, h, ResizeOptions::default().with_fit(..).with_position(..).with_background(..).without_enlargement(..).without_reduction(..).with_filter(..))`, fits `Fill`/`Inside`/`Outside`/`Cover`/`Contain`; `position` is one of sharp's nine gravities (`Position::North` is sharp's `top`/`north`); the `entropy`/`attention` strategies are not implemented |
 | `extract` | `crop` |
@@ -106,6 +107,9 @@ any allocation.
 | `jpeg({ progressive })` | `with_progressive(true)`: libjpeg's default scan script with per-scan optimized tables. mozjpeg's `optimiseScans` search and `trellisQuantisation` have no counterpart |
 | `jpeg({ chromaSubsampling })`, `avif({ chromaSubsampling, effort })` | `with_chroma_subsampling(ChromaSubsampling::Yuv444)` for `'4:4:4'`, `Yuv420` for `'4:2:0'`; `with_effort(e)?`. sharp's AVIF default is 4:4:4 and ours 4:2:0, so pass `Yuv444` to match it. AVIF effort above 4 searches no further |
 | `keepExif()`, `withExif(exif)` | `EncodeOptions::with_keep_exif(true)`; `Image::with_exif(Some(block))` |
+| `keepXmp()`, `withXmp(xmp)` | `EncodeOptions::with_keep_xmp(true)`; `Image::with_xmp(Some(packet))` |
+| `keepMetadata()` | `EncodeOptions::with_keep_metadata(true)`: EXIF, XMP and the source's density (the ICC profile is always kept) |
+| `withMetadata({ density })` | `Image::with_density(Some(Density::dpi(d)))` |
 | `keepIccProfile` | open with `to_srgb` off; the profile is written to the output |
 
 `output()` narrows pixels to what the format can hold: 16-bit or float input
@@ -116,8 +120,19 @@ location data is stripped from uploads. Kept, it is copied from a JPEG, PNG,
 WebP or AVIF source into a JPEG, PNG, WebP or AVIF output, with its
 Orientation tag reset to 1 when `auto_orient` turned the pixels upright.
 `Image::exif()` reads the block and `Image::with_exif` replaces it (sharp's
-`withExif`, given as a whole TIFF-structured block). TIFF sources and
-outputs carry no separate block, and XMP is never written.
+`withExif`, given as a whole TIFF-structured block). JPEG XL carries it in
+an `Exif` box. TIFF has no separate block: its descriptive tags (make,
+model, date, resolution, orientation...) and Exif and GPS directories are
+read as one, and written back into the output's own directory.
+
+XMP works the same way, with `EncodeOptions::with_keep_xmp(true)`,
+`Image::xmp()` and `Image::with_xmp`: JPEG's `APP1`, PNG's
+`XML:com.adobe.xmp` `iTXt`, WebP's `XMP ` chunk, TIFF's tag 700, AVIF's
+`application/rdf+xml` item and JPEG XL's `xml ` box. GIF's is neither read
+nor written, as in libvips, and a JPEG packet over 64 KB (extended XMP) is
+not written. Density is written to JPEG's JFIF header, PNG's `pHYs` and
+TIFF's resolution tags when set with `Image::with_density`, or when the
+output keeps all metadata.
 
 ## Animation
 
