@@ -19,6 +19,8 @@
 //! first is written.
 
 mod bits;
+mod decode;
+mod decoder;
 mod encoder;
 mod entropy;
 mod headers;
@@ -26,4 +28,5 @@ mod modular;
 mod predict;
 mod vardct;
 
+pub use decoder::{JxlCodec, JxlDecoder, probe};
 pub use encoder::JxlEncoder;

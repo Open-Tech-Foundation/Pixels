@@ -115,11 +115,25 @@ const DIV: [u32; 65] = {
     out
 };
 
-/// The default weighted-predictor parameters (the `WpHeader` defaults).
-const P1: i64 = 16;
-const P2: i64 = 10;
-const P3: [i64; 5] = [7, 7, 7, 0, 0];
-const WEIGHTS: [u32; 4] = [13, 12, 12, 12];
+/// The weighted predictor's parameters (a `WpHeader`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WpParams {
+    pub p1: i64,
+    pub p2: i64,
+    pub p3: [i64; 5],
+    pub weights: [u32; 4],
+}
+
+impl Default for WpParams {
+    fn default() -> Self {
+        Self {
+            p1: 16,
+            p2: 10,
+            p3: [7, 7, 7, 0, 0],
+            weights: [13, 12, 12, 12],
+        }
+    }
+}
 
 /// One weighted prediction.
 #[derive(Debug, Clone, Copy)]
@@ -132,6 +146,12 @@ pub struct Weighted {
 }
 
 impl Weighted {
+    /// The prediction, in eighths.
+    #[must_use]
+    pub const fn eighths(&self) -> i64 {
+        self.prediction
+    }
+
     /// The prediction, as a sample.
     #[must_use]
     pub const fn value(&self) -> i32 {
@@ -143,6 +163,7 @@ impl Weighted {
 /// raster order.
 #[derive(Debug, Clone)]
 pub struct WeightedState {
+    params: WpParams,
     width: usize,
     x: usize,
     y: usize,
@@ -161,7 +182,14 @@ impl WeightedState {
     /// Fresh state for a region `width` samples wide.
     #[must_use]
     pub fn new(width: usize) -> Self {
+        Self::with_params(width, WpParams::default())
+    }
+
+    /// Fresh state with custom parameters.
+    #[must_use]
+    pub fn with_params(width: usize, params: WpParams) -> Self {
         Self {
+            params,
             width,
             x: 0,
             y: 0,
@@ -191,15 +219,16 @@ impl WeightedState {
         let ne3 = i64::from(nb.ne) << 3;
         let w3 = i64::from(nb.w) << 3;
         let nn3 = i64::from(nb.nn) << 3;
+        let WpParams { p1, p2, p3, weights } = self.params;
         let subpred = [
             w3 + ne3 - n3,
-            n3 - (((ew + en + ene) * P1) >> 5),
-            w3 - (((ew + en + enw) * P2) >> 5),
-            n3 - ((enw * P3[0]
-                + en * P3[1]
-                + ene * P3[2]
-                + (nn3 - n3) * P3[3]
-                + (nw3 - w3) * P3[4])
+            n3 - (((ew + en + ene) * p1) >> 5),
+            w3 - (((ew + en + enw) * p2) >> 5),
+            n3 - ((enw * p3[0]
+                + en * p3[1]
+                + ene * p3[2]
+                + (nn3 - n3) * p3[3]
+                + (nw3 - w3) * p3[4])
                 >> 5),
         ];
         let mut weight = [0_u32; 4];
@@ -208,7 +237,7 @@ impl WeightedState {
                 .wrapping_add(self.sub_n_w[i])
                 .wrapping_add(self.sub_ne[i]);
             let shift = ((u64::from(err_sum) + 1) >> 5).checked_ilog2().unwrap_or(0);
-            weight[i] = 4 + ((WEIGHTS[i] * DIV[(err_sum >> shift) as usize + 1]) >> shift);
+            weight[i] = 4 + ((weights[i] * DIV[(err_sum >> shift) as usize + 1]) >> shift);
         }
         let sum: u32 = weight.iter().sum();
         let log_weight = (u64::from(sum) >> 4).ilog2();

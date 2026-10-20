@@ -13,6 +13,19 @@ versioning: [SemVer](https://semver.org/).
   when it is chained, as `Resize` does.
 
 ### Added
+- JPEG XL decoding, first part: `JxlDecoder` and `JxlCodec` in
+  `otf-pixels-codec-jxl`, written from scratch along jxl-oxide's procedures
+  (credited in NOTICE). Bare codestreams and the ISOBMFF container (`jxlc`,
+  `jxlp`, `Exif`), the full image and frame headers, embedded ICC profiles,
+  prefix and ANS entropy codes with LZ77 and clustered contexts, and Modular
+  images with every predictor, MA trees with previous-channel properties,
+  and the RCT, palette (with delta entries) and squeeze transforms, across
+  LF and pass groups and progressive passes. Frames are upsampled,
+  Gaborish-smoothed and blended onto the canvas (with reference frames),
+  and XYB is converted to sRGB. Every lossless file `cjxl` writes, efforts
+  1-9 with palette, alpha, 16-bit grey and progressive squeeze, decodes to
+  exactly `djxl`'s pixels; lossy Modular is within one level. VarDCT, the
+  edge-preserving filter, patches, splines and noise come next.
 - Lossy JPEG XL (VarDCT), now the default for `Format::Jxl`: XYB colour,
   8x8 DCT blocks quantized against the default tables, LF coded as a
   Modular image, HF coded by nonzero count and zig-zag with the decoder's
