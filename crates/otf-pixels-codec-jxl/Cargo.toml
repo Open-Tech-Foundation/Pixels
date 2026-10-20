@@ -1,0 +1,21 @@
+[package]
+name = "otf-pixels-codec-jxl"
+description = "JPEG XL codec for otf-pixels, implemented from scratch."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+readme = "README.md"
+repository.workspace = true
+authors.workspace = true
+categories.workspace = true
+# Integration tests and their data stay in the repository: they are only run
+# from it, and shipping them would make every dependent download the data.
+exclude = ["tests"]
+keywords.workspace = true
+
+[dependencies]
+otf-pixels-core.workspace = true
+
+[lints]
+workspace = true

@@ -98,7 +98,7 @@ Requires Rust 1.85+. Every codec is on by default; for a smaller build, use
 
 | Feature | Format |
 | --- | --- |
-| `png`, `gif`, `tiff`, `webp`, `avif`, `raw` | Each codec on its own |
+| `png`, `gif`, `tiff`, `webp`, `avif`, `jxl`, `raw` | Each codec on its own |
 | `jpeg` | JPEG, baseline and progressive |
 
 ## Formats
@@ -109,6 +109,7 @@ Requires Rust 1.85+. Every codec is on by default; for a smaller build, use
 | **JPEG** | Baseline and progressive, scaled (1/2, 1/4, 1/8) | Baseline or progressive (per-scan optimized tables), chroma subsampling |
 | **WebP** | Lossy, lossless, alpha; first frame of animations | Lossy (default) or lossless |
 | **AVIF** | Still images, 8/10/12-bit | Lossy, 8-bit |
+| **JPEG XL** | Not yet | Lossless, 8/16-bit, alpha (lossy in progress) |
 | **GIF** | Every frame, interlace, disposal; first frame composited | Single frame, quantized palette |
 | **TIFF** | Baseline 6.0, strips and tiles, LZW/Deflate/PackBits; any page of a multi-page file | Strips or tiles, Deflate |
 | **Raw** | Caller-described pixels | Packed pixels |
@@ -145,7 +146,7 @@ covers limits, errors and fixed-size pools.
 | [`otf-pixels-core`](https://crates.io/crates/otf-pixels-core) | Op graph, tiles, scheduler, and the codec and op traits |
 | [`otf-pixels-ops`](https://crates.io/crates/otf-pixels-ops) | Resize, rotate, colour, filters, compositing |
 | [`otf-pixels-compress`](https://crates.io/crates/otf-pixels-compress) | DEFLATE, zlib, LZW and checksums |
-| `otf-pixels-codec-*` | One crate per format: [`png`](https://crates.io/crates/otf-pixels-codec-png), [`jpeg`](https://crates.io/crates/otf-pixels-codec-jpeg), [`webp`](https://crates.io/crates/otf-pixels-codec-webp), [`avif`](https://crates.io/crates/otf-pixels-codec-avif), [`gif`](https://crates.io/crates/otf-pixels-codec-gif), [`tiff`](https://crates.io/crates/otf-pixels-codec-tiff), [`raw`](https://crates.io/crates/otf-pixels-codec-raw) |
+| `otf-pixels-codec-*` | One crate per format: [`png`](https://crates.io/crates/otf-pixels-codec-png), [`jpeg`](https://crates.io/crates/otf-pixels-codec-jpeg), [`webp`](https://crates.io/crates/otf-pixels-codec-webp), [`avif`](https://crates.io/crates/otf-pixels-codec-avif), [`jxl`](https://crates.io/crates/otf-pixels-codec-jxl), [`gif`](https://crates.io/crates/otf-pixels-codec-gif), [`tiff`](https://crates.io/crates/otf-pixels-codec-tiff), [`raw`](https://crates.io/crates/otf-pixels-codec-raw) |
 
 ## Design
 

@@ -24,9 +24,10 @@ otf-pixels-codec-jpeg = { workspace = true, optional = true }
 otf-pixels-codec-tiff = { workspace = true, optional = true }
 otf-pixels-codec-webp = { workspace = true, optional = true }
 otf-pixels-codec-avif = { workspace = true, optional = true }
+otf-pixels-codec-jxl = { workspace = true, optional = true }
 
 [features]
-default = ["raw", "png", "gif", "jpeg", "tiff", "webp", "avif"]
+default = ["raw", "png", "gif", "jpeg", "tiff", "webp", "avif", "jxl"]
 # Raw pixel codec. Kept behind a feature for symmetry with the other codecs
 # (ARCHITECTURE §Layer 2: "each format is a plugin behind a cargo feature").
 raw = ["dep:otf-pixels-codec-raw"]
@@ -48,6 +49,8 @@ webp = ["dep:otf-pixels-codec-webp"]
 # ADR-0004). Still images, decode and lossy encode; image sequences (`avis`)
 # report `Unsupported`.
 avif = ["dep:otf-pixels-codec-avif"]
+# JPEG XL, owned outright (ADR-0019). Encode only for now: lossless Modular.
+jxl = ["dep:otf-pixels-codec-jxl"]
 
 [dev-dependencies]
 # Benchmark comparisons only (ROADMAP M4 exit criterion). These never enter the

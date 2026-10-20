@@ -93,6 +93,7 @@ dependencies = [
  "otf-pixels-codec-avif",
  "otf-pixels-codec-gif",
  "otf-pixels-codec-jpeg",
+ "otf-pixels-codec-jxl",
  "otf-pixels-codec-png",
  "otf-pixels-codec-raw",
  "otf-pixels-codec-tiff",
@@ -119,6 +120,13 @@ dependencies = [
 [[package]]
 name = "otf-pixels-codec-jpeg"
 version = "0.3.0"
+dependencies = [
+ "otf-pixels-core",
+]
+
+[[package]]
+name = "otf-pixels-codec-jxl"
+version = "0.2.0"
 dependencies = [
  "otf-pixels-core",
 ]

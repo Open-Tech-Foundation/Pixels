@@ -160,6 +160,9 @@ pub use otf_pixels_codec_webp::{WebPCodec, WebPDecoder, WebPEncoder};
 #[cfg(feature = "avif")]
 pub use otf_pixels_codec_avif::{AvifCodec, AvifDecoder, AvifEncoder};
 
+#[cfg(feature = "jxl")]
+pub use otf_pixels_codec_jxl::JxlEncoder;
+
 /// How [`Image::open_with`] and [`Image::from_stream_with`] read an image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1044,7 +1047,7 @@ impl Image {
     }
 
     /// This image in a pixel format `format`'s encoder accepts: 8 bits for
-    /// JPEG, WebP, AVIF and GIF, and integers for PNG and TIFF. A 16-bit PNG
+    /// JPEG, WebP, AVIF and GIF, and integers for PNG, TIFF and JPEG XL. A 16-bit PNG
     /// written as WebP is thereby narrowed rather than refused.
     fn encodable_as(self, format: Format) -> Self {
         let Ok(descriptor) = self.descriptor() else {
@@ -1056,7 +1059,7 @@ impl Image {
                 Format::Jpeg | Format::WebP | Format::Avif | Format::Gif,
                 SampleKind::U16 | SampleKind::F32,
             ) => SampleKind::U8,
-            (Format::Png | Format::Tiff, SampleKind::F32) => SampleKind::U16,
+            (Format::Png | Format::Tiff | Format::Jxl, SampleKind::F32) => SampleKind::U16,
             _ => return self,
         };
         match PixelFormat::from_parts(pixel.layout(), kind) {
@@ -1568,6 +1571,8 @@ fn encoder_for(format: Format, options: EncodeOptions) -> Result<Box<dyn Encoder
         Format::WebP => Ok(Box::new(WebPEncoder::from_options(&options))),
         #[cfg(feature = "avif")]
         Format::Avif => Ok(Box::new(AvifEncoder::from_options(&options))),
+        #[cfg(feature = "jxl")]
+        Format::Jxl => Ok(Box::new(JxlEncoder::from_options(&options))),
         #[cfg(not(feature = "raw"))]
         Format::Raw => Err(PixelsError::unsupported(
             "raw encoding requires the `raw` feature of otf-pixels",

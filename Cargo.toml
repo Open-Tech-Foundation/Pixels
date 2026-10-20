@@ -7,6 +7,7 @@ members = [
     "crates/otf-pixels-codec-avif",
     "crates/otf-pixels-codec-gif",
     "crates/otf-pixels-codec-jpeg",
+    "crates/otf-pixels-codec-jxl",
     "crates/otf-pixels-codec-webp",
     "crates/otf-pixels-codec-png",
     "crates/otf-pixels-codec-tiff",
@@ -32,6 +33,7 @@ otf-pixels-codec-gif = { version = "0.3.0", path = "crates/otf-pixels-codec-gif"
 # Default features off: the codec's only feature is the deprecated no-op
 # `progressive`, and members cannot override a workspace default.
 otf-pixels-codec-jpeg = { version = "0.3.0", path = "crates/otf-pixels-codec-jpeg", default-features = false }
+otf-pixels-codec-jxl = { version = "0.3.0", path = "crates/otf-pixels-codec-jxl" }
 otf-pixels-codec-png = { version = "0.3.0", path = "crates/otf-pixels-codec-png" }
 otf-pixels-codec-tiff = { version = "0.3.0", path = "crates/otf-pixels-codec-tiff" }
 otf-pixels-codec-webp = { version = "0.3.0", path = "crates/otf-pixels-codec-webp" }

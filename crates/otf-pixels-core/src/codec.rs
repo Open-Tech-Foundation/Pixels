@@ -34,6 +34,8 @@ pub enum Format {
     WebP,
     /// AV1 Image File Format.
     Avif,
+    /// JPEG XL.
+    Jxl,
 }
 
 impl Format {
@@ -48,6 +50,7 @@ impl Format {
             Self::Tiff => "tiff",
             Self::WebP => "webp",
             Self::Avif => "avif",
+            Self::Jxl => "jxl",
         }
     }
 }
@@ -638,6 +641,7 @@ mod tests {
             Format::Tiff,
             Format::WebP,
             Format::Avif,
+            Format::Jxl,
         ];
         let mut seen = std::collections::HashSet::new();
         for f in all {

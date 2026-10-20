@@ -49,6 +49,11 @@ otf-pixels-codec-raw = [
     "**/tests/**",
     "**/benches/**",
 ]
+otf-pixels-codec-jxl = [
+    "**/*.md",
+    "**/tests/**",
+    "**/benches/**",
+]
 otf-pixels-codec-png = [
     "**/*.md",
     "**/tests/**",
@@ -100,6 +105,15 @@ matrix = false
 command = ""
 artifacts = ""
 manifest = "crates/otf-pixels-codec-jpeg/Cargo.toml"
+
+[[package]]
+name = "otf-pixels-codec-jxl"
+adapter = "crates.io"
+mode = "publish"
+matrix = false
+command = ""
+artifacts = ""
+manifest = "crates/otf-pixels-codec-jxl/Cargo.toml"
 
 [[package]]
 name = "otf-pixels-codec-png"
