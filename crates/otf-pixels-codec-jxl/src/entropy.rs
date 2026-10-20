@@ -6,9 +6,13 @@
 //! all of that; then the tokens follow, interleaved with nothing.
 //!
 //! This writes the prefix-code variant (Brotli's code format), which every
-//! decoder must accept alongside ANS. LZ77 is not used, and contexts are not
-//! clustered: each context is its own cluster, so a stream may use at most
-//! eight, the most the simple context map can name.
+//! decoder must accept alongside ANS. Contexts are not clustered: each is
+//! its own cluster, so a stream may use at most seven, plus LZ77's distance
+//! context, the most the simple context map can name.
+//!
+//! LZ77 is used for one thing, runs: a copy of the previous value, which
+//! for Modular residuals codes a run of exact predictions, as libjxl's fast
+//! lossless mode does.
 
 #![allow(
     clippy::indexing_slicing,
@@ -89,14 +93,37 @@ impl HybridUint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Token {
     pub ctx: u32,
+    /// The value, or for a copy, how many values it repeats.
     pub value: u32,
+    /// Repeat the previous value `value` times instead.
+    pub copy: bool,
 }
+
+/// The first symbol that means a copy, and the shortest copy.
+const LZ77_MIN_SYMBOL: u32 = 224;
+const LZ77_MIN_LENGTH: u32 = 7;
+/// How copy lengths split into tokens and bits.
+const LZ77_LENGTH: HybridUint = HybridUint::new(4, 0, 0);
 
 impl Token {
     /// A value.
     #[must_use]
     pub const fn new(ctx: u32, value: u32) -> Self {
-        Self { ctx, value }
+        Self {
+            ctx,
+            value,
+            copy: false,
+        }
+    }
+
+    /// A copy of the previous value, `length` times, read in `ctx`.
+    #[must_use]
+    pub const fn repeat(ctx: u32, length: u32) -> Self {
+        Self {
+            ctx,
+            value: length,
+            copy: true,
+        }
     }
 
     /// A signed value, packed.
@@ -267,39 +294,38 @@ impl PrefixCode {
             return;
         }
 
-        // Complex: the code lengths, coded by a code of their own.
+        // Complex: the code lengths, coded by a code of their own, with
+        // runs of zeros as Brotli's repeat symbol 17.
         let last = used.last().copied().unwrap_or(0);
+        let items = length_items(&self.lengths[..=last]);
         let mut length_freq = [0_u64; 18];
-        for &l in &self.lengths[..=last] {
-            length_freq[usize::from(l)] += 1;
+        for &(symbol, _, _) in &items {
+            length_freq[usize::from(symbol)] += 1;
         }
         let length_lengths = limited_lengths(&length_freq, 5);
         let distinct = length_freq.iter().filter(|&&f| f > 0).count();
         let length_codes = canonical_codes(&length_lengths);
         w.write(2, 0); // hskip 0
-        if distinct == 1 {
-            // One length for every symbol: the decoder reads every entry,
-            // then codes each length in no bits.
-            for &s in &CODE_LENGTH_ORDER {
-                let (count, bits) = CODE_LENGTH_CODE[usize::from(length_lengths[s])];
-                w.write(count, bits);
-            }
+        // With one symbol the decoder reads every entry, then codes each
+        // length in no bits; otherwise it stops where the code completes.
+        let end = if distinct == 1 {
+            CODE_LENGTH_ORDER.len()
         } else {
-            // Up to the last nonzero entry, where the code completes.
-            let end = CODE_LENGTH_ORDER
+            CODE_LENGTH_ORDER
                 .iter()
                 .rposition(|&s| length_lengths[s] > 0)
-                .map_or(0, |i| i + 1);
-            for &s in &CODE_LENGTH_ORDER[..end] {
-                let (count, bits) = CODE_LENGTH_CODE[usize::from(length_lengths[s])];
-                w.write(count, bits);
-            }
+                .map_or(0, |i| i + 1)
+        };
+        for &s in &CODE_LENGTH_ORDER[..end] {
+            let (count, bits) = CODE_LENGTH_CODE[usize::from(length_lengths[s])];
+            w.write(count, bits);
         }
-        if distinct > 1 {
-            for &l in &self.lengths[..=last] {
-                let l = usize::from(l);
-                w.write(u32::from(length_lengths[l]), u64::from(length_codes[l]));
+        for &(symbol, extra_bits, extra) in &items {
+            if distinct > 1 {
+                let s = usize::from(symbol);
+                w.write(u32::from(length_lengths[s]), u64::from(length_codes[s]));
             }
+            w.write(extra_bits, u64::from(extra));
         }
     }
 
@@ -307,6 +333,38 @@ impl PrefixCode {
         let s = symbol as usize;
         w.write(u32::from(self.lengths[s]), u64::from(self.codes[s]));
     }
+}
+
+/// Code lengths as the symbols that code them: a length itself (0 to 15),
+/// or 17 with three extra bits for a run of zeros (RFC 7932 §3.5), chained
+/// for long runs. Each item is `(symbol, extra bit count, extra bits)`.
+fn length_items(lengths: &[u8]) -> Vec<(u8, u32, u32)> {
+    let mut items = Vec::new();
+    let mut i = 0;
+    while i < lengths.len() {
+        let l = lengths[i];
+        let run = lengths[i..].iter().take_while(|&&x| x == l).count();
+        if l != 0 || run < 3 {
+            items.extend(std::iter::repeat_n((l, 0, 0), if l == 0 { run } else { 1 }));
+            i += if l == 0 { run } else { 1 };
+            continue;
+        }
+        // Brotli's chaining: each further 17 multiplies what came before by
+        // eight, so the run's digits are written most significant first.
+        let mut reps = run - 3;
+        let mut digits = Vec::new();
+        loop {
+            digits.push((17, 3, (reps & 7) as u32));
+            reps >>= 3;
+            if reps == 0 {
+                break;
+            }
+            reps -= 1;
+        }
+        items.extend(digits.into_iter().rev());
+        i += run;
+    }
+    items
 }
 
 /// Lengths for 2 to 4 used symbols, in the shapes the simple form allows.
@@ -340,33 +398,93 @@ fn simple_lengths(freq: &[u64]) -> Vec<u8> {
     lengths
 }
 
+/// Turn runs of `run_value` into a literal and a copy, where a run is long
+/// enough to pay for one. `tokens` must be one stream's: each stream's copy
+/// window starts empty.
+#[must_use]
+pub fn with_runs(tokens: &[Token], run_value: u32) -> Vec<Token> {
+    let mut out = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+    while i < tokens.len() {
+        let token = tokens[i];
+        out.push(token);
+        i += 1;
+        if token.value != run_value || token.copy {
+            continue;
+        }
+        let run = tokens[i..]
+            .iter()
+            .take_while(|t| t.value == run_value && !t.copy)
+            .count();
+        if run as u32 >= LZ77_MIN_LENGTH {
+            out.push(Token::repeat(tokens[i].ctx, run as u32));
+            i += run;
+        }
+    }
+    out
+}
+
 /// A whole entropy-coded stream's codes: one per context.
 #[derive(Debug, Clone)]
 pub struct EntropyCode {
     config: HybridUint,
     codes: Vec<PrefixCode>,
+    /// Whether copies are coded, with a distance code after the contexts'.
+    lz77: bool,
 }
 
 impl EntropyCode {
-    /// Codes for `num_ctx` contexts (at most 8), fitted to `tokens`.
+    /// The symbol, extra bit count and extra bits a token codes as.
+    fn symbol(&self, token: Token) -> (u32, u32, u32) {
+        if token.copy {
+            let (t, count, bits) = LZ77_LENGTH.encode(token.value - LZ77_MIN_LENGTH);
+            (LZ77_MIN_SYMBOL + t, count, bits)
+        } else {
+            self.config.encode(token.value)
+        }
+    }
+
+    /// Codes for `num_ctx` contexts (at most 7 with copies, 8 without),
+    /// fitted to `tokens`.
     #[must_use]
     pub fn build(num_ctx: usize, tokens: &[Token], config: HybridUint) -> Self {
-        let mut freq: Vec<Vec<u64>> = vec![Vec::new(); num_ctx];
-        for token in tokens {
-            let (symbol, _, _) = config.encode(token.value);
-            let table = &mut freq[token.ctx as usize];
+        let lz77 = tokens.iter().any(|t| t.copy);
+        let mut this = Self {
+            config,
+            codes: Vec::new(),
+            lz77,
+        };
+        let mut freq: Vec<Vec<u64>> = vec![Vec::new(); num_ctx + usize::from(lz77)];
+        let mut count = |ctx: usize, symbol: u32| {
+            let table = &mut freq[ctx];
             if table.len() <= symbol as usize {
                 table.resize(symbol as usize + 1, 0);
             }
             table[symbol as usize] += 1;
+        };
+        for &token in tokens {
+            count(token.ctx as usize, this.symbol(token).0);
+            if token.copy {
+                count(num_ctx, this.config.encode(1).0);
+            }
         }
-        let codes = freq.iter().map(|f| PrefixCode::new(f)).collect();
-        Self { config, codes }
+        this.codes = freq.iter().map(|f| PrefixCode::new(f)).collect();
+        this
     }
 
-    /// Write the stream's header: no LZ77, the context map, and the codes.
+    /// Write the stream's header: LZ77's parameters, the context map, and
+    /// the codes.
     pub fn write_header(&self, w: &mut BitWriter) {
-        w.bool(false); // no LZ77
+        use crate::bits::{bits, val};
+        w.bool(self.lz77);
+        if self.lz77 {
+            w.u32(
+                LZ77_MIN_SYMBOL,
+                [val(224), val(512), val(4096), bits(8, 15)],
+            );
+            w.u32(LZ77_MIN_LENGTH, [val(3), val(4), bits(5, 2), bits(9, 8)]);
+            LZ77_LENGTH.write(w, 8);
+        }
         let num_ctx = self.codes.len();
         if num_ctx > 1 {
             // A simple map, each context its own cluster.
@@ -391,9 +509,18 @@ impl EntropyCode {
 
     /// Write one token.
     pub fn write(&self, w: &mut BitWriter, token: Token) {
-        let (symbol, count, bits) = self.config.encode(token.value);
+        let (symbol, count, bits) = self.symbol(token);
         self.codes[token.ctx as usize].emit(w, symbol);
         w.write(count, u64::from(bits));
+        if token.copy {
+            // Distance 1, the previous value: with Modular's distance
+            // multiplier, value 1 is the special distance (1, 0).
+            let (symbol, count, bits) = self.config.encode(1);
+            if let Some(code) = self.codes.last() {
+                code.emit(w, symbol);
+            }
+            w.write(count, u64::from(bits));
+        }
     }
 }
 
@@ -465,5 +592,47 @@ mod tests {
         assert_eq!(simple_lengths(&[1, 50, 2]), [2, 1, 2]);
         assert_eq!(simple_lengths(&[100, 1, 1, 1]), [1, 2, 3, 3]);
         assert_eq!(simple_lengths(&[5, 5, 5, 5]), [2, 2, 2, 2]);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "tests operate on known-good values"
+)]
+mod length_tests {
+    use super::*;
+
+    /// Expand items as jxl-oxide's (and Brotli's) decoder does.
+    fn expand(items: &[(u8, u32, u32)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let (mut prev, mut last_repeat) = (8_u8, 0_usize);
+        for &(symbol, _, extra) in items {
+            if symbol == 17 {
+                let mut count = extra as usize + 3;
+                if prev == 17 {
+                    count += last_repeat * 7 - 16;
+                    last_repeat += count;
+                } else {
+                    last_repeat = count;
+                }
+                out.extend(std::iter::repeat_n(0, count));
+            } else {
+                out.push(symbol);
+            }
+            prev = symbol;
+        }
+        out
+    }
+
+    #[test]
+    fn zero_runs_of_every_length_expand_back() {
+        for run in 0..700 {
+            let mut lengths = vec![3_u8, 4];
+            lengths.extend(std::iter::repeat_n(0, run));
+            lengths.push(5);
+            assert_eq!(expand(&length_items(&lengths)), lengths, "run {run}");
+        }
     }
 }

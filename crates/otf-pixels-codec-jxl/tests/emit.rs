@@ -12,8 +12,9 @@ use otf_pixels_codec_jxl::JxlEncoder;
 use otf_pixels_core::{Encoder, ImageDescriptor, PixelFormat};
 
 /// A width x height image in `format` whose samples are a mix of gradient
-/// and noise, as raw bytes.
-fn image(width: u32, height: u32, format: PixelFormat) -> (ImageDescriptor, Vec<u8>) {
+/// and noise, as raw bytes; with `flat`, blocks of one colour instead, so
+/// exact predictions run long.
+fn image(width: u32, height: u32, format: PixelFormat, flat: bool) -> (ImageDescriptor, Vec<u8>) {
     let descriptor = ImageDescriptor::new(width, height, format).unwrap();
     let mut seed = 1_u32;
     let wide = format.bytes_per_pixel() / format.channels() == 2;
@@ -22,7 +23,11 @@ fn image(width: u32, height: u32, format: PixelFormat) -> (ImageDescriptor, Vec<
         for x in 0..width {
             for c in 0..format.channels() as u32 {
                 seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-                let v = (x * 3 + y * 2 + c * 50 + ((seed >> 16) & 15)) as u16;
+                let v = if flat {
+                    ((x / 37 + y / 23) % 3 * 90 + c * 7) as u16
+                } else {
+                    (x * 3 + y * 2 + c * 50 + ((seed >> 16) & 15)) as u16
+                };
                 if wide {
                     bytes.extend_from_slice(&(v.wrapping_mul(257)).to_ne_bytes());
                 } else {
@@ -59,13 +64,16 @@ fn emit_samples() {
             PixelFormat::Rgb16,
             PixelFormat::Rgba16,
         ] {
-            let (descriptor, bytes) = image(width, height, format);
-            let jxl = encode(&descriptor, &bytes);
-            assert_eq!(jxl[..2], [0xFF, 0x0A]);
-            if let Some(dir) = &dir {
-                let stem = format!("{dir}/{width}x{height}_{format}");
-                std::fs::write(format!("{stem}.jxl"), &jxl).unwrap();
-                std::fs::write(format!("{stem}.raw"), &bytes).unwrap();
+            for flat in [false, true] {
+                let (descriptor, bytes) = image(width, height, format, flat);
+                let jxl = encode(&descriptor, &bytes);
+                assert_eq!(jxl[..2], [0xFF, 0x0A]);
+                if let Some(dir) = &dir {
+                    let kind = if flat { "flat" } else { "noise" };
+                    let stem = format!("{dir}/{width}x{height}{kind}_{format}");
+                    std::fs::write(format!("{stem}.jxl"), &jxl).unwrap();
+                    std::fs::write(format!("{stem}.raw"), &bytes).unwrap();
+                }
             }
         }
     }

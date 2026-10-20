@@ -11,7 +11,7 @@ use otf_pixels_core::{
 };
 
 use crate::bits::BitWriter;
-use crate::entropy::{EntropyCode, HybridUint, Token};
+use crate::entropy::{EntropyCode, HybridUint, Token, with_runs};
 use crate::headers::{ImageInfo, write_image_header, write_modular_frame_header, write_toc};
 use crate::modular::{Channel, Tree, forward_ycocg, residuals, write_header};
 
@@ -129,7 +129,8 @@ fn encode(descriptor: &ImageDescriptor, pixels: &[u8]) -> Result<Vec<u8>> {
                 let ctx = tree.leaf_of.get(c).copied().unwrap_or(0);
                 residuals(channel, region, ctx, &mut tokens);
             }
-            group_tokens.push(tokens);
+            // Runs of exact predictions (residual 0) become copies.
+            group_tokens.push(with_runs(&tokens, 0));
         }
     }
     let all: Vec<Token> = group_tokens.iter().flatten().copied().collect();

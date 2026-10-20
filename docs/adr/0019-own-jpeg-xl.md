@@ -16,8 +16,9 @@ against libjxl's `djxl` (`scripts/check-jxl-interop.sh`):
 
 1. Lossless Modular: grey or RGB (through the YCoCg RCT), alpha, 8 or 16
    bits; the clamped gradient predictor; a tree with one context per
-   channel; prefix codes fitted to each context; 256x256 groups behind a
-   table of contents. A bare codestream, no container.
+   channel; prefix codes fitted to each context; runs of exact
+   predictions as LZ77 copies; 256x256 groups behind a table of contents.
+   A bare codestream, no container.
 2. Compression: trees over neighbourhood properties, the weighted
    predictor, ANS, LZ77, more contexts.
 3. Lossy VarDCT in XYB, the mode most images will be served in.
@@ -29,6 +30,7 @@ The field definitions were read from libjxl (BSD-3-Clause) and jxl-oxide
 ## Consequences
 + `Format::Jxl` output with no new dependency; files decode bit-exactly in
   libjxl at every phase.
-- Until phase 2, lossless files are larger than PNG and `cjxl -e1`
-  (a 960x600 photo: 384 KB against 327 KB and 332 KB).
+- Until phase 2, lossless files are well short of libjxl's slower efforts
+  (a 960x600 photo: 306 KB, against PNG's 327 KB, `cjxl -e1`'s 332 KB and
+  `-e7`'s 218 KB).
 - Until phase 4, `.jxl` input is not recognised.
