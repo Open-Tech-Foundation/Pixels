@@ -14,6 +14,13 @@ use crate::bits::BitWriter;
 use crate::entropy::{EntropyCode, HybridUint, Token, with_runs};
 use crate::headers::{ImageInfo, write_image_header, write_modular_frame_header, write_toc};
 use crate::modular::{Channel, Tree, forward_ycocg, residuals, write_header};
+use crate::predict::{Predictor, Region};
+
+/// libjxl's cutoffs for the weighted predictor's error (`kWPFixedDC`).
+const WP_CUTOFFS: [i32; 33] = [
+    -500, -392, -255, -191, -127, -95, -63, -47, -31, -23, -15, -11, -7, -4, -3, -1, 0, 1, 3, 5, 7,
+    11, 15, 23, 31, 47, 63, 95, 127, 191, 255, 392, 500,
+];
 
 /// The side of a group, the unit a large image is split into.
 const GROUP: usize = 256;
@@ -111,8 +118,18 @@ fn encode(descriptor: &ImageDescriptor, pixels: &[u8]) -> Result<Vec<u8>> {
         forward_ycocg(&mut channels);
     }
     let (width, height) = (info.width as usize, info.height as usize);
-    let tree = Tree::per_channel(channels.len());
-    let tree_code = EntropyCode::build(6, &tree.tokens, HybridUint::BUCKETS);
+    // libjxl's `-e3` tree: the weighted predictor everywhere, contexts by
+    // its error estimate (property 15).
+    let pixels_total = width * height * channels.len();
+    let tree = Tree::fixed(
+        15,
+        &WP_CUTOFFS,
+        Predictor::Weighted,
+        pixels_total,
+        info.bit_depth,
+    );
+    let tree_tokens = tree.tokens();
+    let tree_code = EntropyCode::build(6, &tree_tokens, HybridUint::BUCKETS);
 
     // Every group's residuals, in raster order of groups; a single group is
     // the whole image, coded in the global section.
@@ -126,8 +143,14 @@ fn encode(descriptor: &ImageDescriptor, pixels: &[u8]) -> Result<Vec<u8>> {
             let region = (x0, y0, GROUP.min(width - x0), GROUP.min(height - y0));
             let mut tokens = Vec::with_capacity(region.2 * region.3 * channels.len());
             for (c, channel) in channels.iter().enumerate() {
-                let ctx = tree.leaf_of.get(c).copied().unwrap_or(0);
-                residuals(channel, region, ctx, &mut tokens);
+                let region = Region {
+                    channel,
+                    x0: region.0,
+                    y0: region.1,
+                    width: region.2,
+                    height: region.3,
+                };
+                residuals(&region, c as u32, &tree, &mut tokens);
             }
             // Runs of exact predictions (residual 0) become copies.
             group_tokens.push(with_runs(&tokens, 0));
@@ -142,7 +165,7 @@ fn encode(descriptor: &ImageDescriptor, pixels: &[u8]) -> Result<Vec<u8>> {
     global.bool(true); // default LF dequantization
     global.bool(true); // a global tree follows
     tree_code.write_header(&mut global);
-    for &token in &tree.tokens {
+    for &token in &tree_tokens {
         tree_code.write(&mut global, token);
     }
     code.write_header(&mut global);

@@ -30,7 +30,7 @@ The field definitions were read from libjxl (BSD-3-Clause) and jxl-oxide
 ## Consequences
 + `Format::Jxl` output with no new dependency; files decode bit-exactly in
   libjxl at every phase.
-- Until phase 2, lossless files are well short of libjxl's slower efforts
-  (a 960x600 photo: 306 KB, against PNG's 327 KB, `cjxl -e1`'s 332 KB and
+- Until phase 2 ends, lossless files are short of libjxl's slower efforts
+  (a 960x600 photo: 266 KB, against PNG's 327 KB, `cjxl -e3`'s 245 KB and
   `-e7`'s 218 KB).
 - Until phase 4, `.jxl` input is not recognised.

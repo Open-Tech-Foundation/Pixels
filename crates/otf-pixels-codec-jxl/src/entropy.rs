@@ -6,9 +6,9 @@
 //! all of that; then the tokens follow, interleaved with nothing.
 //!
 //! This writes the prefix-code variant (Brotli's code format), which every
-//! decoder must accept alongside ANS. Contexts are not clustered: each is
-//! its own cluster, so a stream may use at most seven, plus LZ77's distance
-//! context, the most the simple context map can name.
+//! decoder must accept alongside ANS. Contexts whose statistics are alike
+//! share a cluster, and so a code: merging two saves a code's header and
+//! costs a little precision, and pairs are merged while that pays.
 //!
 //! LZ77 is used for one thing, runs: a copy of the previous value, which
 //! for Modular residuals codes a run of exact predictions, as libjxl's fast
@@ -424,10 +424,83 @@ pub fn with_runs(tokens: &[Token], run_value: u32) -> Vec<Token> {
     out
 }
 
-/// A whole entropy-coded stream's codes: one per context.
+/// The estimated cost in bits of coding `freq` with its own code: its
+/// entropy, and about a byte per symbol of header.
+fn cost(freq: &[u64]) -> f64 {
+    let total: u64 = freq.iter().sum();
+    if total == 0 {
+        return 0.0;
+    }
+    let mut bits = 16.0;
+    for &f in freq.iter().filter(|&&f| f > 0) {
+        bits += f as f64 * (total as f64 / f as f64).log2() + 8.0;
+    }
+    bits
+}
+
+/// `a` and `b` summed.
+fn merged(a: &[u64], b: &[u64]) -> Vec<u64> {
+    let (long, short) = if a.len() >= b.len() { (a, b) } else { (b, a) };
+    let mut out = long.to_vec();
+    for (o, &x) in out.iter_mut().zip(short) {
+        *o += x;
+    }
+    out
+}
+
+/// Group contexts into clusters, greedily merging the pair whose merge
+/// costs least, while merging does not cost more than it saves. Returns
+/// each context's cluster, numbered by first use, and the clusters'
+/// symbol counts.
+fn cluster(freq: Vec<Vec<u64>>) -> (Vec<u32>, Vec<Vec<u64>>) {
+    let mut members: Vec<Vec<usize>> = (0..freq.len()).map(|i| vec![i]).collect();
+    let mut hist = freq;
+    let mut costs: Vec<f64> = hist.iter().map(|h| cost(h)).collect();
+    while hist.len() > 1 {
+        let mut best = (f64::MIN, 0, 0);
+        for i in 0..hist.len() {
+            for j in i + 1..hist.len() {
+                let gain = costs[i] + costs[j] - cost(&merged(&hist[i], &hist[j]));
+                if gain > best.0 {
+                    best = (gain, i, j);
+                }
+            }
+        }
+        let (gain, i, j) = best;
+        // Past 256 clusters the context map cannot name them, so merging
+        // continues regardless.
+        if gain < 0.0 && hist.len() <= 256 {
+            break;
+        }
+        let h = merged(&hist[i], &hist[j]);
+        costs[i] = cost(&h);
+        hist[i] = h;
+        let moved = members.swap_remove(j);
+        members[i].extend(moved);
+        hist.swap_remove(j);
+        costs.swap_remove(j);
+    }
+    // Number clusters by their first context, so the ids have no holes.
+    let contexts = members.iter().map(Vec::len).sum();
+    let mut order: Vec<usize> = (0..members.len()).collect();
+    order.sort_by_key(|&k| members[k].iter().min().copied().unwrap_or(0));
+    let mut cluster_of = vec![0_u32; contexts];
+    let mut out = Vec::with_capacity(order.len());
+    for (id, &k) in order.iter().enumerate() {
+        for &ctx in &members[k] {
+            cluster_of[ctx] = id as u32;
+        }
+        out.push(std::mem::take(&mut hist[k]));
+    }
+    (cluster_of, out)
+}
+
+/// A whole entropy-coded stream's codes: one per cluster of contexts.
 #[derive(Debug, Clone)]
 pub struct EntropyCode {
     config: HybridUint,
+    /// Each context's cluster; the last is LZ77's distance context, if any.
+    cluster_of: Vec<u32>,
     codes: Vec<PrefixCode>,
     /// Whether copies are coded, with a distance code after the contexts'.
     lz77: bool,
@@ -451,6 +524,7 @@ impl EntropyCode {
         let lz77 = tokens.iter().any(|t| t.copy);
         let mut this = Self {
             config,
+            cluster_of: Vec::new(),
             codes: Vec::new(),
             lz77,
         };
@@ -468,7 +542,9 @@ impl EntropyCode {
                 count(num_ctx, this.config.encode(1).0);
             }
         }
-        this.codes = freq.iter().map(|f| PrefixCode::new(f)).collect();
+        let (cluster_of, clusters) = cluster(freq);
+        this.cluster_of = cluster_of;
+        this.codes = clusters.iter().map(|f| PrefixCode::new(f)).collect();
         this
     }
 
@@ -485,14 +561,27 @@ impl EntropyCode {
             w.u32(LZ77_MIN_LENGTH, [val(3), val(4), bits(5, 2), bits(9, 8)]);
             LZ77_LENGTH.write(w, 8);
         }
-        let num_ctx = self.codes.len();
-        if num_ctx > 1 {
-            // A simple map, each context its own cluster.
-            let bits = (32 - ((num_ctx - 1) as u32).leading_zeros()).min(3);
-            w.bool(true);
-            w.write(2, u64::from(bits));
-            for ctx in 0..num_ctx {
-                w.write(bits, ctx as u64);
+        if self.cluster_of.len() > 1 {
+            let clusters = self.codes.len() as u32;
+            let bits = 32 - (clusters - 1).leading_zeros();
+            if bits <= 3 {
+                // A simple map: each context's cluster in `bits` bits.
+                w.bool(true);
+                w.write(2, u64::from(bits));
+                for &c in &self.cluster_of {
+                    w.write(bits, u64::from(c));
+                }
+            } else {
+                // An entropy-coded map, without move-to-front.
+                w.bool(false);
+                w.bool(false);
+                let tokens: Vec<Token> =
+                    self.cluster_of.iter().map(|&c| Token::new(0, c)).collect();
+                let map = Self::build(1, &tokens, HybridUint::DEFAULT);
+                map.write_header(w);
+                for &token in &tokens {
+                    map.write(w, token);
+                }
             }
         }
         w.bool(true); // prefix codes
@@ -509,14 +598,21 @@ impl EntropyCode {
 
     /// Write one token.
     pub fn write(&self, w: &mut BitWriter, token: Token) {
+        let code_of = |ctx: usize| {
+            self.cluster_of
+                .get(ctx)
+                .and_then(|&c| self.codes.get(c as usize))
+        };
         let (symbol, count, bits) = self.symbol(token);
-        self.codes[token.ctx as usize].emit(w, symbol);
+        if let Some(code) = code_of(token.ctx as usize) {
+            code.emit(w, symbol);
+        }
         w.write(count, u64::from(bits));
         if token.copy {
             // Distance 1, the previous value: with Modular's distance
             // multiplier, value 1 is the special distance (1, 0).
             let (symbol, count, bits) = self.config.encode(1);
-            if let Some(code) = self.codes.last() {
+            if let Some(code) = code_of(self.cluster_of.len() - 1) {
                 code.emit(w, symbol);
             }
             w.write(count, u64::from(bits));
@@ -634,5 +730,57 @@ mod length_tests {
             lengths.push(5);
             assert_eq!(expand(&length_items(&lengths)), lengths, "run {run}");
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "tests operate on known-good values"
+)]
+mod cluster_tests {
+    use super::*;
+
+    #[test]
+    fn alike_contexts_share_a_cluster_and_unlike_ones_do_not() {
+        let peaked_low = vec![1000, 10, 1];
+        let peaked_high = vec![1, 10, 1000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 500];
+        let freq = vec![
+            peaked_low.clone(),
+            peaked_high.clone(),
+            peaked_low.clone(),
+            Vec::new(),
+            peaked_high,
+        ];
+        let (cluster_of, clusters) = cluster(freq);
+        assert_eq!(clusters.len(), 2, "{cluster_of:?}");
+        assert_eq!(cluster_of[0], 0, "clusters are numbered by first context");
+        assert_eq!(cluster_of[0], cluster_of[2]);
+        assert_eq!(cluster_of[1], cluster_of[4]);
+        assert_ne!(cluster_of[0], cluster_of[1]);
+        // An unused context costs nothing wherever it goes.
+        assert!(cluster_of[3] <= 1);
+    }
+
+    #[test]
+    fn many_distinct_contexts_still_get_dense_ids() {
+        let freq: Vec<Vec<u64>> = (0..40)
+            .map(|i| {
+                let mut h = vec![1; 60];
+                h[i] = 100_000;
+                h
+            })
+            .collect();
+        let (cluster_of, clusters) = cluster(freq);
+        let mut ids = cluster_of.clone();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids, (0..clusters.len() as u32).collect::<Vec<_>>());
+        assert!(
+            clusters.len() > 8,
+            "distinct peaks stay apart: {}",
+            clusters.len()
+        );
     }
 }

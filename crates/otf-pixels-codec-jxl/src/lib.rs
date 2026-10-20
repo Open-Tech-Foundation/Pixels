@@ -22,5 +22,6 @@ mod encoder;
 mod entropy;
 mod headers;
 mod modular;
+mod predict;
 
 pub use encoder::JxlEncoder;

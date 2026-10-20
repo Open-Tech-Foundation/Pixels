@@ -46,12 +46,13 @@ versioning: [SemVer](https://semver.org/).
   `otf-pixels-codec-jxl` crate (feature `jxl`, on by default), written from
   scratch. This first phase writes Modular images: grey or RGB through the
   YCoCg transform, alpha, 8 or 16 bits (float is narrowed to 16), the
-  clamped gradient predictor, one context per channel, prefix codes fitted
-  to each, runs of exact predictions as LZ77 copies, and 256x256 groups for
-  larger images. libjxl's `djxl` decodes every file to exactly the input
-  samples (`scripts/check-jxl-interop.sh`). A 960x600 photo is 306 KB,
-  against PNG's 327 KB and `cjxl -e1`'s 332 KB (`-e7`: 218 KB); context
-  trees, the weighted predictor and ANS come next, then lossy VarDCT and
+  self-correcting (weighted) predictor with libjxl's `-e3` context tree on
+  its error estimate, contexts clustered by their statistics, prefix codes
+  for each cluster, runs of exact predictions as LZ77 copies, and 256x256
+  groups for larger images. libjxl's `djxl` decodes every file to exactly
+  the input samples (`scripts/check-jxl-interop.sh`). A 960x600 photo is
+  266 KB, against PNG's 327 KB, `cjxl -e1`'s 332 KB and `-e3`'s 245 KB
+  (`-e7`: 218 KB); ANS and learned trees come next, then lossy VarDCT and
   decoding.
   `Format::Jxl` is a new variant of the non-exhaustive `Format`.
 - Progressive JPEG output, sharp's `progressive`.
