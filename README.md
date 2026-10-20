@@ -124,7 +124,7 @@ The format is identified from the file's first bytes, never from its name.
 | Colour | `modulate`, `greyscale`, `tint`, `negate`, `gamma`, `linear`, `recomb`, `threshold`, `to_srgb`, `to_pixel_format`, `flatten` |
 | Channels | `extract_channel`, `extract_channel_named`, `ensure_alpha`, `remove_alpha` |
 | Filters | `blur`, `sharpen`, `convolve` |
-| Compositing | `composite`, `composite_with` |
+| Compositing (gravity, tiling, sharp's 25 blend modes) | `composite_overlays`, `composite`, `composite_with` |
 | Output | `output(format, options)` then `bytes()` or `write(sink)` |
 
 Chaining never fails: an error is carried to `bytes()` or `write()` and

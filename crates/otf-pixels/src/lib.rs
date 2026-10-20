@@ -134,8 +134,8 @@ pub use otf_pixels_core::{
 pub use otf_pixels_ops::{
     Blend, Composite, Conversion, ConvertFormat, Convolve, Crop, EnsureAlpha, Extend, ExtendWith,
     ExtractChannel, Filter, Fit, Flatten, Flip, Flop, Gamma, Greyscale, Kernel, Linear, Modulate,
-    Negate, Position, Quarter, Recomb, Resize, ResizeOptions, Rotate, Threshold, Tint, ToSrgb,
-    Trim, Unconvertible,
+    Negate, Placement, Position, Quarter, Recomb, Resize, ResizeOptions, Rotate, Threshold, Tint,
+    ToSrgb, Trim, Unconvertible,
 };
 
 #[cfg(feature = "raw")]
@@ -895,6 +895,27 @@ impl Image {
     /// Draw `overlay` over this image with an explicit blend mode.
     #[must_use]
     pub fn composite_with(self, overlay: Self, x: i64, y: i64, blend: Blend) -> Self {
+        self.composite_by(overlay, Composite::at(x, y, blend))
+    }
+
+    /// Draw each of `overlays` in turn, the first lowest (sharp's
+    /// `composite([...])`). Each has its own placement and blend; see
+    /// [`Overlay`]. With none, the image is unchanged.
+    ///
+    /// The overlays may differ from this image in format: an RGBA watermark
+    /// over an RGB photo stays RGB under [`Blend::Over`], a grey image under
+    /// a colour overlay becomes colour, and a blend that can make the image
+    /// translucent ([`Blend::Clear`], [`Blend::DestOut`], ...) adds alpha.
+    #[must_use]
+    pub fn composite_overlays(self, overlays: impl IntoIterator<Item = Overlay>) -> Self {
+        overlays.into_iter().fold(self, |image, overlay| {
+            let op = Composite::new(overlay.placement(), overlay.blend);
+            image.composite_by(overlay.image, op)
+        })
+    }
+
+    /// Join `overlay` onto this image through `op`.
+    fn composite_by(self, overlay: Self, op: Composite) -> Self {
         // The base's profile describes the result; the overlay's pixels are
         // composited as they are.
         let (icc, animation, pages, trim_offset) =
@@ -904,7 +925,7 @@ impl Image {
             // The first error wins, matching how a single chain behaves.
             (Err(error), _) | (Ok(_), Err(error)) => return Self::failed_shared(error),
         };
-        let op: Arc<dyn Op> = Arc::new(Composite::at(x, y, blend));
+        let op: Arc<dyn Op> = Arc::new(op);
         Self {
             inner: otf_pixels_core::Image::combine(&[base, over], op).map_err(Arc::new),
             icc,
@@ -1101,6 +1122,72 @@ fn rebuild(error: &Arc<PixelsError>) -> PixelsError {
         },
         // A code added in a later version still round-trips as an error.
         _ => PixelsError::graph(detail),
+    }
+}
+
+/// One image for [`Image::composite_overlays`], with sharp's per-image
+/// options: `blend`, `gravity`, `left`/`top` and `tile`.
+#[derive(Debug, Clone)]
+pub struct Overlay {
+    image: Image,
+    blend: Blend,
+    gravity: Position,
+    offset: Option<(i64, i64)>,
+    tile: bool,
+}
+
+impl Overlay {
+    /// Draw `image` centred, with source-over: sharp's defaults.
+    #[must_use]
+    pub const fn new(image: Image) -> Self {
+        Self {
+            image,
+            blend: Blend::Over,
+            gravity: Position::Centre,
+            offset: None,
+            tile: false,
+        }
+    }
+
+    /// Combine it with the image below by `blend`.
+    #[must_use]
+    pub const fn with_blend(mut self, blend: Blend) -> Self {
+        self.blend = blend;
+        self
+    }
+
+    /// Place it against an edge, a corner or the middle (sharp's `gravity`).
+    /// An offset given with [`Overlay::at`] takes precedence, as in sharp.
+    #[must_use]
+    pub const fn with_gravity(mut self, gravity: Position) -> Self {
+        self.gravity = gravity;
+        self
+    }
+
+    /// Place its top-left corner at `(x, y)` (sharp's `left` and `top`).
+    /// Negative offsets and overhangs are clipped.
+    #[must_use]
+    pub const fn at(mut self, x: i64, y: i64) -> Self {
+        self.offset = Some((x, y));
+        self
+    }
+
+    /// Repeat it across the whole image (sharp's `tile`), aligned by the
+    /// gravity, or starting from the offset if one is given.
+    #[must_use]
+    pub const fn tiled(mut self, tile: bool) -> Self {
+        self.tile = tile;
+        self
+    }
+
+    /// The op-level placement these options describe.
+    const fn placement(&self) -> Placement {
+        match (self.tile, self.offset) {
+            (false, Some((x, y))) => Placement::At(x, y),
+            (false, None) => Placement::Gravity(self.gravity),
+            (true, Some((x, y))) => Placement::TiledFrom(x, y),
+            (true, None) => Placement::Tiled(self.gravity),
+        }
     }
 }
 

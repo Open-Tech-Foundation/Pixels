@@ -96,7 +96,7 @@ any allocation.
 | `gamma(g, gOut)` | `gamma(1.0 / g)` before the resize, `gamma(gOut)` after it; `gamma(e)` is libvips' `value^(1/e)` |
 | `linear(a, b)`, `recomb(matrix)` | `linear(a, b)` or `linear_per_channel([..], [..])` (`b` in 8-bit units); `recomb` (3x3) or `recomb_rgba` (4x4) |
 | `ensureAlpha(level)`, `removeAlpha()` | `ensure_alpha(level)`, `remove_alpha()` |
-| `composite` | `composite`, `composite_with` |
+| `composite([{ input, blend, gravity, left, top, tile }, ..])` | `composite_overlays([Overlay::new(image).with_blend(Blend::..).with_gravity(Position::..).at(left, top).tiled(..), ..])`; every sharp blend mode is a `Blend` (`colour-dodge` is `ColourDodge`, `dest-over` is `DestOver`); an overlay larger than the base is clipped where sharp refuses it; `premultiplied` is not supported |
 | `flatten`, `extractChannel`, `toColourspace('b-w')` | `flatten`, `extract_channel(index)` or `extract_channel_named(Channel::Red)`, `to_pixel_format(PixelFormat::Gray8)` |
 | `jpeg/png/webp/avif/gif/tiff({ quality, lossless })` | `output(Format::.., EncodeOptions::with_quality(q)?.with_lossless(..))` |
 | `keepIccProfile` | open with `to_srgb` off; the profile is written to the output |

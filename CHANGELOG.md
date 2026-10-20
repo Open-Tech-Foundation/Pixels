@@ -9,6 +9,10 @@ versioning: [SemVer](https://semver.org/).
 ## [0.3.0] - 2026-10-13
 
 ### Changed
+- `Composite` no longer derives `Copy`, `PartialEq`, `Eq` and `Hash`, and
+  `Composite::offset` is replaced by `Composite::placement`: gravity and
+  tiling are resolved against the inputs' sizes, which an instance binds
+  when it is chained, as `Resize` does.
 - JPEG decoding is faster: a full 12 MP decode went from 149 ms to 71 ms.
   The inverse DCT now short-cuts blocks with no AC terms, and rows left
   with none after the column pass, through the same arithmetic, so output
@@ -38,6 +42,20 @@ versioning: [SemVer](https://semver.org/).
   5–7%.
 
 ### Added
+- sharp's `composite` for watermarking. `composite_overlays([Overlay, ..])`
+  draws several overlays in order, each with sharp's options:
+  `with_gravity` (centred by default, as in sharp), `at(left, top)`,
+  `tiled(true)` (aligned by the gravity or started from the offset, as sharp
+  aligns its tiles) and `with_blend`. `Blend` now has sharp's 25 modes: the
+  Porter-Duff set (`Clear`, `Source`, `In`, `Out`, `Atop`, `Dest`, the
+  `Dest*` modes, `Xor`), `Add`, `Saturate`, and the PDF modes (`Multiply`,
+  `Screen`, `Overlay`, `Darken`, `Lighten`, `ColourDodge`, `ColourBurn`,
+  `HardLight`, `SoftLight`, `Difference`, `Exclusion`), with Cairo's
+  formulas as libvips uses them. A mode acts only under its overlay. The
+  base and overlay no longer need the same format, and need not be 8-bit:
+  an RGBA PNG over an RGB photo stays RGB, a grey base under a colour
+  overlay becomes colour, and a mode that can erase (`Clear`, `DestOut`,
+  ...) adds alpha. At the op level this is `Composite::new(Placement, Blend)`.
 - sharp's `extend` and `trim`. `extend(Extend::new(top, right, bottom,
   left))` grows the canvas, filling the margin with a colour (the default,
   opaque black) or, with `extend_with`, by copying the edge, repeating the

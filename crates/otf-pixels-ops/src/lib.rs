@@ -66,7 +66,7 @@ mod rotate;
 mod trim;
 
 pub use adjust::{EnsureAlpha, Gamma, Greyscale, Linear, Negate, Recomb, Threshold, Tint};
-pub use composite::{Blend, Composite};
+pub use composite::{Blend, Composite, Placement};
 pub use convert::ConvertFormat;
 pub use convolve::{Convolve, Kernel};
 pub use extend::{Extend, ExtendWith};
