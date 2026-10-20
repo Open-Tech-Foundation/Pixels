@@ -6,40 +6,11 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-10-13
-
 ### Changed
 - `Composite` no longer derives `Copy`, `PartialEq`, `Eq` and `Hash`, and
   `Composite::offset` is replaced by `Composite::placement`: gravity and
   tiling are resolved against the inputs' sizes, which an instance binds
   when it is chained, as `Resize` does.
-- JPEG decoding is faster: a full 12 MP decode went from 149 ms to 71 ms.
-  The inverse DCT now short-cuts blocks with no AC terms, and rows left
-  with none after the column pass, through the same arithmetic, so output
-  is unchanged.
-  Chroma is expanded to output width once per row with a fixed two-byte copy
-  (a `fill` per pixel pair had been a `memset` call each), and YCbCr to RGB
-  uses 16-bit multipliers that the baseline x86-64 target can vectorize,
-  with results identical to before for all 16.7 million inputs.
-- Progressive JPEG is decoded by `otf-pixels-codec-jpeg` itself instead of
-  the wrapped `jpeg-decoder` (ADR-0018), so the published crates now have no
-  dependencies outside this workspace. Opening a progressive file reads only
-  its headers (metadata for a 12 MP photo: 120 ms to 0.1 ms), and
-  progressive files now decode at 1/2, 1/4 and 1/8 scale, so thumbnails
-  shrink on load (12 MP to 400 px: 160 ms to 102 ms). A full-size
-  progressive decode is slower than before (220 ms against 132 ms), which
-  the coming JPEG speed work addresses. The `jpeg-progressive` feature, and
-  the codec's `progressive` feature, are now deprecated aliases that do
-  nothing extra.
-- The worker pool no longer depends on `crossbeam-deque` (or
-  `crossbeam-epoch` and `crossbeam-utils`); `otf-pixels-core` now has no
-  dependencies at all (ADR-0017, superseding ADR-0008). Every task already
-  came from the caller one scheduler wave at a time, so per-worker deques and
-  stealing had nothing to balance: the pool is now one shared FIFO queue,
-  filled a wave at a time, with idle workers sleeping until signalled
-  instead of polling every millisecond. Against crossbeam, a tiled blur is
-  17% faster, resize level, and strip and 40-job concurrent pipelines within
-  5–7%.
 
 ### Added
 - Lossy JPEG XL (VarDCT), now the default for `Format::Jxl`: XYB colour,
@@ -144,6 +115,38 @@ versioning: [SemVer](https://semver.org/).
   separate search of the alpha channel; `Image::trim_offset` says where the
   cut was. Because the box depends on pixel values, `trim` runs the
   pipeline before it when called and holds the result in memory.
+## [0.3.0] - 2026-10-13
+
+### Changed
+- JPEG decoding is faster: a full 12 MP decode went from 149 ms to 71 ms.
+  The inverse DCT now short-cuts blocks with no AC terms, and rows left
+  with none after the column pass, through the same arithmetic, so output
+  is unchanged.
+  Chroma is expanded to output width once per row with a fixed two-byte copy
+  (a `fill` per pixel pair had been a `memset` call each), and YCbCr to RGB
+  uses 16-bit multipliers that the baseline x86-64 target can vectorize,
+  with results identical to before for all 16.7 million inputs.
+- Progressive JPEG is decoded by `otf-pixels-codec-jpeg` itself instead of
+  the wrapped `jpeg-decoder` (ADR-0018), so the published crates now have no
+  dependencies outside this workspace. Opening a progressive file reads only
+  its headers (metadata for a 12 MP photo: 120 ms to 0.1 ms), and
+  progressive files now decode at 1/2, 1/4 and 1/8 scale, so thumbnails
+  shrink on load (12 MP to 400 px: 160 ms to 102 ms). A full-size
+  progressive decode is slower than before (220 ms against 132 ms), which
+  the coming JPEG speed work addresses. The `jpeg-progressive` feature, and
+  the codec's `progressive` feature, are now deprecated aliases that do
+  nothing extra.
+- The worker pool no longer depends on `crossbeam-deque` (or
+  `crossbeam-epoch` and `crossbeam-utils`); `otf-pixels-core` now has no
+  dependencies at all (ADR-0017, superseding ADR-0008). Every task already
+  came from the caller one scheduler wave at a time, so per-worker deques and
+  stealing had nothing to balance: the pool is now one shared FIFO queue,
+  filled a wave at a time, with idle workers sleeping until signalled
+  instead of polling every millisecond. Against crossbeam, a tiled blur is
+  17% faster, resize level, and strip and 40-job concurrent pipelines within
+  5–7%.
+
+### Added
 - sharp's per-pixel adjustments: `negate`, `gamma`, `linear` (and
   `linear_per_channel`), `threshold`, `tint`, `greyscale`, `recomb` (3x3 and
   4x4), `ensure_alpha`, `remove_alpha`, `extract_channel_named` (by
