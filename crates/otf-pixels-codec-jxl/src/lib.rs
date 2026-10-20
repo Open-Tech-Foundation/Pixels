@@ -7,9 +7,10 @@
 //!
 //! # Scope
 //!
-//! Encoding only, so far: [`JxlEncoder`] writes lossless Modular images,
-//! grey or RGB, with or without alpha, at 8 or 16 bits, as a bare
-//! codestream. VarDCT and decoding are to follow.
+//! Encoding only, so far: [`JxlEncoder`] writes lossy VarDCT images (DCT8
+//! blocks in XYB) or lossless Modular ones, grey or RGB, at 8 or 16 bits,
+//! as a bare codestream; images with alpha are lossless for now. Decoding
+//! is to follow.
 //!
 //! # Memory
 //!
@@ -23,5 +24,6 @@ mod entropy;
 mod headers;
 mod modular;
 mod predict;
+mod vardct;
 
 pub use encoder::JxlEncoder;

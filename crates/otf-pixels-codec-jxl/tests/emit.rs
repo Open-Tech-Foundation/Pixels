@@ -41,7 +41,7 @@ fn image(width: u32, height: u32, format: PixelFormat, flat: bool) -> (ImageDesc
 
 /// Encode a raw image.
 fn encode(descriptor: &ImageDescriptor, bytes: &[u8]) -> Vec<u8> {
-    let mut encoder = JxlEncoder::new();
+    let mut encoder = JxlEncoder::lossless();
     let mut out = Vec::new();
     encoder.write_header(descriptor, &mut out).unwrap();
     for row in bytes.chunks_exact(descriptor.row_bytes()) {
@@ -74,6 +74,67 @@ fn emit_samples() {
                     std::fs::write(format!("{stem}.jxl"), &jxl).unwrap();
                     std::fs::write(format!("{stem}.raw"), &bytes).unwrap();
                 }
+            }
+        }
+    }
+}
+
+/// Lossy files: `<name>_lossy.jxl` with the 8-bit RGB source as `.rgb`, for
+/// the interop script to decode and hold to a PSNR floor.
+#[test]
+fn emit_lossy_samples() {
+    let dir = std::env::var("OTF_EMIT_DIR").ok();
+    for (width, height) in [
+        (1, 1),
+        (17, 9),
+        (256, 256),
+        (300, 40),
+        (513, 300),
+        (2100, 24),
+    ] {
+        for format in [PixelFormat::Rgb8, PixelFormat::Gray8, PixelFormat::Rgb16] {
+            let descriptor = ImageDescriptor::new(width, height, format).unwrap();
+            // A smooth scene with edges: what VarDCT is for.
+            let channels = format.channels() as u32;
+            let wide = format.bytes_per_pixel() / format.channels() == 2;
+            let mut bytes = Vec::new();
+            let mut rgb = Vec::new();
+            for y in 0..height {
+                for x in 0..width {
+                    let disc = ((x as i32 - 150).pow(2) + (y as i32 - 100).pow(2)) < 60 * 60;
+                    let base = [
+                        (x * 255 / width.max(1)) as u8,
+                        (y * 255 / height.max(1)) as u8,
+                        if disc { 230 } else { 40 },
+                    ];
+                    let px: Vec<u8> = if channels == 1 {
+                        vec![base[0] / 2 + base[1] / 2]
+                    } else {
+                        base.to_vec()
+                    };
+                    for &v in &px {
+                        if wide {
+                            bytes.extend_from_slice(&(u16::from(v) * 257).to_ne_bytes());
+                        } else {
+                            bytes.push(v);
+                        }
+                    }
+                    let grey = px[0];
+                    rgb.extend(if channels == 1 { [grey; 3] } else { base });
+                }
+            }
+            let mut encoder = JxlEncoder::with_distance(1.0);
+            let mut jxl = Vec::new();
+            encoder.write_header(&descriptor, &mut jxl).unwrap();
+            for row in bytes.chunks_exact(descriptor.row_bytes()) {
+                encoder.write_row(row, &mut jxl).unwrap();
+            }
+            encoder.finish(&mut jxl).unwrap();
+            assert_eq!(jxl[..2], [0xFF, 0x0A]);
+            if let Some(dir) = &dir {
+                let stem = format!("{dir}/{width}x{height}_{format}_lossy");
+                std::fs::write(format!("{stem}.jxl"), &jxl).unwrap();
+                std::fs::write(format!("{stem}.rgb"), &rgb).unwrap();
             }
         }
     }

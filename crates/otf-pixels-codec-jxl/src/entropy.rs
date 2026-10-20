@@ -451,46 +451,67 @@ fn merged(a: &[u64], b: &[u64]) -> Vec<u64> {
 /// Group contexts into clusters, greedily merging the pair whose merge
 /// costs least, while merging does not cost more than it saves. Returns
 /// each context's cluster, numbered by first use, and the clusters'
-/// symbol counts.
+/// symbol counts. Unused contexts join cluster 0: they are never read.
 fn cluster(freq: Vec<Vec<u64>>) -> (Vec<u32>, Vec<Vec<u64>>) {
-    let mut members: Vec<Vec<usize>> = (0..freq.len()).map(|i| vec![i]).collect();
-    let mut hist = freq;
+    let contexts = freq.len();
+    let used: Vec<usize> = (0..contexts)
+        .filter(|&i| freq[i].iter().any(|&f| f > 0))
+        .collect();
+    if used.is_empty() {
+        return (vec![0; contexts], vec![Vec::new()]);
+    }
+    let mut members: Vec<Vec<usize>> = used.iter().map(|&i| vec![i]).collect();
+    let mut hist: Vec<Vec<u64>> = used.iter().map(|&i| freq[i].clone()).collect();
     let mut costs: Vec<f64> = hist.iter().map(|h| cost(h)).collect();
-    while hist.len() > 1 {
+    let k = hist.len();
+    let mut alive = vec![true; k];
+    let gain = |hist: &[Vec<u64>], costs: &[f64], i: usize, j: usize| {
+        costs[i] + costs[j] - cost(&merged(&hist[i], &hist[j]))
+    };
+    // The gain of merging each pair, kept up to date as clusters merge.
+    let mut gains = vec![vec![f64::MIN; k]; k];
+    for (i, row) in gains.iter_mut().enumerate() {
+        for (j, slot) in row.iter_mut().enumerate().skip(i + 1) {
+            *slot = gain(&hist, &costs, i, j);
+        }
+    }
+    let mut remaining = k;
+    while remaining > 1 {
         let mut best = (f64::MIN, 0, 0);
-        for i in 0..hist.len() {
-            for j in i + 1..hist.len() {
-                let gain = costs[i] + costs[j] - cost(&merged(&hist[i], &hist[j]));
-                if gain > best.0 {
-                    best = (gain, i, j);
+        for i in (0..k).filter(|&i| alive[i]) {
+            for j in (i + 1..k).filter(|&j| alive[j]) {
+                if gains[i][j] > best.0 {
+                    best = (gains[i][j], i, j);
                 }
             }
         }
-        let (gain, i, j) = best;
+        let (g, i, j) = best;
         // Past 256 clusters the context map cannot name them, so merging
         // continues regardless.
-        if gain < 0.0 && hist.len() <= 256 {
+        if g < 0.0 && remaining <= 256 {
             break;
         }
-        let h = merged(&hist[i], &hist[j]);
-        costs[i] = cost(&h);
-        hist[i] = h;
-        let moved = members.swap_remove(j);
+        hist[i] = merged(&hist[i], &hist[j]);
+        costs[i] = cost(&hist[i]);
+        let moved = std::mem::take(&mut members[j]);
         members[i].extend(moved);
-        hist.swap_remove(j);
-        costs.swap_remove(j);
+        alive[j] = false;
+        remaining -= 1;
+        for other in (0..k).filter(|&o| alive[o] && o != i) {
+            let (lo, hi) = if other < i { (other, i) } else { (i, other) };
+            gains[lo][hi] = gain(&hist, &costs, lo, hi);
+        }
     }
     // Number clusters by their first context, so the ids have no holes.
-    let contexts = members.iter().map(Vec::len).sum();
-    let mut order: Vec<usize> = (0..members.len()).collect();
-    order.sort_by_key(|&k| members[k].iter().min().copied().unwrap_or(0));
+    let mut order: Vec<usize> = (0..k).filter(|&i| alive[i]).collect();
+    order.sort_by_key(|&i| members[i].iter().min().copied().unwrap_or(0));
     let mut cluster_of = vec![0_u32; contexts];
     let mut out = Vec::with_capacity(order.len());
-    for (id, &k) in order.iter().enumerate() {
-        for &ctx in &members[k] {
+    for (id, &i) in order.iter().enumerate() {
+        for &ctx in &members[i] {
             cluster_of[ctx] = id as u32;
         }
-        out.push(std::mem::take(&mut hist[k]));
+        out.push(std::mem::take(&mut hist[i]));
     }
     (cluster_of, out)
 }

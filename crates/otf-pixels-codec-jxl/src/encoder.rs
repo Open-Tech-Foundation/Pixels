@@ -1,4 +1,7 @@
-//! The JPEG XL encoder: lossless Modular.
+//! The JPEG XL encoder: lossy VarDCT by default, lossless Modular on
+//! request (and, until VarDCT carries it, for images with alpha).
+//!
+//! Lossless:
 //!
 //! The image becomes integer channels (grey or YCoCg colour, then alpha),
 //! each predicted by the clamped gradient and coded per channel with prefix
@@ -31,9 +34,17 @@ const LF_GROUP: usize = GROUP * 8;
 const MAX_DIMENSION: u32 = 1 << 30;
 
 /// Encodes a JPEG XL codestream.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct JxlEncoder {
     state: Option<State>,
+    /// `None` for lossless; otherwise the Butteraugli-style distance.
+    distance: Option<f32>,
+}
+
+impl Default for JxlEncoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug)]
@@ -44,19 +55,57 @@ struct State {
 }
 
 impl JxlEncoder {
-    /// A lossless encoder.
+    /// A lossy encoder at distance 1, visually lossless.
     #[must_use]
     pub const fn new() -> Self {
-        Self { state: None }
+        Self {
+            state: None,
+            distance: Some(1.0),
+        }
     }
 
-    /// An encoder configured from generic encode options. The encoder is
-    /// lossless, so none of them change the pixels.
+    /// A lossless encoder.
     #[must_use]
-    pub const fn from_options(_options: &EncodeOptions) -> Self {
-        Self::new()
+    pub const fn lossless() -> Self {
+        Self {
+            state: None,
+            distance: None,
+        }
+    }
+
+    /// A lossy encoder at `distance`: 1 is visually lossless, 0.5 finer,
+    /// up to 25 for the coarsest.
+    #[must_use]
+    pub const fn with_distance(distance: f32) -> Self {
+        Self {
+            state: None,
+            distance: Some(distance),
+        }
+    }
+
+    /// An encoder configured from generic encode options: lossless if
+    /// `lossless`, otherwise lossy at the distance libjxl's `cjxl` gives
+    /// `quality` (90 is distance 1).
+    #[must_use]
+    pub fn from_options(options: &EncodeOptions) -> Self {
+        if options.lossless {
+            return Self::lossless();
+        }
+        Self::with_distance(distance_for_quality(options.quality))
     }
 }
+
+/// libjxl's quality-to-distance mapping.
+fn distance_for_quality(quality: u8) -> f32 {
+    let q = f32::from(quality.clamp(1, 100));
+    if q >= 30.0 {
+        0.1 + (100.0 - q) * 0.09
+    } else {
+        53.0 / 3000.0 * q * q - 23.0 / 20.0 * q + 25.0
+    }
+}
+
+impl JxlEncoder {}
 
 /// The header's view of `format`.
 fn info_of(descriptor: &ImageDescriptor) -> Result<ImageInfo> {
@@ -79,6 +128,7 @@ fn info_of(descriptor: &ImageDescriptor) -> Result<ImageInfo> {
             ChannelLayout::Gray | ChannelLayout::GrayAlpha
         ),
         alpha: format.layout().has_alpha(),
+        xyb: false,
     })
 }
 
@@ -109,7 +159,42 @@ fn channels_of(descriptor: &ImageDescriptor, pixels: &[u8]) -> Vec<Channel> {
     channels
 }
 
-/// The whole codestream for `pixels`.
+/// The whole lossy codestream for `pixels`, which have no alpha.
+fn encode_lossy(descriptor: &ImageDescriptor, pixels: &[u8], distance: f32) -> Result<Vec<u8>> {
+    let mut info = info_of(descriptor)?;
+    let channels = channels_of(descriptor, pixels);
+    let max = if info.bit_depth == 16 {
+        65_535.0
+    } else {
+        255.0
+    };
+    let n = descriptor.width as usize * descriptor.height as usize;
+    let rgb: Vec<[f32; 3]> = (0..n)
+        .map(|i| {
+            let at = |c: usize| {
+                channels
+                    .get(c)
+                    .and_then(|ch| ch.samples.get(i))
+                    .copied()
+                    .unwrap_or(0) as f32
+                    / max
+            };
+            if info.grey {
+                [at(0); 3]
+            } else {
+                [at(0), at(1), at(2)]
+            }
+        })
+        .collect();
+    // XYB carries colour; the header's sRGB says what to decode it to, and
+    // eight bits is what the samples were.
+    info.grey = false;
+    info.xyb = true;
+    info.bit_depth = 8;
+    Ok(crate::vardct::encode(&rgb, &info, distance))
+}
+
+/// The whole lossless codestream for `pixels`.
 fn encode(descriptor: &ImageDescriptor, pixels: &[u8]) -> Result<Vec<u8>> {
     let info = info_of(descriptor)?;
     let mut channels = channels_of(descriptor, pixels);
@@ -275,7 +360,12 @@ impl Encoder for JxlEncoder {
                 ),
             ));
         }
-        let bytes = encode(&state.descriptor, &state.pixels)?;
+        let bytes = match self.distance {
+            Some(distance) if !state.descriptor.pixel.layout().has_alpha() => {
+                encode_lossy(&state.descriptor, &state.pixels, distance)?
+            }
+            _ => encode(&state.descriptor, &state.pixels)?,
+        };
         sink.write_all(&bytes)?;
         sink.flush()
     }

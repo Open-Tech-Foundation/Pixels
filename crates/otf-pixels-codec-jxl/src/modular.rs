@@ -126,7 +126,6 @@ impl Tree {
 
     /// One leaf per channel, all with `predictor`.
     #[must_use]
-    #[cfg(test)]
     pub fn per_channel(channels: usize, predictor: Predictor) -> Self {
         Self::build((0, channels.saturating_sub(1)), predictor, |lo, hi| {
             (lo < hi).then(|| {

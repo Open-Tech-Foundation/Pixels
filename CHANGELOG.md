@@ -42,6 +42,17 @@ versioning: [SemVer](https://semver.org/).
   5–7%.
 
 ### Added
+- Lossy JPEG XL (VarDCT), now the default for `Format::Jxl`: XYB colour,
+  8x8 DCT blocks quantized against the default tables, LF coded as a
+  Modular image, HF coded by nonzero count and zig-zag with the decoder's
+  contexts. `quality` maps to distance as `cjxl` maps it (90 is distance 1)
+  and `lossless` selects the lossless encoder, which images with alpha also
+  use until VarDCT carries alpha. At distance 1 a 960x600 photo is 40 KB at
+  42.4 dB PSNR, where `cjxl -d 1 -e 7` gives 38.6 KB at 42.7 dB; at lower
+  rates libjxl's adaptive quantization, larger transforms and filters lead
+  by 2-3 dB. libjxl decodes every lossy sample, from 1x1 to several LF
+  groups and 16-bit input, above a PSNR floor
+  (`scripts/check-jxl-interop.sh`).
 - JPEG XL output, lossless (ADR-0019): `output(Format::Jxl, ..)` and the new
   `otf-pixels-codec-jxl` crate (feature `jxl`, on by default), written from
   scratch. This first phase writes Modular images: grey or RGB through the

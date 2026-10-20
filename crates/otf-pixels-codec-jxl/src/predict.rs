@@ -109,7 +109,7 @@ const DIV: [u32; 65] = {
     let mut out = [0_u32; 65];
     let mut i = 1;
     while i <= 64 {
-        out[i] = ((1_u32 << 24) / i as u32) as u32;
+        out[i] = (1_u32 << 24) / i as u32;
         i += 1;
     }
     out

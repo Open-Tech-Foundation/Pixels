@@ -21,7 +21,9 @@ against libjxl's `djxl` (`scripts/check-jxl-interop.sh`):
    A bare codestream, no container.
 2. Compression: trees over neighbourhood properties, the weighted
    predictor, ANS, LZ77, more contexts.
-3. Lossy VarDCT in XYB, the mode most images will be served in.
+3. Lossy VarDCT in XYB, the mode most images will be served in: first
+   DCT8 blocks, one quantizer and no filters (done), then adaptive
+   quantization, larger transforms, Gaborish and EPF.
 4. Container boxes (EXIF, ICC), then a decoder.
 
 The field definitions were read from libjxl (BSD-3-Clause) and jxl-oxide

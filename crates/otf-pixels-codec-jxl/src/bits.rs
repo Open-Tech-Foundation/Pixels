@@ -163,6 +163,18 @@ impl BitWriter {
         self.bytes.len() * 8 + self.pending_bits as usize
     }
 
+    /// Append another writer's bits, unaligned.
+    pub fn append(&mut self, other: &Self) {
+        if self.pending_bits == 0 {
+            self.bytes.extend_from_slice(&other.bytes);
+        } else {
+            for &byte in &other.bytes {
+                self.write(8, u64::from(byte));
+            }
+        }
+        self.write(other.pending_bits, other.pending);
+    }
+
     /// The bytes, padded with zero bits to a whole byte.
     #[must_use]
     pub fn finish(mut self) -> Vec<u8> {

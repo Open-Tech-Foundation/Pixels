@@ -18,6 +18,9 @@ pub struct ImageInfo {
     pub grey: bool,
     /// An alpha channel, as the one extra channel.
     pub alpha: bool,
+    /// Colour coded in XYB, as lossy VarDCT frames are: the decoder turns
+    /// it back into the colour encoding the header names (sRGB).
+    pub xyb: bool,
 }
 
 /// `U32(1 + u(9), 1 + u(13), 1 + u(18), 1 + u(30))`, a dimension.
@@ -61,7 +64,7 @@ pub fn write_image_header(w: &mut BitWriter, info: &ImageInfo) {
     } else {
         w.u32(0, [val(0), val(1), bits(2, 4), bits(1, 12)]);
     }
-    w.bool(false); // not XYB: the samples are the image's own
+    w.bool(info.xyb);
     if info.grey {
         w.bool(false); // not all_default
         w.bool(false); // no ICC profile
@@ -106,6 +109,34 @@ pub fn write_modular_frame_header(w: &mut BitWriter, info: &ImageInfo) {
     w.u64(0); // no frame header extensions
 }
 
+/// Write a frame header for a lossy VarDCT frame, the last frame. Adaptive
+/// LF smoothing, Gaborish and the edge-preserving filter are off.
+pub fn write_vardct_frame_header(w: &mut BitWriter, info: &ImageInfo) {
+    w.bool(false); // not all_default
+    w.write(2, 0); // regular frame
+    w.write(1, 0); // VarDCT
+    w.u64(0x80); // skip adaptive LF smoothing
+    w.u32(1, [val(1), val(2), val(4), val(8)]); // no upsampling
+    if info.alpha {
+        w.u32(1, [val(1), val(2), val(4), val(8)]);
+    }
+    w.write(3, 3); // x_qm_scale, the default
+    w.write(3, 2); // b_qm_scale, the default
+    w.u32(1, [val(1), val(2), val(3), bits(4, 3)]); // one pass
+    w.bool(false); // no crop
+    w.u32(0, [val(0), val(1), val(2), bits(3, 2)]); // replace
+    if info.alpha {
+        w.u32(0, [val(0), val(1), val(2), bits(3, 2)]);
+    }
+    w.bool(true); // is_last
+    w.u32(0, [val(0), bits(0, 4), bits(16, 5), bits(48, 10)]); // no name
+    w.bool(false); // restoration filter: not all_default
+    w.bool(false); // no Gaborish
+    w.write(2, 0); // no edge-preserving filter
+    w.u64(0);
+    w.u64(0);
+}
+
 /// Write the table of contents for sections of `sizes` bytes, in order.
 pub fn write_toc(w: &mut BitWriter, sizes: &[usize]) {
     w.bool(false); // not permuted
@@ -144,6 +175,7 @@ mod tests {
                 bit_depth: 8,
                 grey: false,
                 alpha: false,
+                xyb: false,
             },
         );
         assert_eq!(w.bit_len() % 8, 0);

@@ -15,7 +15,7 @@ implementation detail and may change without notice.
 | JPEG (progressive) | ✅ | ✅ | own (ADR-0018) | coefficient buffer; scaled decode |
 | WebP | ✅ | ✅ lossy and lossless | own (ADR-0014) | internal buffer |
 | AVIF | ✅ | ✅ lossy, 8-bit 4:2:0 | own | internal buffer |
-| JPEG XL | ❌ | ✅ lossless Modular, 8/16-bit | own (ADR-0019) | internal buffer |
+| JPEG XL | ❌ | ✅ lossy VarDCT, lossless Modular | own (ADR-0019) | internal buffer |
 
 - Format detection is by magic bytes only; extensions and MIME are ignored.
 - Raw pixel contract: caller supplies width, height, pixel format, stride.
