@@ -7,7 +7,8 @@
 )]
 
 use otf_pixels_core::{
-    Animation, Codec, Decoder, Format, ImageDescriptor, Limits, Orientation, PixelFormat, PixelsError, Result, Source,
+    Animation, Codec, Decoder, Format, ImageDescriptor, Limits, Orientation, PixelFormat,
+    PixelsError, Result, Source,
 };
 
 use crate::decode::{container, header::ExtraKind, render};
@@ -43,7 +44,10 @@ impl JxlDecoder {
         let mut chunk = [0_u8; 64 * 1024];
         loop {
             if bytes.len() > MAX_COMPRESSED {
-                return Err(PixelsError::malformed("jxl", format!("stream exceeds {MAX_COMPRESSED} bytes")));
+                return Err(PixelsError::malformed(
+                    "jxl",
+                    format!("stream exceeds {MAX_COMPRESSED} bytes"),
+                ));
             }
             match source.read(&mut chunk)? {
                 0 => break,
@@ -75,7 +79,10 @@ impl JxlDecoder {
             }
             let ms = durations
                 .iter()
-                .map(|&t| (u64::from(t) * 1000 * u64::from(a.tps_denominator) / u64::from(a.tps_numerator)) as u32)
+                .map(|&t| {
+                    (u64::from(t) * 1000 * u64::from(a.tps_denominator)
+                        / u64::from(a.tps_numerator)) as u32
+                })
                 .collect();
             Animation::new(ms, a.num_loops)
         });
@@ -120,9 +127,13 @@ impl JxlDecoder {
             for p in &planes {
                 let v = p.get(i).copied().unwrap_or(1.0);
                 match pixel {
-                    PixelFormat::RgbF32 | PixelFormat::RgbaF32 => out.extend_from_slice(&v.to_ne_bytes()),
+                    PixelFormat::RgbF32 | PixelFormat::RgbaF32 => {
+                        out.extend_from_slice(&v.to_ne_bytes())
+                    }
                     PixelFormat::Gray16 | PixelFormat::Rgb16 | PixelFormat::Rgba16 => {
-                        out.extend_from_slice(&((v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16).to_ne_bytes());
+                        out.extend_from_slice(
+                            &((v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16).to_ne_bytes(),
+                        );
                     }
                     _ => out.push((v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8),
                 }

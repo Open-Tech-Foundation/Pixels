@@ -83,7 +83,9 @@ impl ExtraChannel {
     fn parse(r: &mut BitReader<'_>) -> Result<Self> {
         if r.bool()? {
             return Ok(Self {
-                kind: ExtraKind::Alpha { premultiplied: false },
+                kind: ExtraKind::Alpha {
+                    premultiplied: false,
+                },
                 bit_depth: BitDepth::default(),
                 dim_shift: 0,
             });
@@ -136,7 +138,12 @@ fn skip_extensions(r: &mut BitReader<'_>) -> Result<()> {
 
 /// A custom chromaticity, `(x, y)` scaled by a million.
 fn customxy(r: &mut BitReader<'_>) -> Result<[f32; 2]> {
-    let d = [bits(0, 19), bits(524_288, 19), bits(1_048_576, 20), bits(2_097_152, 21)];
+    let d = [
+        bits(0, 19),
+        bits(524_288, 19),
+        bits(1_048_576, 20),
+        bits(2_097_152, 21),
+    ];
     Ok([
         unpack_signed(r.u32(d)?) as f32 / 1e6,
         unpack_signed(r.u32(d)?) as f32 / 1e6,
@@ -169,7 +176,11 @@ pub struct ColourEncoding {
 }
 
 const D65: [f32; 2] = [0.3127, 0.3290];
-const SRGB_PRIMARIES: [[f32; 2]; 3] = [[0.639_998_7, 0.330_010_14], [0.300_003_8, 0.600_003_36], [0.150_002_05, 0.059_997_204]];
+const SRGB_PRIMARIES: [[f32; 2]; 3] = [
+    [0.639_998_7, 0.330_010_14],
+    [0.300_003_8, 0.600_003_36],
+    [0.150_002_05, 0.059_997_204],
+];
 
 impl Default for ColourEncoding {
     fn default() -> Self {
@@ -307,7 +318,8 @@ fn size(r: &mut BitReader<'_>, small: Option<[Dist; 4]>, large: [Dist; 4]) -> Re
     let width = if ratio == 0 {
         if div8 { read_small(r)? } else { r.u32(large)? }
     } else {
-        let (n, d) = [(1, 1), (12, 10), (4, 3), (3, 2), (16, 9), (5, 4), (2, 1)][(ratio - 1) as usize];
+        let (n, d) =
+            [(1, 1), (12, 10), (4, 3), (3, 2), (16, 9), (5, 4), (2, 1)][(ratio - 1) as usize];
         (u64::from(height) * n / d) as u32
     };
     Ok((width, height))
@@ -511,7 +523,6 @@ impl FrameHeader {
     pub const PATCHES: u64 = 0x2;
     pub const SPLINES: u64 = 0x10;
     pub const USE_LF_FRAME: u64 = 0x20;
-    #[allow(dead_code, reason = "VarDCT's, which comes next")]
     pub const SKIP_ADAPTIVE_LF_SMOOTHING: u64 = 0x80;
 
     /// Parse a frame header.
@@ -519,7 +530,10 @@ impl FrameHeader {
     /// # Errors
     ///
     /// For a malformed header.
-    #[allow(clippy::too_many_lines, reason = "one field after another, as specified")]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one field after another, as specified"
+    )]
     pub fn parse(r: &mut BitReader<'_>, image: &ImageHeader) -> Result<Self> {
         let all_default = r.bool()?;
         let mut h = Self {
@@ -606,7 +620,9 @@ impl FrameHeader {
             h.num_passes = r.u32([val(1), val(2), val(3), bits(4, 3)])?;
             if h.num_passes != 1 {
                 let num_ds = r.u32([val(0), val(1), val(2), bits(3, 1)])?;
-                h.pass_shift = (0..h.num_passes - 1).map(|_| r.read(2)).collect::<Result<_>>()?;
+                h.pass_shift = (0..h.num_passes - 1)
+                    .map(|_| r.read(2))
+                    .collect::<Result<_>>()?;
                 let downsample = (0..num_ds)
                     .map(|_| r.u32([val(1), val(2), val(4), val(8)]))
                     .collect::<Result<Vec<_>>>()?;
@@ -632,7 +648,10 @@ impl FrameHeader {
             h.width = r.u32(pos)?;
             h.height = r.u32(pos)?;
         }
-        let normal = matches!(h.frame_type, FrameType::Regular | FrameType::SkipProgressive);
+        let normal = matches!(
+            h.frame_type,
+            FrameType::Regular | FrameType::SkipProgressive
+        );
         let full = !have_crop
             || (h.x0 <= 0
                 && h.y0 <= 0
@@ -640,35 +659,36 @@ impl FrameHeader {
                 && i64::from(h.y0) + i64::from(h.height) >= i64::from(image.height));
         if normal {
             let has_extra = !image.extra.is_empty();
-            let blending = |r: &mut BitReader<'_>, main: Option<BlendMode>| -> Result<BlendingInfo> {
-                let mode = match r.u32([val(0), val(1), val(2), bits(3, 2)])? {
-                    0 => BlendMode::Replace,
-                    1 => BlendMode::Add,
-                    2 => BlendMode::Blend,
-                    3 => BlendMode::MulAdd,
-                    4 => BlendMode::Mul,
-                    _ => return Err(malformed("unknown blend mode")),
+            let blending =
+                |r: &mut BitReader<'_>, main: Option<BlendMode>| -> Result<BlendingInfo> {
+                    let mode = match r.u32([val(0), val(1), val(2), bits(3, 2)])? {
+                        0 => BlendMode::Replace,
+                        1 => BlendMode::Add,
+                        2 => BlendMode::Blend,
+                        3 => BlendMode::MulAdd,
+                        4 => BlendMode::Mul,
+                        _ => return Err(malformed("unknown blend mode")),
+                    };
+                    let uses_alpha = matches!(mode, BlendMode::Blend | BlendMode::MulAdd);
+                    let alpha_channel = if has_extra && uses_alpha {
+                        r.u32([val(0), val(1), val(2), bits(3, 3)])?
+                    } else {
+                        0
+                    };
+                    let clamp = if (has_extra && uses_alpha) || mode == BlendMode::Mul {
+                        r.bool()?
+                    } else {
+                        false
+                    };
+                    let resets = main.unwrap_or(mode) == BlendMode::Replace && full;
+                    let source = if resets { 0 } else { r.read(2)? };
+                    Ok(BlendingInfo {
+                        mode,
+                        alpha_channel,
+                        clamp,
+                        source,
+                    })
                 };
-                let uses_alpha = matches!(mode, BlendMode::Blend | BlendMode::MulAdd);
-                let alpha_channel = if has_extra && uses_alpha {
-                    r.u32([val(0), val(1), val(2), bits(3, 3)])?
-                } else {
-                    0
-                };
-                let clamp = if (has_extra && uses_alpha) || mode == BlendMode::Mul {
-                    r.bool()?
-                } else {
-                    false
-                };
-                let resets = main.unwrap_or(mode) == BlendMode::Replace && full;
-                let source = if resets { 0 } else { r.read(2)? };
-                Ok(BlendingInfo {
-                    mode,
-                    alpha_channel,
-                    clamp,
-                    source,
-                })
-            };
             h.blending = blending(r, None)?;
             let main = h.blending.mode;
             h.ec_blending = (0..image.extra.len())
@@ -689,7 +709,10 @@ impl FrameHeader {
         }
         let resets = h.blending.mode == BlendMode::Replace && full;
         if h.frame_type == FrameType::ReferenceOnly
-            || (resets && !h.is_last && (h.duration == 0 || h.save_as_reference != 0) && h.frame_type != FrameType::Lf)
+            || (resets
+                && !h.is_last
+                && (h.duration == 0 || h.save_as_reference != 0)
+                && h.frame_type != FrameType::Lf)
         {
             h.save_before_ct = r.bool()?;
         } else {
@@ -753,7 +776,11 @@ impl FrameHeader {
             skip_extensions(r)?;
         }
         skip_extensions(r)?;
-        h.colour_channels = if h.modular && !h.do_ycbcr && !image.xyb && image.grey() { 1 } else { 3 };
+        h.colour_channels = if h.modular && !h.do_ycbcr && !image.xyb && image.grey() {
+            1
+        } else {
+            3
+        };
         Ok(h)
     }
 
@@ -831,14 +858,18 @@ impl FrameHeader {
     /// Whether this frame is shown.
     #[must_use]
     pub fn is_keyframe(&self) -> bool {
-        matches!(self.frame_type, FrameType::Regular | FrameType::SkipProgressive)
-            && (self.is_last || self.duration != 0)
+        matches!(
+            self.frame_type,
+            FrameType::Regular | FrameType::SkipProgressive
+        ) && (self.is_last || self.duration != 0)
     }
 
     /// Whether this frame can be referenced later.
     #[must_use]
     pub fn can_reference(&self) -> bool {
-        !self.is_last && (self.duration == 0 || self.save_as_reference != 0) && self.frame_type != FrameType::Lf
+        !self.is_last
+            && (self.duration == 0 || self.save_as_reference != 0)
+            && self.frame_type != FrameType::Lf
     }
 }
 
@@ -876,7 +907,14 @@ impl Toc {
         };
         r.zero_pad_to_byte()?;
         let sizes = (0..entries)
-            .map(|_| r.u32([bits(0, 10), bits(1024, 14), bits(17_408, 22), bits(4_211_712, 30)]))
+            .map(|_| {
+                r.u32([
+                    bits(0, 10),
+                    bits(1024, 14),
+                    bits(17_408, 22),
+                    bits(4_211_712, 30),
+                ])
+            })
             .collect::<Result<Vec<_>>>()?;
         r.zero_pad_to_byte()?;
         // Sections are stored in bitstream order; section `i` is the one
@@ -888,7 +926,10 @@ impl Toc {
             at += size as usize;
         }
         let ranges = match &permutation {
-            Some(p) => p.iter().map(|&i| stored.get(i).copied().unwrap_or((0, 0))).collect(),
+            Some(p) => p
+                .iter()
+                .map(|&i| stored.get(i).copied().unwrap_or((0, 0)))
+                .collect(),
             None => stored,
         };
         Ok(Self {

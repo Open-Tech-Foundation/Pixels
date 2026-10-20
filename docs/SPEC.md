@@ -15,7 +15,7 @@ implementation detail and may change without notice.
 | JPEG (progressive) | ✅ | ✅ | own (ADR-0018) | coefficient buffer; scaled decode |
 | WebP | ✅ | ✅ lossy and lossless | own (ADR-0014) | internal buffer |
 | AVIF | ✅ | ✅ lossy, 8-bit 4:2:0 | own | internal buffer |
-| JPEG XL | ❌ | ✅ lossy VarDCT, lossless Modular | own (ADR-0019) | internal buffer |
+| JPEG XL | ✅ | ✅ lossy VarDCT, lossless Modular | own (ADR-0019) | internal buffer |
 
 - Format detection is by magic bytes only; extensions and MIME are ignored.
 - Raw pixel contract: caller supplies width, height, pixel format, stride.
@@ -26,7 +26,7 @@ implementation detail and may change without notice.
   `InvalidArgument`. Counting reads each directory's size and link only, and
   stops quietly at a broken link, a loop or 65,535 pages, so a file whose
   first page is sound always opens. Writing multi-page files is not in v1.
-- Animation (GIF, WebP): v1 processes the **first frame**, as sharp does by
+- Animation (GIF, WebP, JPEG XL): v1 processes the **first frame**, as sharp does by
   default, and reports what the file holds through `Image::animation` (frame
   count, loop count, per-frame durations). `OpenOptions::animated` is reserved
   for the multi-frame pipeline: set, an animated input is refused as
@@ -58,6 +58,15 @@ implementation detail and may change without notice.
   AVIF and deeper or 4:4:4 encoding are `Unsupported`. libaom, dav1d and
   libgav1 must decode every emitted file to our decoder's pixels
   (`scripts/check-avif-interop.sh`).
+- JPEG XL v1 scope: owned outright (ADR-0019). Decode accepts every coding
+  tool in bare codestreams and the container and yields the first displayed
+  frame as Gray/GrayA/RGB/RGBA at 8 or 16 bits (float samples as F32),
+  straight alpha (premultiplied files are divided out); XYB images come out
+  as sRGB and report no ICC profile, others report theirs; the codestream's
+  orientation and the `Exif` box are reported. Lossless files must decode to
+  libjxl's pixels exactly, lossy ones within one level
+  (`otf-pixels-codec-jxl/tests/reference.rs`). Encode writes lossy VarDCT
+  (the default) or lossless Modular; alpha forces lossless for now.
 
 ## Pixel formats
 

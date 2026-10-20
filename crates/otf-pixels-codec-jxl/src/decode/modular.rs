@@ -62,7 +62,12 @@ fn parse_wp(r: &mut BitReader<'_>) -> Result<WpParams> {
     for w in &mut weights {
         *w = r.read(4)?;
     }
-    Ok(WpParams { p1, p2, p3, weights })
+    Ok(WpParams {
+        p1,
+        p2,
+        p3,
+        weights,
+    })
 }
 
 const BEGIN_C: [crate::bits::Dist; 4] = [bits(0, 3), bits(8, 6), bits(72, 10), bits(1096, 13)];
@@ -118,7 +123,9 @@ impl Header {
                 1 => {
                     let begin = r.u32(BEGIN_C)? as usize;
                     let num = r.u32([val(1), val(3), val(4), bits(1, 13)])? as usize;
-                    let colours = r.u32([bits(0, 8), bits(256, 10), bits(1280, 12), bits(5376, 16)])? as usize;
+                    let colours =
+                        r.u32([bits(0, 8), bits(256, 10), bits(1280, 12), bits(5376, 16)])?
+                            as usize;
                     let deltas = r.u32([val(0), bits(1, 8), bits(257, 10), bits(1281, 16)])? as i32;
                     let predictor = r.read(4)?;
                     if predictor > 13 {
@@ -179,12 +186,16 @@ fn forward_shapes(transforms: &mut [Transform], shapes: &mut Vec<Shape>) -> Resu
         match t {
             Transform::Rct { begin, .. } => {
                 let b = *begin;
-                if b + 3 > shapes.len() || shapes[b + 1] != shapes[b] || shapes[b + 2] != shapes[b] {
+                if b + 3 > shapes.len() || shapes[b + 1] != shapes[b] || shapes[b + 2] != shapes[b]
+                {
                     return Err(malformed("bad RCT channels"));
                 }
             }
             Transform::Palette {
-                begin, num, colours, ..
+                begin,
+                num,
+                colours,
+                ..
             } => {
                 let (b, n) = (*begin, *num);
                 let end = b + n;
@@ -199,7 +210,10 @@ fn forward_shapes(transforms: &mut [Transform], shapes: &mut Vec<Shape>) -> Resu
                 } else {
                     nb_meta += 1;
                 }
-                if shapes[b + 1..end].iter().any(|s| s.width != shapes[b].width || s.height != shapes[b].height) {
+                if shapes[b + 1..end]
+                    .iter()
+                    .any(|s| s.width != shapes[b].width || s.height != shapes[b].height)
+                {
                     return Err(malformed("bad palette channels"));
                 }
                 shapes.drain(b + 1..end);
@@ -307,8 +321,18 @@ fn default_squeeze(shapes: &[Shape], first: usize) -> Vec<SqueezeStep> {
 
 #[derive(Debug, Clone, Copy)]
 enum Node {
-    Decision { property: u32, value: i32, left: u32, right: u32 },
-    Leaf { ctx: u32, predictor: u32, offset: i32, multiplier: u32 },
+    Decision {
+        property: u32,
+        value: i32,
+        left: u32,
+        right: u32,
+    },
+    Leaf {
+        ctx: u32,
+        predictor: u32,
+        offset: i32,
+        multiplier: u32,
+    },
 }
 
 /// An MA tree with the entropy code its leaves' contexts use.
@@ -388,7 +412,11 @@ impl Tree {
                         right,
                     } => {
                         let v = if p == 0 { channel } else { stream };
-                        i = if i64::from(v) > i64::from(value) { left } else { right } as usize;
+                        i = if i64::from(v) > i64::from(value) {
+                            left
+                        } else {
+                            right
+                        } as usize;
                     }
                     _ => return i,
                 }
@@ -444,11 +472,23 @@ fn neighbours(p: &Plane, x: usize, y: usize) -> Nb {
         0
     };
     let n = if y > 0 { d[row - width + x] } else { w };
-    let nw = if x > 0 && y > 0 { d[row - width + x - 1] } else { w };
-    let ne = if y > 0 && x + 1 < width { d[row - width + x + 1] } else { n };
+    let nw = if x > 0 && y > 0 {
+        d[row - width + x - 1]
+    } else {
+        w
+    };
+    let ne = if y > 0 && x + 1 < width {
+        d[row - width + x + 1]
+    } else {
+        n
+    };
     let nn = if y > 1 { d[row - 2 * width + x] } else { n };
     let ww = if x > 1 { d[row + x - 2] } else { w };
-    let nee = if y > 0 && x + 2 < width { d[row - width + x + 2] } else { ne };
+    let nee = if y > 0 && x + 2 < width {
+        d[row - width + x + 2]
+    } else {
+        ne
+    };
     Nb {
         w,
         n,
@@ -473,7 +513,12 @@ fn to_pnb(nb: &Nb) -> crate::predict::Neighbours {
 
 #[inline]
 fn predict(predictor: u32, nb: &Nb, wp: i64) -> i64 {
-    let (w, n, nw, ne) = (i64::from(nb.w), i64::from(nb.n), i64::from(nb.nw), i64::from(nb.ne));
+    let (w, n, nw, ne) = (
+        i64::from(nb.w),
+        i64::from(nb.n),
+        i64::from(nb.nw),
+        i64::from(nb.ne),
+    );
     match predictor {
         0 => 0,
         1 => w,
@@ -494,7 +539,15 @@ fn predict(predictor: u32, nb: &Nb, wp: i64) -> i64 {
         10 => (w + nw) / 2,
         11 => (n + nw) / 2,
         12 => (n + ne) / 2,
-        _ => (6 * n - 2 * i64::from(nb.nn) + 7 * w + i64::from(nb.ww) + i64::from(nb.nee) + 3 * ne + 8) / 16,
+        _ => {
+            (6 * n - 2 * i64::from(nb.nn)
+                + 7 * w
+                + i64::from(nb.ww)
+                + i64::from(nb.nee)
+                + 3 * ne
+                + 8)
+                / 16
+        }
     }
 }
 
@@ -519,7 +572,11 @@ fn extra_property(prev: &[&Plane], k: usize, x: usize, y: usize) -> i32 {
                 (x, 0) => p.at(x - 1, 0),
                 (x, y) => grad_clamped(p.at(x, y - 1), p.at(x - 1, y), p.at(x - 1, y - 1)),
             };
-            if i == 2 { c.abs_diff(g) as i32 } else { c.wrapping_sub(g) }
+            if i == 2 {
+                c.abs_diff(g) as i32
+            } else {
+                c.wrapping_sub(g)
+            }
         }
     }
 }
@@ -567,7 +624,17 @@ fn decode_planes(
             .filter(|p| p.shape() == shape)
             .take(max_prev)
             .collect();
-        decode_plane(r, &mut d, &nodes, plane, &prev, uses_wp.then_some(wp_params), uses_props, i as i32, dist_multiplier)?;
+        decode_plane(
+            r,
+            &mut d,
+            &nodes,
+            plane,
+            &prev,
+            uses_wp.then_some(wp_params),
+            uses_props,
+            i as i32,
+            dist_multiplier,
+        )?;
     }
     d.finish()
 }
@@ -587,12 +654,14 @@ fn decode_plane(
     let (width, height) = (plane.width, plane.height);
     let mut wp = wp_params.map(|p| WeightedState::with_params(width, p));
     // A single leaf: no properties to compute.
-    if let [Node::Leaf {
-        ctx,
-        predictor,
-        offset,
-        multiplier,
-    }] = *nodes
+    if let [
+        Node::Leaf {
+            ctx,
+            predictor,
+            offset,
+            multiplier,
+        },
+    ] = *nodes
     {
         if predictor == 0 && multiplier == 1 && offset == 0 {
             for v in &mut plane.data {
@@ -605,7 +674,11 @@ fn decode_plane(
                 let nb = neighbours(plane, x, y);
                 let wpred = wp.as_ref().map(|s| s.predict(&to_pnb(&nb)));
                 let guess = predict(predictor, &nb, wpred.map_or(0, |p| p.eighths()));
-                let diff = i64::from(unpack_signed(d.read_with_multiplier(r, ctx, dist_multiplier)?));
+                let diff = i64::from(unpack_signed(d.read_with_multiplier(
+                    r,
+                    ctx,
+                    dist_multiplier,
+                )?));
                 let v = (guess + diff * i64::from(multiplier) + i64::from(offset)) as i32;
                 plane.data[y * width + x] = v;
                 if let (Some(s), Some(p)) = (wp.as_mut(), wpred) {
@@ -665,7 +738,11 @@ fn decode_plane(
                 }
             };
             let guess = predict(predictor, &nb, wpred.map_or(0, |p| p.eighths()));
-            let diff = i64::from(unpack_signed(d.read_with_multiplier(r, ctx, dist_multiplier)?));
+            let diff = i64::from(unpack_signed(d.read_with_multiplier(
+                r,
+                ctx,
+                dist_multiplier,
+            )?));
             let v = (guess + diff * i64::from(multiplier) + i64::from(offset)) as i32;
             plane.data[y * width + x] = v;
             if let (Some(s), Some(p)) = (wp.as_mut(), wpred) {
@@ -677,18 +754,78 @@ fn decode_plane(
 }
 
 const DELTA_PALETTE: [[i16; 3]; 72] = [
-    [0, 0, 0], [4, 4, 4], [11, 0, 0], [0, 0, -13], [0, -12, 0], [-10, -10, -10],
-    [-18, -18, -18], [-27, -27, -27], [-18, -18, 0], [0, 0, -32], [-32, 0, 0], [-37, -37, -37],
-    [0, -32, -32], [24, 24, 45], [50, 50, 50], [-45, -24, -24], [-24, -45, -45], [0, -24, -24],
-    [-34, -34, 0], [-24, 0, -24], [-45, -45, -24], [64, 64, 64], [-32, 0, -32], [0, -32, 0],
-    [-32, 0, 32], [-24, -45, -24], [45, 24, 45], [24, -24, -45], [-45, -24, 24], [80, 80, 80],
-    [64, 0, 0], [0, 0, -64], [0, -64, -64], [-24, -24, 45], [96, 96, 96], [64, 64, 0],
-    [45, -24, -24], [34, -34, 0], [112, 112, 112], [24, -45, -45], [45, 45, -24], [0, -32, 32],
-    [24, -24, 45], [0, 96, 96], [45, -24, 24], [24, -45, -24], [-24, -45, 24], [0, -64, 0],
-    [96, 0, 0], [128, 128, 128], [64, 0, 64], [144, 144, 144], [96, 96, 0], [-36, -36, 36],
-    [45, -24, -45], [45, -45, -24], [0, 0, -96], [0, 128, 128], [0, 96, 0], [45, 24, -45],
-    [-128, 0, 0], [24, -45, 24], [-45, 24, -45], [64, 0, -64], [64, -64, -64], [96, 0, 96],
-    [45, -45, 24], [24, 45, -45], [64, 64, -64], [128, 128, 0], [0, 0, -128], [-24, 45, -45],
+    [0, 0, 0],
+    [4, 4, 4],
+    [11, 0, 0],
+    [0, 0, -13],
+    [0, -12, 0],
+    [-10, -10, -10],
+    [-18, -18, -18],
+    [-27, -27, -27],
+    [-18, -18, 0],
+    [0, 0, -32],
+    [-32, 0, 0],
+    [-37, -37, -37],
+    [0, -32, -32],
+    [24, 24, 45],
+    [50, 50, 50],
+    [-45, -24, -24],
+    [-24, -45, -45],
+    [0, -24, -24],
+    [-34, -34, 0],
+    [-24, 0, -24],
+    [-45, -45, -24],
+    [64, 64, 64],
+    [-32, 0, -32],
+    [0, -32, 0],
+    [-32, 0, 32],
+    [-24, -45, -24],
+    [45, 24, 45],
+    [24, -24, -45],
+    [-45, -24, 24],
+    [80, 80, 80],
+    [64, 0, 0],
+    [0, 0, -64],
+    [0, -64, -64],
+    [-24, -24, 45],
+    [96, 96, 96],
+    [64, 64, 0],
+    [45, -24, -24],
+    [34, -34, 0],
+    [112, 112, 112],
+    [24, -45, -45],
+    [45, 45, -24],
+    [0, -32, 32],
+    [24, -24, 45],
+    [0, 96, 96],
+    [45, -24, 24],
+    [24, -45, -24],
+    [-24, -45, 24],
+    [0, -64, 0],
+    [96, 0, 0],
+    [128, 128, 128],
+    [64, 0, 64],
+    [144, 144, 144],
+    [96, 96, 0],
+    [-36, -36, 36],
+    [45, -24, -45],
+    [45, -45, -24],
+    [0, 0, -96],
+    [0, 128, 128],
+    [0, 96, 0],
+    [45, 24, -45],
+    [-128, 0, 0],
+    [24, -45, 24],
+    [-45, 24, -45],
+    [64, 0, -64],
+    [64, -64, -64],
+    [96, 0, 96],
+    [45, -45, 24],
+    [24, 45, -45],
+    [64, 64, -64],
+    [128, 128, 0],
+    [0, 0, -128],
+    [-24, 45, -45],
 ];
 
 fn inverse_rct(planes: &mut [Plane], begin: usize, kind: u32) -> Result<()> {
@@ -740,7 +877,10 @@ fn inverse_rct(planes: &mut [Plane], begin: usize, kind: u32) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments, reason = "the palette transform's parameters")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the palette transform's parameters"
+)]
 fn inverse_palette(
     planes: &mut Vec<Plane>,
     begin: usize,
@@ -760,7 +900,9 @@ fn inverse_palette(
     }
     let index = std::mem::take(&mut planes[begin]);
     let (width, height) = (index.width, index.height);
-    let mut outs: Vec<Plane> = (0..num).map(|_| Plane::new(width, height, index.hshift, index.vshift)).collect();
+    let mut outs: Vec<Plane> = (0..num)
+        .map(|_| Plane::new(width, height, index.hshift, index.vshift))
+        .collect();
     let nb_colours = colours as i32;
     let mut need_delta = Vec::new();
     for (i, &idx) in index.data.iter().enumerate() {
@@ -773,7 +915,8 @@ fn inverse_palette(
             } else if idx >= nb_colours {
                 let idx = idx - nb_colours;
                 if idx < 64 {
-                    ((idx >> (2 * c)) % 4) * ((1 << bit_depth) - 1) / 4 + (1 << bit_depth.saturating_sub(3))
+                    ((idx >> (2 * c)) % 4) * ((1 << bit_depth) - 1) / 4
+                        + (1 << bit_depth.saturating_sub(3))
                 } else {
                     let mut idx = idx - 64;
                     for _ in 0..c {
@@ -806,7 +949,8 @@ fn inverse_palette(
                 let wpred = state.as_ref().map(|s| s.predict(&to_pnb(&nb)));
                 let mut v = out.data[i];
                 if need_delta.get(next) == Some(&i) {
-                    v = (i64::from(v) + predict(predictor, &nb, wpred.map_or(0, |p| p.eighths()))) as i32;
+                    v = (i64::from(v) + predict(predictor, &nb, wpred.map_or(0, |p| p.eighths())))
+                        as i32;
                     out.data[i] = v;
                     next += 1;
                     if next >= need_delta.len() {
@@ -876,7 +1020,12 @@ fn merge(avg: &Plane, res: &Plane, horizontal: bool) -> Result<Plane> {
             return Err(malformed("bad squeeze residual"));
         }
         let width = avg.width + res.width;
-        let mut out = Plane::new(width, avg.height, avg.hshift - i32::from(avg.hshift > 0), avg.vshift);
+        let mut out = Plane::new(
+            width,
+            avg.height,
+            avg.hshift - i32::from(avg.hshift > 0),
+            avg.vshift,
+        );
         for y in 0..avg.height {
             unsqueeze(
                 &avg.data[y * avg.width..(y + 1) * avg.width],
@@ -891,7 +1040,12 @@ fn merge(avg: &Plane, res: &Plane, horizontal: bool) -> Result<Plane> {
         }
         let height = avg.height + res.height;
         let width = avg.width;
-        let mut out = Plane::new(width, height, avg.hshift, avg.vshift - i32::from(avg.vshift > 0));
+        let mut out = Plane::new(
+            width,
+            height,
+            avg.hshift,
+            avg.vshift - i32::from(avg.vshift > 0),
+        );
         if width == 0 {
             return Ok(out);
         }
@@ -933,7 +1087,12 @@ fn inverse_squeeze(planes: &mut Vec<Plane>, steps: &[SqueezeStep]) -> Result<()>
         for (i, res) in residuals.iter().enumerate() {
             let avg = &planes[s.begin + i];
             planes[s.begin + i] = if avg.width == 0 || avg.height == 0 {
-                Plane::new(avg.width + if s.horizontal { res.width } else { 0 }, avg.height + if s.horizontal { 0 } else { res.height }, avg.hshift, avg.vshift)
+                Plane::new(
+                    avg.width + if s.horizontal { res.width } else { 0 },
+                    avg.height + if s.horizontal { 0 } else { res.height },
+                    avg.hshift,
+                    avg.vshift,
+                )
             } else {
                 merge(avg, res, s.horizontal)?
             };
@@ -953,7 +1112,9 @@ fn inverse(transforms: &[Transform], planes: &mut Vec<Plane>, bit_depth: u32) ->
                 deltas,
                 predictor,
                 wp,
-            } => inverse_palette(planes, *begin, *num, *colours, *deltas, *predictor, *wp, bit_depth)?,
+            } => inverse_palette(
+                planes, *begin, *num, *colours, *deltas, *predictor, *wp, bit_depth,
+            )?,
             Transform::Squeeze(steps) => inverse_squeeze(planes, steps)?,
         }
     }
@@ -975,7 +1136,10 @@ fn local_tree<'a>(
 }
 
 fn planes_for(shapes: &[Shape]) -> Vec<Plane> {
-    shapes.iter().map(|s| Plane::new(s.width, s.height, s.hshift, s.vshift)).collect()
+    shapes
+        .iter()
+        .map(|s| Plane::new(s.width, s.height, s.hshift, s.vshift))
+        .collect()
 }
 
 /// Decode a whole, self-contained Modular stream for channels of `shapes`.
@@ -1120,7 +1284,8 @@ impl GlobalImage {
             let dest = &mut self.planes[i];
             for y in 0..local.height {
                 let at = (y0 + y) * dest.width + x0;
-                dest.data[at..at + local.width].copy_from_slice(&local.data[y * local.width..(y + 1) * local.width]);
+                dest.data[at..at + local.width]
+                    .copy_from_slice(&local.data[y * local.width..(y + 1) * local.width]);
             }
         }
         Ok(())

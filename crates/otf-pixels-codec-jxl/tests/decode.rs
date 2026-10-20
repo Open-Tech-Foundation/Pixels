@@ -94,22 +94,85 @@ fn decode_directory() {
             continue;
         }
         let bytes = std::fs::read(&path).unwrap();
-        let result = std::panic::catch_unwind(|| -> otf_pixels_core::Result<(ImageDescriptor, Vec<u8>)> {
-            let mut decoder = JxlDecoder::new(&bytes[..], Limits::default())?;
-            let descriptor = decoder.descriptor();
-            let mut out = vec![0; descriptor.row_bytes() * descriptor.height as usize];
-            for row in out.chunks_exact_mut(descriptor.row_bytes()) {
-                decoder.read_row(row)?;
-            }
-            Ok((descriptor, out))
-        });
+        let result =
+            std::panic::catch_unwind(|| -> otf_pixels_core::Result<(ImageDescriptor, Vec<u8>)> {
+                let mut decoder = JxlDecoder::new(&bytes[..], Limits::default())?;
+                let descriptor = decoder.descriptor();
+                let mut out = vec![0; descriptor.row_bytes() * descriptor.height as usize];
+                for row in out.chunks_exact_mut(descriptor.row_bytes()) {
+                    decoder.read_row(row)?;
+                }
+                Ok((descriptor, out))
+            });
         match result {
             Ok(Ok((descriptor, pixels))) => {
                 std::fs::write(path.with_extension("otf"), pixels).unwrap();
                 std::fs::write(path.with_extension("fmt"), descriptor.pixel.to_string()).unwrap();
             }
-            Ok(Err(error)) => std::fs::write(path.with_extension("err"), error.to_string()).unwrap(),
+            Ok(Err(error)) => {
+                std::fs::write(path.with_extension("err"), error.to_string()).unwrap()
+            }
             Err(_) => std::fs::write(path.with_extension("err"), "panicked").unwrap(),
         }
     }
+}
+
+/// Damage every `.jxl` in `OTF_JXL_DIR` many ways and decode each: an error
+/// is fine, a panic is a defect. Prints what panics.
+#[test]
+#[ignore = "a tool: a quick mutation fuzz"]
+fn mutations_never_panic() {
+    let Ok(dir) = std::env::var("OTF_JXL_DIR") else {
+        return;
+    };
+    let rounds: u32 = std::env::var("OTF_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50);
+    let mut seed = 0x1234_5678_u32;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed
+    };
+    let mut panics = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "jxl") {
+            continue;
+        }
+        let original = std::fs::read(&path).unwrap();
+        for round in 0..rounds {
+            let mut bytes = original.clone();
+            match round % 3 {
+                0 => bytes.truncate(next() as usize % bytes.len().max(1)),
+                1 => {
+                    for _ in 0..1 + next() % 4 {
+                        let at = next() as usize % bytes.len();
+                        bytes[at] ^= 1 << (next() % 8);
+                    }
+                }
+                _ => {
+                    let at = next() as usize % bytes.len();
+                    bytes[at] = next() as u8;
+                }
+            }
+            let result = std::panic::catch_unwind(|| {
+                let Ok(mut decoder) = JxlDecoder::new(&bytes[..], Limits::default()) else {
+                    return;
+                };
+                let descriptor = decoder.descriptor();
+                let mut row = vec![0; descriptor.row_bytes()];
+                let _ = decoder.read_row(&mut row);
+            });
+            if result.is_err() {
+                panics += 1;
+                let out = format!("{}.panic{round}", path.display());
+                std::fs::write(&out, &bytes).unwrap();
+                eprintln!("PANIC {out}");
+            }
+        }
+    }
+    assert_eq!(panics, 0);
 }

@@ -161,7 +161,7 @@ pub use otf_pixels_codec_webp::{WebPCodec, WebPDecoder, WebPEncoder};
 pub use otf_pixels_codec_avif::{AvifCodec, AvifDecoder, AvifEncoder};
 
 #[cfg(feature = "jxl")]
-pub use otf_pixels_codec_jxl::JxlEncoder;
+pub use otf_pixels_codec_jxl::{JxlCodec, JxlDecoder, JxlEncoder};
 
 /// How [`Image::open_with`] and [`Image::from_stream_with`] read an image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -465,6 +465,11 @@ impl Image {
                 let decoder = AvifDecoder::new(stream, options.limits)?;
                 Self::decoded(Box::new(decoder), Format::Avif, options)
             }
+            #[cfg(feature = "jxl")]
+            Format::Jxl => {
+                let decoder = JxlDecoder::new(stream, options.limits)?;
+                Self::decoded(Box::new(decoder), Format::Jxl, options)
+            }
             other => Err(PixelsError::unsupported(format!(
                 "{other} was detected but no decoder for it is compiled in"
             ))),
@@ -481,7 +486,8 @@ impl Image {
         feature = "jpeg",
         feature = "tiff",
         feature = "webp",
-        feature = "avif"
+        feature = "avif",
+        feature = "jxl"
     ))]
     fn decoded(decoder: Box<dyn Decoder>, format: Format, options: OpenOptions) -> Result<Self> {
         let orientation = decoder.orientation();
@@ -1547,6 +1553,8 @@ fn sniffing_codecs() -> Vec<Box<dyn Codec>> {
         Box::new(WebPCodec),
         #[cfg(feature = "avif")]
         Box::new(AvifCodec),
+        #[cfg(feature = "jxl")]
+        Box::new(JxlCodec),
     ];
     codecs
 }

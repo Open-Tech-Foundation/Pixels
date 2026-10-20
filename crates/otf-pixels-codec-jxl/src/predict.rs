@@ -219,7 +219,12 @@ impl WeightedState {
         let ne3 = i64::from(nb.ne) << 3;
         let w3 = i64::from(nb.w) << 3;
         let nn3 = i64::from(nb.nn) << 3;
-        let WpParams { p1, p2, p3, weights } = self.params;
+        let WpParams {
+            p1,
+            p2,
+            p3,
+            weights,
+        } = self.params;
         let subpred = [
             w3 + ne3 - n3,
             n3 - (((ew + en + ene) * p1) >> 5),

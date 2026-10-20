@@ -24,7 +24,6 @@ pub struct FramePlanes {
     /// Extra channels, each with its own size.
     pub extra: Vec<Plane32>,
     /// What the VarDCT filters need, for a VarDCT frame.
-    #[allow(dead_code, reason = "the edge-preserving filter's, which comes next")]
     pub vardct: Option<super::vardct::FilterInfo>,
 }
 
@@ -58,11 +57,19 @@ impl<'a> Sections<'a> {
     /// # Errors
     ///
     /// For a section past the data, or whatever `f` returns.
-    pub fn with<T>(&mut self, i: usize, f: impl FnOnce(&mut BitReader<'a>) -> Result<T>) -> Result<T> {
+    pub fn with<T>(
+        &mut self,
+        i: usize,
+        f: impl FnOnce(&mut BitReader<'a>) -> Result<T>,
+    ) -> Result<T> {
         if let Some(r) = &mut self.shared {
             return f(r);
         }
-        let &(at, len) = self.toc.sections.get(i).ok_or_else(|| malformed("a section is missing"))?;
+        let &(at, len) = self
+            .toc
+            .sections
+            .get(i)
+            .ok_or_else(|| malformed("a section is missing"))?;
         let bytes = self
             .data
             .get(at..at + len)
@@ -148,8 +155,14 @@ pub fn decode(
         } else {
             Some(super::vardct::Global::parse(r)?)
         };
+        let mut features = features;
+        features.correlation = vardct_global
+            .as_ref()
+            .map(super::vardct::Global::base_correlation);
         let tree = if r.bool()? {
-            let samples = u64::from(frame.width) * u64::from(frame.height) * (frame.colour_channels + image.extra.len()) as u64;
+            let samples = u64::from(frame.width)
+                * u64::from(frame.height)
+                * (frame.colour_channels + image.extra.len()) as u64;
             Some(Tree::parse(r, (1024 + samples / 16).min(1 << 22) as usize)?)
         } else {
             None
@@ -157,7 +170,9 @@ pub fn decode(
         let mut shapes = Vec::new();
         if frame.modular {
             if frame.jpeg_upsampling.iter().any(|&u| u != 0) {
-                return Err(PixelsError::unsupported("JPEG XL: chroma-subsampled Modular frames"));
+                return Err(PixelsError::unsupported(
+                    "JPEG XL: chroma-subsampled Modular frames",
+                ));
             }
             for _ in 0..frame.colour_channels {
                 shapes.push(Shape {
@@ -176,7 +191,8 @@ pub fn decode(
                 vshift: shift as i32,
             });
         }
-        let gimage = GlobalImage::parse(r, &shapes, tree.as_ref(), group_dim, image.bit_depth.bits)?;
+        let gimage =
+            GlobalImage::parse(r, &shapes, tree.as_ref(), group_dim, image.bit_depth.bits)?;
         Ok((features, lf_dequant, vardct_global, tree, gimage))
     })?;
 
@@ -202,7 +218,15 @@ pub fn decode(
                     state.decode_lf_group(r, global, tree.as_ref(), i, pos)?;
                 }
             }
-            gimage.decode_group(r, tree.as_ref(), (1 + num_lf + i) as u32, group_dim, true, (0, 0), pos)?;
+            gimage.decode_group(
+                r,
+                tree.as_ref(),
+                (1 + num_lf + i) as u32,
+                group_dim,
+                true,
+                (0, 0),
+                pos,
+            )?;
             if let (Some(state), Some(global)) = (vardct.as_mut(), vardct_global.as_ref()) {
                 state.decode_hf_metadata(r, global, tree.as_ref(), i, pos)?;
             }
@@ -230,7 +254,15 @@ pub fn decode(
                     state.decode_pass_group(r, pass, g, pos)?;
                 }
                 let stream = 1 + 3 * num_lf + 17 + pass * num_groups + g;
-                gimage.decode_group(r, tree.as_ref(), stream as u32, group_dim, false, shift, pos)
+                gimage.decode_group(
+                    r,
+                    tree.as_ref(),
+                    stream as u32,
+                    group_dim,
+                    false,
+                    shift,
+                    pos,
+                )
             })?;
         }
     }
@@ -241,7 +273,9 @@ pub fn decode(
         let (c, info) = state.finish()?;
         (c, Some(info))
     } else {
-        let mut cols: Vec<Plane> = (0..frame.colour_channels).filter_map(|_| planes.next()).collect();
+        let mut cols: Vec<Plane> = (0..frame.colour_channels)
+            .filter_map(|_| planes.next())
+            .collect();
         if cols.len() != frame.colour_channels {
             return Err(malformed("a Modular frame lacks colour channels"));
         }
@@ -256,13 +290,26 @@ pub fn decode(
                 .zip(&cols[0].data)
                 .map(|(&b, &y)| b.saturating_add(y) as f32 * lf_dequant[2])
                 .collect();
-            let x: Vec<f32> = cols[1].data.iter().map(|&v| v as f32 * lf_dequant[0]).collect();
-            let y: Vec<f32> = cols[0].data.iter().map(|&v| v as f32 * lf_dequant[1]).collect();
+            let x: Vec<f32> = cols[1]
+                .data
+                .iter()
+                .map(|&v| v as f32 * lf_dequant[0])
+                .collect();
+            let y: Vec<f32> = cols[0]
+                .data
+                .iter()
+                .map(|&v| v as f32 * lf_dequant[1])
+                .collect();
             ([x, y, b], None)
         } else {
             let f: Vec<Vec<f32>> = cols
                 .drain(..)
-                .map(|p| p.data.into_iter().map(|v| to_float(v, image.bit_depth)).collect())
+                .map(|p| {
+                    p.data
+                        .into_iter()
+                        .map(|v| to_float(v, image.bit_depth))
+                        .collect()
+                })
                 .collect();
             if f.len() == 1 {
                 let g = f.into_iter().next().unwrap_or_default();
@@ -285,7 +332,11 @@ pub fn decode(
         .map(|(p, e)| Plane32 {
             width: p.width,
             height: p.height,
-            data: p.data.into_iter().map(|v| to_float(v, e.bit_depth)).collect(),
+            data: p
+                .data
+                .into_iter()
+                .map(|v| to_float(v, e.bit_depth))
+                .collect(),
         })
         .collect::<Vec<_>>();
     if extra.len() != image.extra.len() {

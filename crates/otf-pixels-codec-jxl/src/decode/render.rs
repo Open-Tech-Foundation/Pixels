@@ -9,7 +9,9 @@
 use otf_pixels_core::Result;
 
 use super::frame::{FramePlanes, Plane32};
-use super::header::{BlendMode, BlendingInfo, ExtraKind, FrameHeader, FrameType, ImageHeader, Toc, Transfer};
+use super::header::{
+    BlendMode, BlendingInfo, ExtraKind, FrameHeader, FrameType, ImageHeader, Toc, Transfer,
+};
 use super::reader::{BitReader, malformed};
 
 /// A canvas: three colour planes and the extra channels, all full size.
@@ -54,7 +56,13 @@ pub fn mirror(mut i: isize, n: usize) -> usize {
 }
 
 /// Upsample a plane by `2^shift` with the image's weights.
-fn upsample(data: &[f32], width: usize, height: usize, shift: u32, image: &ImageHeader) -> (Vec<f32>, usize, usize) {
+fn upsample(
+    data: &[f32],
+    width: usize,
+    height: usize,
+    shift: u32,
+    image: &ImageHeader,
+) -> (Vec<f32>, usize, usize) {
     let mut cur = (data.to_vec(), width, height);
     let mut left = shift;
     while left > 0 {
@@ -70,7 +78,13 @@ fn upsample(data: &[f32], width: usize, height: usize, shift: u32, image: &Image
     cur
 }
 
-fn upsample_once(data: &[f32], width: usize, height: usize, k: usize, weights: &[f32]) -> (Vec<f32>, usize, usize) {
+fn upsample_once(
+    data: &[f32],
+    width: usize,
+    height: usize,
+    k: usize,
+    weights: &[f32],
+) -> (Vec<f32>, usize, usize) {
     let n = k / 2;
     let mut kernels = vec![[0.0_f32; 25]; n * n];
     let mut wi = 0;
@@ -180,24 +194,46 @@ fn encode_transfer(v: f32, transfer: Transfer) -> f32 {
         Transfer::Hlg => {
             let (a, b, c) = (0.178_832_77, 0.284_668_92, 0.559_910_7);
             let v = v.max(0.0);
-            if v <= 1.0 / 12.0 { (3.0 * v).sqrt() } else { a * (12.0 * v - b).ln() + c }
+            if v <= 1.0 / 12.0 {
+                (3.0 * v).sqrt()
+            } else {
+                a * (12.0 * v - b).ln() + c
+            }
         }
         Transfer::Srgb | Transfer::Unknown => {
             let s = v.signum();
             let v = v.abs();
-            s * if v <= 0.003_130_8 { 12.92 * v } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
+            s * if v <= 0.003_130_8 {
+                12.92 * v
+            } else {
+                1.055 * v.powf(1.0 / 2.4) - 0.055
+            }
         }
     }
 }
 
 /// The colour transform to the image's colour space.
-fn colour_transform(colour: &mut [Vec<f32>; 3], image: &ImageHeader) {
+fn colour_transform(colour: &mut [Vec<f32>; 3], image: &ImageHeader, frame: &FrameHeader) {
+    if frame.do_ycbcr {
+        let [cb, y, cr] = colour;
+        for ((cb, y), cr) in cb.iter_mut().zip(y.iter_mut()).zip(cr.iter_mut()) {
+            let (b, l, r) = (*cb, *y + 128.0 / 255.0, *cr);
+            *cb = l + 1.402 * r;
+            *y = l - 0.114 * 1.772 / 0.587 * b - 0.299 * 1.402 / 0.587 * r;
+            *cr = l + 1.772 * b;
+        }
+        return;
+    }
     if !image.xyb {
         return;
     }
     xyb_to_linear(colour, image);
     // An ICC-described image is delivered as sRGB.
-    let transfer = if image.colour.want_icc { Transfer::Srgb } else { image.colour.transfer };
+    let transfer = if image.colour.want_icc {
+        Transfer::Srgb
+    } else {
+        image.colour.transfer
+    };
     if transfer != Transfer::Linear {
         for plane in colour.iter_mut() {
             for v in plane.iter_mut() {
@@ -207,96 +243,159 @@ fn colour_transform(colour: &mut [Vec<f32>; 3], image: &ImageHeader) {
     }
 }
 
-fn blend_sample(mode: BlendMode, clamp: bool, base: f32, new: f32, alpha: f32, premultiplied: bool) -> f32 {
-    let a = if clamp { alpha.clamp(0.0, 1.0) } else { alpha };
-    match mode {
-        BlendMode::Replace => new,
-        BlendMode::Add => base + new,
-        BlendMode::Blend => {
-            if premultiplied {
-                new + base * (1.0 - a)
-            } else {
-                new * a + base * (1.0 - a)
+/// How one channel's sample combines with what is below it.
+#[derive(Debug, Clone, Copy)]
+pub enum Op {
+    Replace,
+    Add,
+    Mul(bool),
+    /// Clamp, swapped, premultiplied.
+    Blend(bool, bool, bool),
+    /// Clamp, swapped.
+    MulAdd(bool, bool),
+    /// An alpha channel over another: clamp, swapped.
+    MixAlpha(bool, bool),
+    Skip,
+}
+
+impl Op {
+    /// Combine `base` and `new`, given their alphas; `new_alpha` is `None`
+    /// when the image has no alpha to blend by.
+    #[must_use]
+    pub fn apply(self, base: f32, new: f32, base_alpha: f32, new_alpha: Option<f32>) -> f32 {
+        match self {
+            Self::Replace => new,
+            Self::Add => base + new,
+            Self::Mul(clamp) => base * if clamp { new.clamp(0.0, 1.0) } else { new },
+            Self::Skip => base,
+            Self::Blend(clamp, swapped, premultiplied) => {
+                let Some(na) = new_alpha else {
+                    return new;
+                };
+                let (bs, ns, ba, mut na) = if swapped {
+                    (new, base, na, base_alpha)
+                } else {
+                    (base, new, base_alpha, na)
+                };
+                if clamp {
+                    na = na.clamp(0.0, 1.0);
+                }
+                if premultiplied {
+                    ns + bs * (1.0 - na)
+                } else {
+                    let mixed = 1.0 - (1.0 - na) * (1.0 - ba);
+                    let recip = if mixed > 0.0 { 1.0 / mixed } else { 0.0 };
+                    (na * ns + ba * bs * (1.0 - na)) * recip
+                }
             }
-        }
-        BlendMode::MulAdd => base + new * a,
-        BlendMode::Mul => {
-            if clamp {
-                base * new.clamp(0.0, 1.0)
-            } else {
-                base * new
+            Self::MulAdd(clamp, swapped) => {
+                let Some(na) = new_alpha else {
+                    return base + new;
+                };
+                let (bs, ns, mut na) = if swapped {
+                    (new, base, base_alpha)
+                } else {
+                    (base, new, na)
+                };
+                if clamp {
+                    na = na.clamp(0.0, 1.0);
+                }
+                bs + na * ns
+            }
+            Self::MixAlpha(clamp, swapped) => {
+                let (b, mut n) = if swapped { (new, base) } else { (base, new) };
+                if clamp {
+                    n = n.clamp(0.0, 1.0);
+                }
+                b + n * (1.0 - b)
             }
         }
     }
 }
 
-/// Blend a frame's full-size planes onto the canvas its blending source
-/// gives.
-#[allow(clippy::too_many_lines, reason = "colour, then each extra channel, by mode")]
-fn blend(frame: &FrameHeader, image: &ImageHeader, planes: &Frame, references: &References, width: usize, height: usize) -> Canvas {
+/// Blend a frame's full-size planes onto the canvas its blending sources
+/// give.
+fn blend(
+    frame: &FrameHeader,
+    image: &ImageHeader,
+    planes: &Frame,
+    references: &References,
+    width: usize,
+    height: usize,
+) -> Canvas {
     let extras = image.extra.len();
-    let mut out = references.slots[frame.blending.source as usize]
-        .clone()
-        .filter(|c| c.width == width && c.height == height)
-        .unwrap_or_else(|| Canvas::blank(width, height, extras));
+    let mut out = Canvas::blank(width, height, extras);
     let (fw, fh) = (planes.width, planes.height);
-    let x_start = frame.x0.max(0) as usize;
-    let y_start = frame.y0.max(0) as usize;
-    let x_end = (i64::from(frame.x0) + fw as i64).clamp(0, width as i64) as usize;
-    let y_end = (i64::from(frame.y0) + fh as i64).clamp(0, height as i64) as usize;
-    if x_start >= x_end || y_start >= y_end {
-        return out;
-    }
-    // Each channel blends from its own source.
-    let source_of = |info: &BlendingInfo| -> Option<&Canvas> {
-        references.slots[info.source as usize]
+    let has_extra = extras > 0;
+    for idx in 0..3 + extras {
+        let info: BlendingInfo = if idx < 3 {
+            frame.blending
+        } else {
+            frame.ec_blending[idx - 3]
+        };
+        let source = references.slots[info.source as usize]
             .as_ref()
-            .filter(|c| c.width == width && c.height == height)
-    };
-    let alpha_info = |info: &BlendingInfo| -> (Option<usize>, bool) {
-        let i = info.alpha_channel as usize;
-        match image.extra.get(i).map(|e| e.kind) {
-            Some(ExtraKind::Alpha { premultiplied }) => (Some(i), premultiplied),
-            _ => (None, false),
-        }
-    };
-    let frame_alpha = |i: Option<usize>, fx: usize, fy: usize| -> f32 {
-        i.and_then(|i| planes.extra.get(i)).map_or(1.0, |p| p[fy * fw + fx])
-    };
-    // Colour.
-    {
-        let info = frame.blending;
-        let base = source_of(&info);
-        let (ai, premul) = alpha_info(&info);
-        for y in y_start..y_end {
-            let fy = (y as i64 - i64::from(frame.y0)) as usize;
-            for x in x_start..x_end {
-                let fx = (x as i64 - i64::from(frame.x0)) as usize;
-                let a = frame_alpha(ai, fx, fy);
-                for c in 0..3 {
-                    let b = base.map_or(0.0, |s| s.colour[c][y * width + x]);
-                    out.colour[c][y * width + x] = blend_sample(info.mode, info.clamp, b, planes.colour[c][fy * fw + fx], a, premul);
-                }
+            .filter(|c| c.width == width && c.height == height);
+        let base_plane = source.map(|s| {
+            if idx < 3 {
+                &s.colour[idx]
+            } else {
+                &s.extra[idx - 3]
             }
+        });
+        let target = if idx < 3 {
+            &mut out.colour[idx]
+        } else {
+            &mut out.extra[idx - 3]
+        };
+        if let Some(b) = base_plane {
+            target.copy_from_slice(b);
         }
-    }
-    for (e, info) in frame.ec_blending.iter().enumerate().take(extras) {
-        let base = source_of(info);
-        let (ai, premul) = alpha_info(info);
-        let is_alpha = ai == Some(e);
+        let alpha = (matches!(info.mode, BlendMode::Blend | BlendMode::MulAdd) && has_extra)
+            .then_some(info.alpha_channel as usize);
+        let is_alpha = alpha.is_some_and(|a| a + 3 == idx);
+        let premultiplied = alpha.is_some_and(|a| {
+            matches!(
+                image.extra.get(a).map(|e| e.kind),
+                Some(ExtraKind::Alpha {
+                    premultiplied: true
+                })
+            )
+        });
+        let op = match info.mode {
+            BlendMode::Replace => Op::Replace,
+            BlendMode::Add => Op::Add,
+            BlendMode::Mul => Op::Mul(info.clamp),
+            BlendMode::Blend if is_alpha => Op::MixAlpha(info.clamp, false),
+            BlendMode::Blend => Op::Blend(info.clamp, false, premultiplied),
+            BlendMode::MulAdd if is_alpha => Op::Skip,
+            BlendMode::MulAdd => Op::MulAdd(info.clamp, false),
+        };
+        let x_start = frame.x0.max(0) as usize;
+        let y_start = frame.y0.max(0) as usize;
+        let x_end = (i64::from(frame.x0) + fw as i64).clamp(0, width as i64) as usize;
+        let y_end = (i64::from(frame.y0) + fh as i64).clamp(0, height as i64) as usize;
+        let new_plane = if idx < 3 {
+            &planes.colour[idx]
+        } else {
+            &planes.extra[idx - 3]
+        };
         for y in y_start..y_end {
             let fy = (y as i64 - i64::from(frame.y0)) as usize;
             for x in x_start..x_end {
                 let fx = (x as i64 - i64::from(frame.x0)) as usize;
-                let b = base.map_or(0.0, |s| s.extra[e][y * width + x]);
-                let new = planes.extra[e][fy * fw + fx];
-                out.extra[e][y * width + x] = if info.mode == BlendMode::Blend && is_alpha {
-                    let a = if info.clamp { new.clamp(0.0, 1.0) } else { new };
-                    a + b * (1.0 - a)
+                let f = fy * fw + fx;
+                let at = y * width + x;
+                let new_alpha = alpha.and_then(|a| planes.extra.get(a)).map(|p| p[f]);
+                let base_alpha = alpha
+                    .and_then(|a| source.and_then(|s| s.extra.get(a)))
+                    .map_or(0.0, |p| p[at]);
+                let base = if base_plane.is_some() {
+                    target[at]
                 } else {
-                    let a = frame_alpha(ai, fx, fy);
-                    blend_sample(info.mode, info.clamp, b, new, a, premul)
+                    0.0
                 };
+                target[at] = op.apply(base, new_plane[f], base_alpha, new_alpha);
             }
         }
     }
@@ -346,11 +445,27 @@ fn grow(frame: FramePlanes, header: &FrameHeader, image: &ImageHeader) -> Frame 
         .into_iter()
         .zip(&header.ec_upsampling)
         .zip(&image.extra)
-        .map(|((Plane32 { width, height, data }, &up), info)| {
-            let shift = up.trailing_zeros() + info.dim_shift;
-            let (d, ew, eh) = if shift > 0 { upsample(&data, width, height, shift, image) } else { (data, width, height) };
-            crop(d, ew, eh)
-        })
+        .map(
+            |(
+                (
+                    Plane32 {
+                        width,
+                        height,
+                        data,
+                    },
+                    &up,
+                ),
+                info,
+            )| {
+                let shift = up.trailing_zeros() + info.dim_shift;
+                let (d, ew, eh) = if shift > 0 {
+                    upsample(&data, width, height, shift, image)
+                } else {
+                    (data, width, height)
+                };
+                crop(d, ew, eh)
+            },
+        )
         .collect();
     Frame {
         width: fw,
@@ -382,6 +497,7 @@ pub fn probe(codestream: &[u8]) -> Result<(ImageHeader, Option<Vec<u8>>, Vec<u32
     loop {
         r.zero_pad_to_byte()?;
         let frame = FrameHeader::parse(&mut r, &header)?;
+        check_frame_size(&frame, &header)?;
         let toc = Toc::parse(&mut r, &frame)?;
         r.skip(toc.total * 8)?;
         if frame.is_keyframe() {
@@ -392,6 +508,17 @@ pub fn probe(codestream: &[u8]) -> Result<(ImageHeader, Option<Vec<u8>>, Vec<u32
         }
     }
     Ok((header, icc, durations))
+}
+
+/// Refuse a frame far larger than its image: its size is the attacker's
+/// to choose, and every buffer the frame needs scales with it.
+fn check_frame_size(frame: &FrameHeader, image: &ImageHeader) -> Result<()> {
+    let image_area = u64::from(image.width) * u64::from(image.height);
+    let area = u64::from(frame.width) * u64::from(frame.height);
+    if area > image_area.saturating_mul(4).saturating_add(1 << 22) {
+        return Err(malformed("a frame is far larger than its image"));
+    }
+    Ok(())
 }
 
 fn read_icc(r: &mut BitReader<'_>, header: &ImageHeader) -> Result<Option<Vec<u8>>> {
@@ -431,9 +558,11 @@ pub fn decode(codestream: &[u8]) -> Result<Image> {
     let mut references = References::default();
     let mut lf_frames: [Option<FramePlanes>; 5] = Default::default();
     let mut canvas = None;
+    let (mut index, mut last_visible, mut visible) = (0_u64, None::<u64>, 0_u64);
     loop {
         r.zero_pad_to_byte()?;
         let frame = FrameHeader::parse(&mut r, &header)?;
+        check_frame_size(&frame, &header)?;
         let toc = Toc::parse(&mut r, &frame)?;
         let start = r.position() / 8;
         let data = codestream
@@ -441,16 +570,28 @@ pub fn decode(codestream: &[u8]) -> Result<Image> {
             .ok_or_else(|| malformed("a frame runs past the codestream"))?;
         r.skip(toc.total * 8)?;
         if canvas.is_none() {
-            let (mut planes, features) = super::frame::decode(data, &toc, &header, &frame, &lf_frames, &references)?;
+            let (mut planes, mut features) =
+                super::frame::decode(data, &toc, &header, &frame, &lf_frames, &references)?;
+            if frame.is_keyframe() {
+                visible += 1;
+                features.visible = visible;
+                features.invisible = 0;
+            } else {
+                features.visible = visible;
+                features.invisible = last_visible.map_or(index + 1, |v| index - v);
+            }
             super::filter::restore(&mut planes, &frame)?;
             if frame.frame_type == FrameType::Lf {
-                lf_frames[frame.lf_level as usize] = Some(planes);
+                if let Some(slot) = lf_frames.get_mut(frame.lf_level as usize) {
+                    *slot = Some(planes);
+                }
+                index += 1;
                 continue;
             }
             let mut full = grow(planes, &frame, &header);
             features.apply(&mut full, &frame, &header, &references)?;
             if !frame.save_before_ct {
-                colour_transform(&mut full.colour, &header);
+                colour_transform(&mut full.colour, &header, &frame);
             }
             let blended = blend(&frame, &header, &full, &references, width, height);
             if frame.can_reference() || frame.frame_type == FrameType::ReferenceOnly {
@@ -460,6 +601,10 @@ pub fn decode(codestream: &[u8]) -> Result<Image> {
                 canvas = Some(blended);
             }
         }
+        if frame.is_keyframe() {
+            last_visible = Some(index);
+        }
+        index += 1;
         if frame.is_last || canvas.is_some() {
             break;
         }
@@ -467,7 +612,10 @@ pub fn decode(codestream: &[u8]) -> Result<Image> {
     let mut canvas = canvas.ok_or_else(|| malformed("no frame is displayed"))?;
     // Straight alpha out.
     for (e, info) in header.extra.iter().enumerate() {
-        if let ExtraKind::Alpha { premultiplied: true } = info.kind {
+        if let ExtraKind::Alpha {
+            premultiplied: true,
+        } = info.kind
+        {
             let alpha = canvas.extra[e].clone();
             for plane in &mut canvas.colour {
                 for (v, &a) in plane.iter_mut().zip(&alpha) {

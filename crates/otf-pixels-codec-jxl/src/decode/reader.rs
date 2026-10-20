@@ -160,7 +160,9 @@ impl<'a> BitReader<'a> {
             let value = mantissa as f32 / 1024.0 / 16_384.0;
             return Ok(if sign != 0 { -value } else { value });
         }
-        Ok(f32::from_bits(sign | ((exponent + 112) << 23) | (mantissa << 13)))
+        Ok(f32::from_bits(
+            sign | ((exponent + 112) << 23) | (mantissa << 13),
+        ))
     }
 
     /// Skip to the next byte boundary, which must be zero padding.
@@ -207,7 +209,11 @@ mod tests {
         let mut r = BitReader::new(&bytes);
         assert_eq!(r.read(5).unwrap(), 19);
         assert!(r.bool().unwrap());
-        assert_eq!(r.u32([val(0), bits(1, 4), bits(17, 8), bits(273, 12)]).unwrap(), 300);
+        assert_eq!(
+            r.u32([val(0), bits(1, 4), bits(17, 8), bits(273, 12)])
+                .unwrap(),
+            300
+        );
         assert_eq!(r.u32(ENUM).unwrap(), 13);
         for v in [0_u64, 7, 200, 1 << 40] {
             assert_eq!(r.u64().unwrap(), v);

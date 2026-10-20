@@ -15,6 +15,6 @@ seconds="${1:-120}"
 target="$(rustc +nightly -vV | sed -n 's/^host: //p')"
 cd "$(dirname "$0")/../fuzz"
 
-for fuzz_target in png_decode inflate png_roundtrip jpeg_decode jpeg_roundtrip avif_decode; do
+for fuzz_target in png_decode inflate png_roundtrip jpeg_decode jpeg_roundtrip avif_decode jxl_decode; do
     cargo +nightly fuzz run --target "$target" "$fuzz_target" -- -max_total_time="$seconds"
 done

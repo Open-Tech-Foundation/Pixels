@@ -14,10 +14,12 @@
 
 </div>
 
-> Encodes JPEG XL: lossy VarDCT in XYB, or lossless Modular, from grey or
-> RGB at 8 or 16 bits; images with alpha are lossless for now. Decoding is
-> in progress.
+> Decodes JPEG XL, every coding tool, bare or in its container; encodes
+> lossy VarDCT in XYB, or lossless Modular, from grey or RGB at 8 or 16
+> bits (images with alpha are lossless for now).
 
-Every file decodes in libjxl's `djxl`, lossless ones bit-exactly. Use it through
-[`otf-pixels`](https://crates.io/crates/otf-pixels) with
-`output(Format::Jxl, ..)`, or directly as an `Encoder`.
+Files libjxl's `cjxl` writes decode to `djxl`'s pixels, lossless ones
+bit-exactly, and every file this crate writes decodes in `djxl`. Use it
+through [`otf-pixels`](https://crates.io/crates/otf-pixels), which
+recognises `.jxl` input and writes it with `output(Format::Jxl, ..)`, or
+directly as a `Decoder` and `Encoder`.

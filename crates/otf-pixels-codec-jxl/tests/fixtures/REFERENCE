@@ -1,0 +1,26 @@
+# Regenerate with scripts/regenerate-jxl-reference.py
+# name width height channels tolerance bits
+photo_lossless_e1 96 72 3 0 8
+photo_lossless_e3 96 72 3 0 8
+photo_lossless_e7 96 72 3 0 8
+photo_lossless_e9 96 72 3 0 8
+photo_lossless_squeeze 96 72 3 0 8
+wide_lossless_groups 300 140 3 0 8
+flat_lossless_palette 70 50 3 0 8
+alpha_lossless 64 48 4 0 8
+grey16_lossless 48 40 1 0 16
+photo_d1 96 72 3 1 8
+photo_d1_e9 96 72 3 1 8
+photo_d4 96 72 3 1 8
+wide_d2 300 140 3 1 8
+wide_d1_progressive 300 140 3 1 8
+wide_d1_lf_frame 300 140 3 1 8
+photo_d1_noise 96 72 3 1 8
+photo_d1_epf3 96 72 3 1 8
+wide_d1_resampled 300 140 3 1 8
+text_d1_patches 240 70 3 1 8
+text_lossless_patches 240 70 3 0 8
+alpha_d1 64 48 4 1 8
+photo_modular_lossy 96 72 3 1 8
+photo_jpeg 96 72 3 1 8
+anim 64 48 4 0 8

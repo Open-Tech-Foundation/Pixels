@@ -24,7 +24,9 @@ against libjxl's `djxl` (`scripts/check-jxl-interop.sh`):
 3. Lossy VarDCT in XYB, the mode most images will be served in: first
    DCT8 blocks, one quantizer and no filters (done), then adaptive
    quantization, larger transforms, Gaborish and EPF.
-4. Container boxes (EXIF, ICC), then a decoder.
+4. Container boxes (EXIF, ICC), then a decoder (done): every coding tool,
+   since any encoder may use any of them, checked against `djxl`'s pixels
+   on files `cjxl` writes (`tests/reference.rs`).
 
 The field definitions were read from libjxl (BSD-3-Clause) and jxl-oxide
 (MIT/Apache-2.0); the code is written here.
@@ -35,4 +37,7 @@ The field definitions were read from libjxl (BSD-3-Clause) and jxl-oxide
 - Until phase 2 ends, lossless files are short of libjxl's slower efforts
   (a 960x600 photo: 266 KB, against PNG's 327 KB, `cjxl -e3`'s 245 KB and
   `-e7`'s 218 KB).
-- Until phase 4, `.jxl` input is not recognised.
++ `.jxl` input is recognised and decoded to its first displayed frame.
+- The decoder favours plain loops over speed: a 1920x1200 photo at
+  distance 1 decodes in about 0.3 s on one core, where `djxl` takes 0.06 s;
+  lossless decodes within 1.5x of it.

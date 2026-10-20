@@ -93,7 +93,11 @@ impl Bytes<'_> {
     }
 
     fn take(&mut self, n: usize) -> Result<&[u8]> {
-        let end = self.at.checked_add(n).filter(|&e| e <= self.data.len()).ok_or_else(|| bad("cut short"))?;
+        let end = self
+            .at
+            .checked_add(n)
+            .filter(|&e| e <= self.data.len())
+            .ok_or_else(|| bad("cut short"))?;
         let out = &self.data[self.at..end];
         self.at = end;
         Ok(out)
@@ -169,11 +173,16 @@ fn shuffle4(bytes: &[u8]) -> Vec<u8> {
 #[allow(clippy::too_many_lines, reason = "one command after another")]
 pub fn decode(stream: &[u8]) -> Result<Vec<u8>> {
     const TAGS: [&[u8; 4]; 19] = [
-        b"rTRC", b"rXYZ", b"cprt", b"wtpt", b"bkpt", b"rXYZ", b"gXYZ", b"bXYZ", b"kXYZ", b"rTRC", b"gTRC",
-        b"bTRC", b"kTRC", b"chad", b"desc", b"chrm", b"dmnd", b"dmdd", b"lumi",
+        b"rTRC", b"rXYZ", b"cprt", b"wtpt", b"bkpt", b"rXYZ", b"gXYZ", b"bXYZ", b"kXYZ", b"rTRC",
+        b"gTRC", b"bTRC", b"kTRC", b"chad", b"desc", b"chrm", b"dmnd", b"dmdd", b"lumi",
     ];
-    const DATA: [&[u8; 4]; 8] = [b"XYZ ", b"desc", b"text", b"mluc", b"para", b"curv", b"sf32", b"gbd "];
-    let mut head = Bytes { data: stream, at: 0 };
+    const DATA: [&[u8; 4]; 8] = [
+        b"XYZ ", b"desc", b"text", b"mluc", b"para", b"curv", b"sf32", b"gbd ",
+    ];
+    let mut head = Bytes {
+        data: stream,
+        at: 0,
+    };
     let size = head.varint()?;
     let commands_size = head.varint()? as usize;
     if size > 1 << 28 {
@@ -190,7 +199,10 @@ pub fn decode(stream: &[u8]) -> Result<Vec<u8>> {
     }
     let (header, data) = data.split_at(header_size);
     let mut data = Bytes { data, at: 0 };
-    let mut cmds = Bytes { data: commands, at: 0 };
+    let mut cmds = Bytes {
+        data: commands,
+        at: 0,
+    };
     let mut out = Vec::with_capacity(size as usize);
     for (i, &e) in header.iter().enumerate() {
         out.push(predict_header(i, size as u32, header).wrapping_add(e));
@@ -225,7 +237,10 @@ pub fn decode(stream: &[u8]) -> Result<Vec<u8>> {
             };
             let tag_size = if command & 128 != 0 {
                 cmds.varint()? as u32
-            } else if matches!(&tag, b"rXYZ" | b"gXYZ" | b"bXYZ" | b"kXYZ" | b"wtpt" | b"bkpt" | b"lumi") {
+            } else if matches!(
+                &tag,
+                b"rXYZ" | b"gXYZ" | b"bXYZ" | b"kXYZ" | b"wtpt" | b"bkpt" | b"lumi"
+            ) {
                 20
             } else {
                 prev_size
@@ -262,7 +277,11 @@ pub fn decode(stream: &[u8]) -> Result<Vec<u8>> {
             2 | 3 => {
                 let n = cmds.varint()? as usize;
                 let bytes = data.take(n)?;
-                out.extend(if command == 2 { shuffle2(bytes) } else { shuffle4(bytes) });
+                out.extend(if command == 2 {
+                    shuffle2(bytes)
+                } else {
+                    shuffle4(bytes)
+                });
             }
             4 => {
                 let flags = cmds.byte().ok_or_else(|| bad("cut short"))?;
@@ -301,10 +320,16 @@ pub fn decode(stream: &[u8]) -> Result<Vec<u8>> {
                     let p = match order {
                         0 => prev[0],
                         1 => prev[0].wrapping_mul(2).wrapping_sub(prev[1]),
-                        _ => prev[0].wrapping_sub(prev[1]).wrapping_mul(3).wrapping_add(prev[2]),
+                        _ => prev[0]
+                            .wrapping_sub(prev[1])
+                            .wrapping_mul(3)
+                            .wrapping_add(prev[2]),
                     };
                     for j in 0..width.min(n - i) {
-                        out.push((u32::from(bytes[i + j]).wrapping_add(p >> (8 * (width - 1 - j)))) as u8);
+                        out.push(
+                            (u32::from(bytes[i + j]).wrapping_add(p >> (8 * (width - 1 - j))))
+                                as u8,
+                        );
                     }
                 }
             }

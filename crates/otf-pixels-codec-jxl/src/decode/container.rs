@@ -12,7 +12,8 @@ use otf_pixels_core::Result;
 use super::reader::malformed;
 
 /// The container's signature box.
-pub const CONTAINER_SIGNATURE: [u8; 12] = [0, 0, 0, 12, b'J', b'X', b'L', b' ', 0x0D, 0x0A, 0x87, 0x0A];
+pub const CONTAINER_SIGNATURE: [u8; 12] =
+    [0, 0, 0, 12, b'J', b'X', b'L', b' ', 0x0D, 0x0A, 0x87, 0x0A];
 /// A bare codestream's first two bytes.
 pub const CODESTREAM_SIGNATURE: [u8; 2] = [0xFF, 0x0A];
 
@@ -48,12 +49,18 @@ pub fn parse(file: &[u8]) -> Result<Contents> {
     let mut out = Contents::default();
     let mut at = 0;
     while at < file.len() {
-        let header = file.get(at..at + 8).ok_or_else(|| malformed("a box header is cut short"))?;
-        let mut size = u64::from(u32::from_be_bytes([header[0], header[1], header[2], header[3]]));
+        let header = file
+            .get(at..at + 8)
+            .ok_or_else(|| malformed("a box header is cut short"))?;
+        let mut size = u64::from(u32::from_be_bytes([
+            header[0], header[1], header[2], header[3],
+        ]));
         let kind = [header[4], header[5], header[6], header[7]];
         let mut body = at + 8;
         if size == 1 {
-            let large = file.get(body..body + 8).ok_or_else(|| malformed("a box size is cut short"))?;
+            let large = file
+                .get(body..body + 8)
+                .ok_or_else(|| malformed("a box size is cut short"))?;
             size = u64::from_be_bytes(large.try_into().map_err(|_| malformed("box size"))?);
             body += 8;
         }
@@ -70,12 +77,14 @@ pub fn parse(file: &[u8]) -> Result<Contents> {
         match &kind {
             b"jxlc" => out.codestream.extend_from_slice(payload),
             b"jxlp" => {
-                out.codestream.extend_from_slice(payload.get(4..).unwrap_or(&[]));
+                out.codestream
+                    .extend_from_slice(payload.get(4..).unwrap_or(&[]));
             }
             b"Exif" if out.exif.is_none() => {
                 // A 32-bit offset to the TIFF header, then the block.
                 if let Some(offset) = payload.get(..4) {
-                    let skip = u32::from_be_bytes([offset[0], offset[1], offset[2], offset[3]]) as usize;
+                    let skip =
+                        u32::from_be_bytes([offset[0], offset[1], offset[2], offset[3]]) as usize;
                     out.exif = payload.get(skip.saturating_add(4)..).map(<[u8]>::to_vec);
                 }
             }
