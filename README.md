@@ -106,7 +106,7 @@ Requires Rust 1.85+. Every codec is on by default; for a smaller build, use
 | Format | Decode | Encode |
 | --- | --- | --- |
 | **PNG** | All bit depths, palettes, transparency, interlaced | 8/16-bit, every filter |
-| **JPEG** | Baseline and progressive, scaled (1/2, 1/4, 1/8) | Baseline, chroma subsampling |
+| **JPEG** | Baseline and progressive, scaled (1/2, 1/4, 1/8) | Baseline or progressive (per-scan optimized tables), chroma subsampling |
 | **WebP** | Lossy, lossless, alpha; first frame of animations | Lossy (default) or lossless |
 | **AVIF** | Still images, 8/10/12-bit | Lossy, 8-bit |
 | **GIF** | Every frame, interlace, disposal; first frame composited | Single frame, quantized palette |

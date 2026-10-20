@@ -115,11 +115,12 @@
 //!   conversion.
 //! - **Metadata**: EXIF/HEIF orientation applied on open; ICC profiles
 //!   converted to sRGB or carried to the output; animation reported, with
-//!   the first frame processed. Other metadata (EXIF, XMP) is not written
-//!   out, which also strips location data from uploads.
+//!   the first frame processed. EXIF is written only when an output keeps
+//!   it ([`EncodeOptions::keep_exif`]), so location data is stripped from
+//!   uploads by default; XMP is never written.
 //!
-//! Not yet: multi-frame (animated) pipelines, arbitrary-angle rotation and
-//! progressive JPEG output. Each will arrive as an addition, not a change:
+//! Not yet: multi-frame (animated) pipelines and arbitrary-angle rotation.
+//! Each will arrive as an addition, not a change:
 //! [`OpenOptions::animated`] is already reserved for the first.
 
 use otf_pixels_core::{BufferSource, Op, Prefixed, Producer, TileBuf};

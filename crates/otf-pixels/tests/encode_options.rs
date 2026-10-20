@@ -303,3 +303,30 @@ fn avif_effort_keeps_its_default_and_decodes_at_every_level() {
         assert_eq!(decoded.descriptor().unwrap().width, 40);
     }
 }
+
+#[test]
+fn progressive_jpeg_is_smaller_and_decodes_to_the_baseline_pixels() {
+    let photo = || noisy(160, 120, PixelFormat::Rgb8).blur(1.2);
+    let options = EncodeOptions::with_quality(85).unwrap();
+    let baseline = encode(photo(), Format::Jpeg, options);
+    let progressive = encode(photo(), Format::Jpeg, options.with_progressive(true));
+    assert!(
+        progressive.len() < baseline.len(),
+        "{} against {}",
+        progressive.len(),
+        baseline.len()
+    );
+    assert_eq!(progressive[..2], [0xFF, 0xD8]);
+    assert!(
+        progressive.windows(2).any(|w| w == [0xFF, 0xC2]),
+        "an SOF2 frame"
+    );
+    let pixels = |bytes: Vec<u8>| {
+        encode(
+            Image::from_stream(std::io::Cursor::new(bytes)).unwrap(),
+            Format::Raw,
+            EncodeOptions::default(),
+        )
+    };
+    assert_eq!(pixels(progressive), pixels(baseline));
+}

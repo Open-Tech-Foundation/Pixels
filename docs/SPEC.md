@@ -12,7 +12,7 @@ implementation detail and may change without notice.
 | GIF | ✅ | ✅ | own | yes (per frame) |
 | TIFF | ✅ | ✅ | own | yes; tiled TIFF = region random access |
 | JPEG (baseline) | ✅ | ✅ | own | yes |
-| JPEG (progressive) | ✅ | ❌ (v2) | own (ADR-0018) | coefficient buffer; scaled decode |
+| JPEG (progressive) | ✅ | ✅ | own (ADR-0018) | coefficient buffer; scaled decode |
 | WebP | ✅ | ✅ lossy and lossless | own (ADR-0014) | internal buffer |
 | AVIF | ✅ | ✅ lossy, 8-bit 4:2:0 | own | internal buffer |
 

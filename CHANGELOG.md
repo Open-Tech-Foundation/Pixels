@@ -42,6 +42,16 @@ versioning: [SemVer](https://semver.org/).
   5–7%.
 
 ### Added
+- Progressive JPEG output, sharp's `progressive`.
+  `EncodeOptions::with_progressive(true)` (or
+  `JpegEncoder::with_progressive`) writes `SOF2` with libjpeg's default
+  scan script, successive approximation and end-of-band runs included, and
+  Huffman tables optimized for each scan (T.81 Annex K.2). The files are
+  4-21% smaller than baseline on photographs, within a few dozen bytes of
+  libjpeg's own progressive output with optimized tables, and libjpeg
+  decodes them to exactly the baseline file's pixels. A progressive encode
+  holds the image's quantized coefficients (2 bytes each) until it
+  finishes, where baseline streams.
 - sharp's `keepExif`. `EncodeOptions::with_keep_exif(true)` copies the
   source's EXIF block into a JPEG (`APP1`), PNG (`eXIf`), WebP (`EXIF`, with
   `VP8X`) or AVIF (an `Exif` item described by `cdsc`) output; by default

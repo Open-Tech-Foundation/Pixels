@@ -209,6 +209,10 @@ pub struct EncodeOptions {
     /// where the format has a place for one: JPEG, PNG, WebP and AVIF. Off
     /// by default, which strips camera data and location from uploads.
     pub keep_exif: bool,
+    /// Write JPEG as progressive (sharp's `progressive`): a coarse picture
+    /// first, sharpened by later scans, and usually a little smaller. The
+    /// encoder then holds the image's coefficients rather than streaming.
+    pub progressive: bool,
 }
 
 /// Check `value` lies in `range`, naming `name` if not.
@@ -343,6 +347,13 @@ impl EncodeOptions {
         self
     }
 
+    /// These options with progressive JPEG on or off.
+    #[must_use]
+    pub const fn with_progressive(mut self, progressive: bool) -> Self {
+        self.progressive = progressive;
+        self
+    }
+
     /// Whether a PNG should be written as a palette image.
     #[must_use]
     pub const fn wants_palette(&self) -> bool {
@@ -364,6 +375,7 @@ impl Default for EncodeOptions {
             near_lossless: false,
             chroma_subsampling: None,
             keep_exif: false,
+            progressive: false,
         }
     }
 }

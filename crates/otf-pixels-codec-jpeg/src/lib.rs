@@ -33,6 +33,7 @@ mod format;
 mod huffman;
 mod idct;
 mod progressive;
+mod progressive_encode;
 mod tables;
 
 pub use decoder::{JpegCodec, JpegDecoder, probe};

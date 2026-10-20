@@ -1,4 +1,4 @@
-//! The baseline JPEG encoder.
+//! The JPEG encoder: baseline, or progressive on request.
 //!
 //! # Memory
 //!
@@ -15,16 +15,24 @@
 //! means buffering the whole image. The few percent it would save is not
 //! worth trading ADR-0005's streaming contract for.
 //!
+//! Progressive output ([`JpegEncoder::with_progressive`]) has no such
+//! choice: no scan can be written before every block is known. It keeps the
+//! image's quantized coefficients, as the progressive decoder does, and
+//! writes its scans, with tables optimized for each, in
+//! [`Encoder::finish`]; see `progressive_encode`.
+//!
 //! # What is written
 //!
 //! Baseline sequential JPEG: `SOI`, `APP0` (JFIF), `DQT`, `SOF0`, `DHT`,
-//! `SOS`, one interleaved scan, `EOI`. No restart markers — they cost bytes
+//! `SOS`, one interleaved scan, `EOI`. Progressive JPEG writes `SOF2` and
+//! then libjpeg's default ten scans (six for grey), each after its own `DHT`. No restart markers — they cost bytes
 //! and buy resynchronization after corruption, which matters for broadcast
 //! and not for a file a pipeline just produced.
 
 use crate::fdct;
 use crate::format::{ICC_CHUNK, ZIGZAG, icc_segments, marker};
 use crate::huffman::HuffmanEncoder;
+use crate::progressive_encode::Coefficients;
 use crate::tables;
 use otf_pixels_core::{
     ChromaSubsampling, EncodeOptions, Encoder, ImageDescriptor, PixelFormat, PixelsError, Result,
@@ -65,6 +73,8 @@ impl Subsampling {
 pub struct JpegEncoder {
     quality: u8,
     subsampling: Subsampling,
+    /// Write a progressive (`SOF2`) file rather than a baseline one.
+    progressive: bool,
     /// Set by `write_header`; its presence means the header was written.
     state: Option<State>,
     /// The ICC profile to embed after the JFIF header, if any.
@@ -104,6 +114,10 @@ struct State {
     predictors: [i32; 3],
     writer: BitWriter,
     rows_written: u32,
+    /// For progressive output, every quantized block, kept for the scans.
+    coefficients: Option<Coefficients>,
+    /// MCU rows already transformed.
+    mcu_row: u32,
 }
 
 /// One component's padded plane for the MCU row being encoded.
@@ -150,16 +164,16 @@ fn chroma_plane(grayscale: bool, stride: usize, height: u32) -> Plane {
 
 /// Accumulates entropy-coded bits, stuffing `0xFF` bytes as it goes.
 #[derive(Debug, Default)]
-struct BitWriter {
+pub(crate) struct BitWriter {
     /// Completed bytes, drained to the sink after each MCU row.
-    bytes: Vec<u8>,
+    pub(crate) bytes: Vec<u8>,
     accumulator: u32,
     bits: u32,
 }
 
 impl BitWriter {
     /// Append `length` low bits of `code`, most significant first.
-    fn write(&mut self, code: u32, length: u32) {
+    pub(crate) fn write(&mut self, code: u32, length: u32) {
         if length == 0 || length > 32 {
             return;
         }
@@ -191,7 +205,7 @@ impl BitWriter {
     /// One bits rather than zero: a trailing run of zeros could be read as
     /// the start of a valid code, where a run of ones cannot be — no standard
     /// table assigns an all-ones code.
-    fn flush(&mut self) {
+    pub(crate) fn flush(&mut self) {
         if self.bits > 0 {
             let padding = 8 - self.bits;
             self.write((1 << padding) - 1, padding);
@@ -204,7 +218,7 @@ impl BitWriter {
 /// JPEG codes a coefficient as a magnitude category plus that many raw bits,
 /// where a negative value is stored as its predecessor in the category's
 /// lower half — the mirror of `receive_extend` on the decoding side.
-fn magnitude(value: i32) -> (u32, u32) {
+pub(crate) fn magnitude(value: i32) -> (u32, u32) {
     if value == 0 {
         return (0, 0);
     }
@@ -225,6 +239,7 @@ impl JpegEncoder {
         Self {
             quality: EncodeOptions::DEFAULT_QUALITY,
             subsampling: Subsampling::Both,
+            progressive: false,
             state: None,
             icc: None,
             exif: None,
@@ -255,6 +270,7 @@ impl JpegEncoder {
             } else {
                 Subsampling::Both
             },
+            progressive: false,
             state: None,
             icc: None,
             exif: None,
@@ -268,11 +284,30 @@ impl JpegEncoder {
         self
     }
 
-    /// An encoder configured from generic encode options: `quality`, and
-    /// `chroma_subsampling` in place of the one quality implies.
+    /// Write a progressive file (sharp's `progressive`): a viewer shows a
+    /// coarse picture first and sharpens it as the rest arrives, and the
+    /// per-scan tables usually make it a few percent smaller. The whole
+    /// image's coefficients are held until [`Encoder::finish`].
+    #[must_use]
+    pub const fn with_progressive(mut self, progressive: bool) -> Self {
+        self.progressive = progressive;
+        self
+    }
+
+    /// Whether this encoder writes a progressive file.
+    #[must_use]
+    pub const fn progressive(&self) -> bool {
+        self.progressive
+    }
+
+    /// An encoder configured from generic encode options: `quality`,
+    /// `progressive`, and `chroma_subsampling` in place of the one quality
+    /// implies.
     #[must_use]
     pub fn from_options(options: &EncodeOptions) -> Self {
-        let encoder = Self::with_quality(options.quality).unwrap_or_else(|_| Self::new());
+        let encoder = Self::with_quality(options.quality)
+            .unwrap_or_else(|_| Self::new())
+            .with_progressive(options.progressive);
         match options.chroma_subsampling {
             Some(ChromaSubsampling::Yuv444) => encoder.with_subsampling(Subsampling::None),
             Some(ChromaSubsampling::Yuv420) => encoder.with_subsampling(Subsampling::Both),
@@ -456,6 +491,11 @@ impl State {
                     self.luma.block(x, y, &mut samples);
                     fdct::block(&samples, &mut coefficients);
                     fdct::quantize(&coefficients, &self.luma_quant, &mut quantized);
+                    if let Some(kept) = self.coefficients.as_mut() {
+                        let row = (self.mcu_row * v + block_y) as usize;
+                        kept.store(0, (mcu * h + block_x) as usize, row, &quantized);
+                        continue;
+                    }
                     encode_block(
                         &mut self.writer,
                         &quantized,
@@ -470,13 +510,25 @@ impl State {
             }
 
             let x = (mcu * 8) as usize;
-            for (plane, predictor) in [
+            for (component, (plane, predictor)) in [
                 (&self.chroma_blue, &mut *blue_predictor),
                 (&self.chroma_red, &mut *red_predictor),
-            ] {
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 plane.block(x, 0, &mut samples);
                 fdct::block(&samples, &mut coefficients);
                 fdct::quantize(&coefficients, &self.chroma_quant, &mut quantized);
+                if let Some(kept) = self.coefficients.as_mut() {
+                    kept.store(
+                        component + 1,
+                        mcu as usize,
+                        self.mcu_row as usize,
+                        &quantized,
+                    );
+                    continue;
+                }
                 encode_block(
                     &mut self.writer,
                     &quantized,
@@ -486,6 +538,7 @@ impl State {
                 );
             }
         }
+        self.mcu_row += 1;
     }
 }
 
@@ -551,7 +604,7 @@ fn write_marker(code: u8, sink: &mut dyn Sink) -> Result<()> {
 }
 
 /// Write a marker segment, prefixing the length its payload implies.
-fn write_segment(code: u8, payload: &[u8], sink: &mut dyn Sink) -> Result<()> {
+pub(crate) fn write_segment(code: u8, payload: &[u8], sink: &mut dyn Sink) -> Result<()> {
     let Ok(length) = u16::try_from(payload.len() + 2) else {
         return Err(PixelsError::unsupported(format!(
             "a {code:#04x} segment of {} bytes does not fit a 16-bit length",
@@ -570,6 +623,56 @@ fn write_quant_table(slot: u8, steps: &[u16; 64], payload: &mut Vec<u8>) {
     for &position in &ZIGZAG {
         payload.push(steps.get(position).copied().unwrap_or(1).clamp(1, 255) as u8);
     }
+}
+
+/// The standard Huffman tables and the one interleaved scan's header, for
+/// baseline output.
+fn write_baseline_scan_header(grayscale: bool, sink: &mut dyn Sink) -> Result<()> {
+    let mut payload = Vec::new();
+    write_huffman_table(
+        0,
+        0,
+        &tables::LUMA_DC_COUNTS,
+        &tables::LUMA_DC_VALUES,
+        &mut payload,
+    );
+    write_huffman_table(
+        1,
+        0,
+        &tables::LUMA_AC_COUNTS,
+        &tables::LUMA_AC_VALUES,
+        &mut payload,
+    );
+    if !grayscale {
+        write_huffman_table(
+            0,
+            1,
+            &tables::CHROMA_DC_COUNTS,
+            &tables::CHROMA_DC_VALUES,
+            &mut payload,
+        );
+        write_huffman_table(
+            1,
+            1,
+            &tables::CHROMA_AC_COUNTS,
+            &tables::CHROMA_AC_VALUES,
+            &mut payload,
+        );
+    }
+    write_segment(marker::DHT, &payload, sink)?;
+
+    let mut payload = Vec::new();
+    if grayscale {
+        payload.push(1);
+        payload.extend_from_slice(&[1, 0x00]);
+    } else {
+        payload.push(3);
+        payload.extend_from_slice(&[1, 0x00, 2, 0x11, 3, 0x11]);
+    }
+    // Spectral selection 0..=63 with no successive approximation: the
+    // only shape a baseline scan may take.
+    payload.extend_from_slice(&[0, 63, 0]);
+    write_segment(marker::SOS, &payload, sink)
 }
 
 /// Write one Huffman table definition.
@@ -702,53 +805,18 @@ impl Encoder for JpegEncoder {
             payload.extend_from_slice(&[2, 0x11, 1]);
             payload.extend_from_slice(&[3, 0x11, 1]);
         }
-        write_segment(marker::SOF0, &payload, sink)?;
-
-        let mut payload = Vec::new();
-        write_huffman_table(
-            0,
-            0,
-            &tables::LUMA_DC_COUNTS,
-            &tables::LUMA_DC_VALUES,
-            &mut payload,
-        );
-        write_huffman_table(
-            1,
-            0,
-            &tables::LUMA_AC_COUNTS,
-            &tables::LUMA_AC_VALUES,
-            &mut payload,
-        );
-        if !grayscale {
-            write_huffman_table(
-                0,
-                1,
-                &tables::CHROMA_DC_COUNTS,
-                &tables::CHROMA_DC_VALUES,
-                &mut payload,
-            );
-            write_huffman_table(
-                1,
-                1,
-                &tables::CHROMA_AC_COUNTS,
-                &tables::CHROMA_AC_VALUES,
-                &mut payload,
-            );
-        }
-        write_segment(marker::DHT, &payload, sink)?;
-
-        let mut payload = Vec::new();
-        if grayscale {
-            payload.push(1);
-            payload.extend_from_slice(&[1, 0x00]);
+        let frame = if self.progressive {
+            marker::SOF2
         } else {
-            payload.push(3);
-            payload.extend_from_slice(&[1, 0x00, 2, 0x11, 3, 0x11]);
+            marker::SOF0
+        };
+        write_segment(frame, &payload, sink)?;
+
+        // A progressive file's tables and scans come in `finish`, once every
+        // block is known.
+        if !self.progressive {
+            write_baseline_scan_header(grayscale, sink)?;
         }
-        // Spectral selection 0..=63 with no successive approximation: the
-        // only shape a baseline scan may take.
-        payload.extend_from_slice(&[0, 63, 0]);
-        write_segment(marker::SOS, &payload, sink)?;
 
         self.state = Some(State {
             descriptor: *desc,
@@ -776,6 +844,10 @@ impl Encoder for JpegEncoder {
             predictors: [0; 3],
             writer: BitWriter::default(),
             rows_written: 0,
+            coefficients: self
+                .progressive
+                .then(|| Coefficients::new(desc.width, desc.height, factors, grayscale)),
+            mcu_row: 0,
         });
         Ok(())
     }
@@ -849,9 +921,13 @@ impl Encoder for JpegEncoder {
             state.encode_band();
             state.band_rows = 0;
         }
-        state.writer.flush();
-        sink.write_all(&state.writer.bytes)?;
-        state.writer.bytes.clear();
+        if let Some(kept) = state.coefficients.take() {
+            kept.write_scans(sink)?;
+        } else {
+            state.writer.flush();
+            sink.write_all(&state.writer.bytes)?;
+            state.writer.bytes.clear();
+        }
 
         write_marker(marker::EOI, sink)?;
         sink.flush()
@@ -866,6 +942,99 @@ impl Encoder for JpegEncoder {
 )]
 mod tests {
     use super::*;
+
+    /// Encode a raster with `encoder`.
+    fn encode_with(desc: &ImageDescriptor, raster: &[u8], mut encoder: JpegEncoder) -> Vec<u8> {
+        let mut out = Vec::new();
+        encoder.write_header(desc, &mut out).unwrap();
+        for row in raster.chunks_exact(desc.row_bytes()) {
+            encoder.write_row(row, &mut out).unwrap();
+        }
+        encoder.finish(&mut out).unwrap();
+        out
+    }
+
+    fn decode_all(bytes: &[u8]) -> (bool, Vec<u8>) {
+        use otf_pixels_core::{Decoder, Limits};
+        let mut decoder = crate::JpegDecoder::new(bytes, Limits::default()).unwrap();
+        let mut row = vec![0_u8; decoder.descriptor().row_bytes()];
+        let mut out = Vec::new();
+        for _ in 0..decoder.descriptor().height {
+            decoder.read_row(&mut row).unwrap();
+            out.extend_from_slice(&row);
+        }
+        (decoder.is_progressive(), out)
+    }
+
+    #[test]
+    fn progressive_output_decodes_to_exactly_the_baseline_pixels() {
+        // The same quantized coefficients, sent in scans rather than at once.
+        for (width, height, format) in [
+            (1, 1, PixelFormat::Rgb8),
+            (17, 9, PixelFormat::Rgb8),
+            (33, 47, PixelFormat::Rgba8),
+            (64, 64, PixelFormat::Gray8),
+            (23, 31, PixelFormat::GrayA8),
+            (130, 66, PixelFormat::Rgb8),
+        ] {
+            let desc = ImageDescriptor::new(width, height, format).unwrap();
+            let raster: Vec<u8> = (0..desc.byte_len().unwrap())
+                .map(|i| ((i * 37 + i / 101 * 11) % 256) as u8)
+                .collect();
+            for subsampling in [
+                Subsampling::Both,
+                Subsampling::Horizontal,
+                Subsampling::None,
+            ] {
+                for quality in [20, 75, 100] {
+                    let base = || {
+                        JpegEncoder::with_quality(quality)
+                            .unwrap()
+                            .with_subsampling(subsampling)
+                    };
+                    let baseline = encode_with(&desc, &raster, base());
+                    let progressive = encode_with(&desc, &raster, base().with_progressive(true));
+                    let (was, pixels) = decode_all(&progressive);
+                    assert!(was, "the file is progressive");
+                    assert_eq!(
+                        pixels,
+                        decode_all(&baseline).1,
+                        "{width}x{height} {format} {subsampling:?} q{quality}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn progressive_output_is_smaller_on_a_photograph() {
+        let desc = ImageDescriptor::new(256, 192, PixelFormat::Rgb8).unwrap();
+        let mut seed = 5_u32;
+        let raster: Vec<u8> = (0..256 * 192)
+            .flat_map(|i| {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                let n = (seed >> 28) as usize;
+                let (x, y) = (i % 256, i / 256);
+                [(x + n) as u8, (y + n) as u8, ((x + y) / 2) as u8]
+            })
+            .collect();
+        let base = || JpegEncoder::with_quality(80).unwrap();
+        let baseline = encode_with(&desc, &raster, base());
+        let progressive = encode_with(&desc, &raster, base().with_progressive(true));
+        assert!(
+            progressive.len() < baseline.len(),
+            "{} against {}",
+            progressive.len(),
+            baseline.len()
+        );
+    }
+
+    #[test]
+    fn progressive_follows_the_options() {
+        let options = EncodeOptions::default().with_progressive(true);
+        assert!(JpegEncoder::from_options(&options).progressive());
+        assert!(!JpegEncoder::from_options(&EncodeOptions::default()).progressive());
+    }
 
     #[test]
     fn options_choose_the_subsampling_over_the_one_quality_implies() {

@@ -87,8 +87,8 @@ Ordered by expected value, each gated on its own ADR before work starts:
 3. **ICC color management** — profiles are preserved and matrix/TRC ones
    converted to sRGB (ADR-0015); LUT-based and CMYK profiles, other
    rendering intents and non-sRGB targets remain.
-4. **Progressive JPEG encode; WebP from scratch** (if still desired once
-   v1 ships; the trait boundary makes it a drop-in).
+4. ~~**Progressive JPEG encode; WebP from scratch**~~ — both done: WebP
+   (ADR-0014) and progressive JPEG output, with per-scan optimized tables.
 5. **Animation pipelines** — multi-frame GIF/WebP/AVIF encode.
 6. **ThumbHash placeholders** — cheap LQIP terminal.
 
