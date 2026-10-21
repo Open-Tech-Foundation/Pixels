@@ -6,6 +6,8 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-21
+
 ### Added
 - sharp's `metadata()`: `Image::source_metadata()` reads, from the headers
   alone, the file's format and size, stored and oriented dimensions, pixel
