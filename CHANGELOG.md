@@ -6,6 +6,8 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-25
+
 ### Added
 - Cooperative cancellation (ADR-0021): `Cancel::new()` or
   `Cancel::after(timeout)`, attached once with `Image::with_cancel`, stops
