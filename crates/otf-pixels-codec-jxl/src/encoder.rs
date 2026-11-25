@@ -15,7 +15,9 @@ use otf_pixels_core::{
 
 use crate::bits::BitWriter;
 use crate::entropy::{EntropyCode, HybridUint, Token, with_runs};
-use crate::headers::{ImageInfo, write_image_header, write_modular_frame_header, write_toc};
+use crate::headers::{
+    FrameSpec, ImageInfo, write_image_header, write_modular_frame_header, write_toc,
+};
 use crate::modular::{Channel, Tree, forward_ycocg, residuals, write_header};
 use crate::predict::{Predictor, Region};
 
@@ -43,6 +45,19 @@ pub struct JxlEncoder {
     exif: Option<Vec<u8>>,
     /// The XMP packet for an `xml ` box, if any.
     xmp: Option<Vec<u8>>,
+    /// The loop count, once [`Encoder::set_animation`] asked for frames.
+    loop_count: Option<u32>,
+    /// Write a repeated frame as its own (sharp's `keepDuplicateFrames`).
+    keep_duplicates: bool,
+    animator: Option<crate::animate::Animator>,
+}
+
+/// The refusal for a frame call on an encoder not told to animate.
+fn not_animated(call: &str) -> PixelsError {
+    PixelsError::invalid_argument(
+        "frame",
+        format!("`{call}` needs `set_animation` before the header"),
+    )
 }
 
 impl Default for JxlEncoder {
@@ -67,6 +82,9 @@ impl JxlEncoder {
             distance: Some(1.0),
             exif: None,
             xmp: None,
+            loop_count: None,
+            keep_duplicates: false,
+            animator: None,
         }
     }
 
@@ -78,6 +96,9 @@ impl JxlEncoder {
             distance: None,
             exif: None,
             xmp: None,
+            loop_count: None,
+            keep_duplicates: false,
+            animator: None,
         }
     }
 
@@ -90,6 +111,9 @@ impl JxlEncoder {
             distance: Some(distance),
             exif: None,
             xmp: None,
+            loop_count: None,
+            keep_duplicates: false,
+            animator: None,
         }
     }
 
@@ -98,10 +122,15 @@ impl JxlEncoder {
     /// `quality` (90 is distance 1).
     #[must_use]
     pub fn from_options(options: &EncodeOptions) -> Self {
-        if options.lossless {
-            return Self::lossless();
+        let encoder = if options.lossless {
+            Self::lossless()
+        } else {
+            Self::with_distance(distance_for_quality(options.quality))
+        };
+        Self {
+            keep_duplicates: options.keep_duplicate_frames,
+            ..encoder
         }
-        Self::with_distance(distance_for_quality(options.quality))
     }
 }
 
@@ -139,6 +168,7 @@ fn info_of(descriptor: &ImageDescriptor) -> Result<ImageInfo> {
         ),
         alpha: format.layout().has_alpha(),
         xyb: false,
+        animation: None,
     })
 }
 
@@ -171,6 +201,39 @@ fn channels_of(descriptor: &ImageDescriptor, pixels: &[u8]) -> Vec<Channel> {
 
 /// The whole lossy codestream for `pixels`, which have no alpha.
 fn encode_lossy(descriptor: &ImageDescriptor, pixels: &[u8], distance: f32) -> Result<Vec<u8>> {
+    let (rgb, info) = lossy_input(descriptor, pixels)?;
+    Ok(crate::vardct::encode(&rgb, &info, distance))
+}
+
+/// The header a lossy image of `descriptor` declares: XYB colour, which
+/// carries any depth, decoded to 8-bit sRGB.
+pub(crate) fn lossy_info(descriptor: &ImageDescriptor) -> Result<ImageInfo> {
+    let mut info = info_of(descriptor)?;
+    info.grey = false;
+    info.xyb = true;
+    info.bit_depth = 8;
+    Ok(info)
+}
+
+/// One lossy frame of `pixels`, of `image`'s kind, placed by `frame`.
+pub(crate) fn lossy_frame(
+    descriptor: &ImageDescriptor,
+    pixels: &[u8],
+    image: &ImageInfo,
+    distance: f32,
+    frame: &FrameSpec,
+) -> Result<Vec<u8>> {
+    let (rgb, info) = lossy_input(descriptor, pixels)?;
+    let info = ImageInfo {
+        animation: image.animation,
+        ..info
+    };
+    Ok(crate::vardct::encode_frame(&rgb, &info, distance, frame))
+}
+
+/// The samples of a lossy image as non-linear sRGB in 0..=1, and its
+/// header's view.
+fn lossy_input(descriptor: &ImageDescriptor, pixels: &[u8]) -> Result<(Vec<[f32; 3]>, ImageInfo)> {
     let mut info = info_of(descriptor)?;
     let channels = channels_of(descriptor, pixels);
     let max = if info.bit_depth == 16 {
@@ -201,12 +264,41 @@ fn encode_lossy(descriptor: &ImageDescriptor, pixels: &[u8], distance: f32) -> R
     info.grey = false;
     info.xyb = true;
     info.bit_depth = 8;
-    Ok(crate::vardct::encode(&rgb, &info, distance))
+    Ok((rgb, info))
 }
 
 /// The whole lossless codestream for `pixels`.
 fn encode(descriptor: &ImageDescriptor, pixels: &[u8]) -> Result<Vec<u8>> {
     let info = info_of(descriptor)?;
+    let mut out = BitWriter::new();
+    write_image_header(&mut out, &info);
+    let mut bytes = out.finish();
+    bytes.extend(lossless_frame(
+        descriptor,
+        pixels,
+        &info,
+        &FrameSpec::STILL,
+    )?);
+    Ok(bytes)
+}
+
+/// The header a lossless image of `descriptor` declares.
+pub(crate) fn lossless_info(descriptor: &ImageDescriptor) -> Result<ImageInfo> {
+    info_of(descriptor)
+}
+
+/// One lossless Modular frame of `pixels`, of `image`'s kind, placed by
+/// `frame`.
+pub(crate) fn lossless_frame(
+    descriptor: &ImageDescriptor,
+    pixels: &[u8],
+    image: &ImageInfo,
+    frame: &FrameSpec,
+) -> Result<Vec<u8>> {
+    let info = ImageInfo {
+        animation: image.animation,
+        ..info_of(descriptor)?
+    };
     let mut channels = channels_of(descriptor, pixels);
     let rct = !info.grey;
     if rct {
@@ -288,8 +380,7 @@ fn encode(descriptor: &ImageDescriptor, pixels: &[u8]) -> Result<Vec<u8>> {
     }
 
     let mut out = BitWriter::new();
-    write_image_header(&mut out, &info);
-    write_modular_frame_header(&mut out, &info);
+    write_modular_frame_header(&mut out, &info, frame);
     let sizes: Vec<usize> = sections.iter().map(Vec::len).collect();
     write_toc(&mut out, &sizes);
     let mut bytes = out.finish();
@@ -312,7 +403,7 @@ fn bx(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
 
 /// The codestream in the container (ISO/IEC 18181-2), beside an `Exif`
 /// box (a zero offset to the TIFF header, then the block) and an `xml ` box.
-fn contained(codestream: &[u8], exif: Option<&[u8]>, xmp: Option<&[u8]>) -> Vec<u8> {
+pub(crate) fn contained(codestream: &[u8], exif: Option<&[u8]>, xmp: Option<&[u8]>) -> Vec<u8> {
     let mut out = crate::decode::container::CONTAINER_SIGNATURE.to_vec();
     out.extend(bx(b"ftyp", b"jxl \0\0\0\0jxl "));
     if let Some(exif) = exif {
@@ -326,9 +417,38 @@ fn contained(codestream: &[u8], exif: Option<&[u8]>, xmp: Option<&[u8]>) -> Vec<
 }
 
 impl Encoder for JxlEncoder {
+    fn supports_animation(&self) -> bool {
+        true
+    }
+
+    fn set_animation(&mut self, loop_count: u32) -> Result<()> {
+        if self.state.is_some() || self.animator.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "animation",
+                "set_animation called after the header",
+            ));
+        }
+        self.loop_count = Some(loop_count);
+        Ok(())
+    }
+
+    fn begin_frame(&mut self, duration_ms: u32, _sink: &mut dyn Sink) -> Result<()> {
+        self.animator
+            .as_mut()
+            .ok_or_else(|| not_animated("begin_frame"))?
+            .begin_frame(duration_ms)
+    }
+
+    fn end_frame(&mut self, _sink: &mut dyn Sink) -> Result<()> {
+        self.animator
+            .as_mut()
+            .ok_or_else(|| not_animated("end_frame"))?
+            .end_frame()
+    }
+
     /// Written in an `Exif` box, which puts the file in the container.
     fn set_exif(&mut self, exif: Option<&[u8]>) -> Result<()> {
-        if self.state.is_some() {
+        if self.state.is_some() || self.animator.is_some() {
             return Err(PixelsError::invalid_argument(
                 "exif",
                 "the EXIF block must be set before write_header",
@@ -340,7 +460,7 @@ impl Encoder for JxlEncoder {
 
     /// Written in an `xml ` box, which puts the file in the container.
     fn set_xmp(&mut self, xmp: Option<&[u8]>) -> Result<()> {
-        if self.state.is_some() {
+        if self.state.is_some() || self.animator.is_some() {
             return Err(PixelsError::invalid_argument(
                 "xmp",
                 "the XMP packet must be set before write_header",
@@ -351,7 +471,7 @@ impl Encoder for JxlEncoder {
     }
 
     fn write_header(&mut self, desc: &ImageDescriptor, _sink: &mut dyn Sink) -> Result<()> {
-        if self.state.is_some() {
+        if self.state.is_some() || self.animator.is_some() {
             return Err(PixelsError::invalid_argument(
                 "descriptor",
                 "write_header called more than once",
@@ -371,6 +491,15 @@ impl Encoder for JxlEncoder {
         let capacity = desc
             .byte_len()
             .ok_or_else(|| PixelsError::malformed("jxl", "image size overflows"))?;
+        if let Some(loop_count) = self.loop_count {
+            self.animator = Some(crate::animate::Animator::new(
+                desc,
+                loop_count,
+                self.distance,
+                self.keep_duplicates,
+            )?);
+            return Ok(());
+        }
         self.state = Some(State {
             descriptor: *desc,
             pixels: Vec::with_capacity(capacity),
@@ -380,6 +509,9 @@ impl Encoder for JxlEncoder {
     }
 
     fn write_row(&mut self, row: &[u8], _sink: &mut dyn Sink) -> Result<()> {
+        if let Some(animator) = self.animator.as_mut() {
+            return animator.write_row(row);
+        }
         let Some(state) = self.state.as_mut() else {
             return Err(PixelsError::invalid_argument(
                 "row",
@@ -405,6 +537,15 @@ impl Encoder for JxlEncoder {
     }
 
     fn finish(&mut self, sink: &mut dyn Sink) -> Result<()> {
+        if let Some(animator) = self.animator.as_mut() {
+            let codestream = animator.finish()?;
+            return crate::animate::deliver(
+                &codestream,
+                self.exif.as_deref(),
+                self.xmp.as_deref(),
+                sink,
+            );
+        }
         let Some(state) = self.state.as_ref() else {
             return Err(PixelsError::invalid_argument(
                 "sink",

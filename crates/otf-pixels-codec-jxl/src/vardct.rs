@@ -22,7 +22,9 @@ use std::f32::consts::{PI, SQRT_2};
 
 use crate::bits::{BitWriter, bits, val};
 use crate::entropy::{EntropyCode, HybridUint, Token, with_runs};
-use crate::headers::{ImageInfo, write_image_header, write_toc, write_vardct_frame_header};
+use crate::headers::{
+    FrameSpec, ImageInfo, write_image_header, write_toc, write_vardct_frame_header,
+};
 use crate::modular::{Channel, Tree, residuals, write_header};
 use crate::predict::{Predictor, Region};
 
@@ -429,6 +431,21 @@ fn lf_group_streams(
 /// The whole codestream of a VarDCT image from non-linear sRGB samples in
 /// 0..=1, at `distance`.
 pub fn encode(rgb: &[[f32; 3]], info: &ImageInfo, distance: f32) -> Vec<u8> {
+    let mut out = BitWriter::new();
+    write_image_header(&mut out, info);
+    let mut bytes = out.finish();
+    bytes.extend(encode_frame(rgb, info, distance, &FrameSpec::STILL));
+    bytes
+}
+
+/// One VarDCT frame, header to last section, of `info`'s size and placed by
+/// `frame`: what follows the image header, or the frame before.
+pub fn encode_frame(
+    rgb: &[[f32; 3]],
+    info: &ImageInfo,
+    distance: f32,
+    frame: &FrameSpec,
+) -> Vec<u8> {
     let (width, height) = (info.width as usize, info.height as usize);
     let xyb = Xyb::new(rgb, width, height);
     let quantizer = Quantizer::for_distance(distance);
@@ -532,8 +549,7 @@ pub fn encode(rgb: &[[f32; 3]], info: &ImageInfo, distance: f32) -> Vec<u8> {
     }
 
     let mut out = BitWriter::new();
-    write_image_header(&mut out, info);
-    write_vardct_frame_header(&mut out, info);
+    write_vardct_frame_header(&mut out, info, frame);
     if groups.len() == 1 {
         // One section: everything, bit after bit.
         let mut all = lf_global;

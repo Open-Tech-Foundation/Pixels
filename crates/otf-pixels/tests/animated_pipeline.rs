@@ -598,3 +598,26 @@ fn a_lossy_webp_animation_is_written_by_default() {
     assert_eq!(back.frame_count(), 4);
     assert_eq!(back.source_metadata().unwrap().compression, Some("lossy"));
 }
+
+#[test]
+fn an_animation_written_as_lossless_jpeg_xl_reads_back_exactly() {
+    let lossless = EncodeOptions::default().with_lossless(true);
+    for fixture in [GIF, WEBP, JXL] {
+        let pipeline = || open(fixture, animated()).resize(19, 13);
+        let timing = pipeline().animation().unwrap().clone();
+        let frame_bytes = pipeline().descriptor().unwrap().byte_len().unwrap();
+        let (_, made) = write_frames(pipeline().output(Format::Raw, lossless), frame_bytes);
+        let jxl = pipeline().output(Format::Jxl, lossless).bytes().unwrap();
+        let back = Image::from_stream_with(std::io::Cursor::new(jxl), animated()).unwrap();
+        assert_eq!(
+            back.animation().unwrap().frame_durations_ms,
+            timing.frame_durations_ms
+        );
+        assert_eq!(back.animation().unwrap().loop_count, timing.loop_count);
+        let (_, read) = write_frames(back.output(Format::Raw, lossless), frame_bytes);
+        assert_eq!(read.len(), made.len(), "{fixture:?}");
+        for (k, ((_, ours), (_, theirs))) in read.iter().zip(&made).enumerate() {
+            assert!(ours == theirs, "{fixture:?} frame {k}");
+        }
+    }
+}

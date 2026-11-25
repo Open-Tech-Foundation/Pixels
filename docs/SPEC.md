@@ -91,7 +91,11 @@ implementation detail and may change without notice.
   orientation and the `Exif` box are reported. Lossless files must decode to
   libjxl's pixels exactly, lossy ones within one level
   (`otf-pixels-codec-jxl/tests/reference.rs`). Encode writes lossy VarDCT
-  (the default) or lossless Modular; alpha forces lossless for now.
+  (the default) or lossless Modular; alpha forces lossless for now. An
+  animation is one codestream with millisecond ticks: the first frame
+  covers the canvas, each later one is cropped to what changed and
+  replaces it over reference slot 1, which every frame but the last saves;
+  repeated frames merge.
 
 ## Pixel formats
 

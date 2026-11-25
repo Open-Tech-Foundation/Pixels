@@ -20,7 +20,8 @@ import math
 # Distance 1 on these smooth scenes; a tiny image of steep ramps is the
 # hardest case.
 FLOOR = 32.0
-for path in sorted(glob.glob(os.path.join(sys.argv[1], "*_lossy.jxl"))):
+for path in sorted(p for p in glob.glob(os.path.join(sys.argv[1], "*_lossy.jxl"))
+                   if not os.path.basename(p).startswith("anim_")):
     name = os.path.basename(path)
     ppm = path[:-4] + ".ppm"
     run = subprocess.run(["djxl", path, ppm], capture_output=True, text=True)
@@ -51,7 +52,8 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "*_lossy.jxl"))):
         failed += 1
         print(f"FAIL {name}: {error}")
 
-for path in sorted(p for p in glob.glob(os.path.join(sys.argv[1], "*.jxl")) if not p.endswith("_lossy.jxl")):
+for path in sorted(p for p in glob.glob(os.path.join(sys.argv[1], "*.jxl"))
+                   if not p.endswith("_lossy.jxl") and not os.path.basename(p).startswith("anim_")):
     name = os.path.basename(path)
     kind = name.rsplit("_", 1)[1][:-4]
     wide = kind.endswith("16")
@@ -73,6 +75,54 @@ for path in sorted(p for p in glob.glob(os.path.join(sys.argv[1], "*.jxl")) if n
             raw = struct.unpack("=%dH" % (len(raw) // 2), raw)
         if list(pixels) != list(raw):
             raise ValueError("libjxl decodes different pixels")
+        ok += 1
+    except ValueError as error:
+        failed += 1
+        print(f"FAIL {name}: {error}")
+# Animations: every displayed frame through `djxl --output_frames`, and the
+# durations and loop count `jxlinfo` reports.
+import re
+for path in sorted(glob.glob(os.path.join(sys.argv[1], "anim_*.jxl"))):
+    name = os.path.basename(path)
+    width, height, channels, bits, count, loops, *durations = map(int, open(path[:-4] + ".meta").read().split())
+    expected = open(path[:-4] + ".frames", "rb").read()
+    lossy = name.endswith("_lossy.jxl")
+    try:
+        out = path[:-4] + ".pam"
+        run = subprocess.run(["djxl", path, out, "--output_frames", "--bits_per_sample", str(bits)],
+                             capture_output=True, text=True)
+        if run.returncode != 0:
+            raise ValueError("djxl failed: " + (run.stderr or run.stdout).strip())
+        size = width * height * channels * (bits // 8)
+        k = 0
+        while os.path.exists(f"{out}-{k}.pam"):
+            data = open(f"{out}-{k}.pam", "rb").read()
+            pixels = data[data.index(b"ENDHDR\n") + 7:]
+            want = expected[k * size:(k + 1) * size]
+            if bits == 16:
+                pixels = struct.unpack(">%dH" % (len(pixels) // 2), pixels)
+                want = struct.unpack("=%dH" % (len(want) // 2), want)
+            if len(pixels) != len(want):
+                raise ValueError(f"frame {k}: {len(pixels)} samples, expected {len(want)}")
+            worst = max((abs(a - b) for a, b in zip(pixels, want)), default=0)
+            if worst > (1 if lossy else 0):
+                raise ValueError(f"frame {k}: off by {worst}")
+            k += 1
+        if k != count:
+            raise ValueError(f"{k} frames, expected {count}")
+        info = subprocess.run(["jxlinfo", path], capture_output=True, text=True).stdout
+        seen = [round(float(d)) for d in re.findall(r"duration: ([0-9.]+) ms", info)]
+        if seen != durations:
+            raise ValueError(f"durations {seen}, expected {durations}")
+        # Forever reads "(looping)"; a finite count, as the length of every
+        # play together.
+        length = re.search(r"Animation length: ([0-9.]+) seconds", info)
+        if loops == 0:
+            looping = "(looping)" in info
+        else:
+            looping = length is not None and abs(float(length.group(1)) - sum(durations) * loops / 1000) < 0.001
+        if not looping:
+            raise ValueError(f"jxlinfo does not report {loops} loops: {info.strip().splitlines()[-1]}")
         ok += 1
     except ValueError as error:
         failed += 1

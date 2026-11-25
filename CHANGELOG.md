@@ -62,6 +62,16 @@ versioning: [SemVer](https://semver.org/).
   exactly as given and lossy ones exactly as this crate decodes them,
   with their durations and loop count (`scripts/check-webp-interop.sh`).
   Still WebP encodes to the same bytes as before.
+- Animated JPEG XL output: one codestream with millisecond ticks, so every
+  duration is exact. The first frame covers the canvas; each later frame
+  is cropped to what changed and replaces it over reference slot 1, which
+  every frame but the last saves; repeated frames merge. Lossy unless the
+  image has alpha or lossless is asked for, as for a still. `djxl` decodes
+  every frame of the lossless animations exactly (translucent alpha and 16
+  bits included) and of the lossy one within a level of this crate, and
+  `jxlinfo` reports the durations and loop counts
+  (`scripts/check-jxl-interop.sh`). Still JPEG XL encodes to the same bytes
+  as before.
 - JPEG XL implements the frame protocol: each displayed frame decodes in
   turn, blended from the reference frames earlier ones saved, checked
   against `djxl --output_frames` on five animations (lossless exactly,

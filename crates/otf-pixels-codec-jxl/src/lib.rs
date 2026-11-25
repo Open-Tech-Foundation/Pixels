@@ -23,7 +23,9 @@
 //!
 //! [`JxlEncoder`] writes lossy VarDCT images (DCT8 blocks in XYB) or
 //! lossless Modular ones, grey or RGB, at 8 or 16 bits, as a bare
-//! codestream; images with alpha are lossless for now.
+//! codestream; images with alpha are lossless for now. After
+//! `Encoder::set_animation` it writes an animation, each frame after the
+//! first cropped to what changed.
 //!
 //! # Memory
 //!
@@ -33,6 +35,7 @@
 //! order and frames blend onto a canvas. An animation keeps the file, its
 //! reference frames and one canvas between displayed frames.
 
+mod animate;
 mod bits;
 mod decode;
 mod decoder;

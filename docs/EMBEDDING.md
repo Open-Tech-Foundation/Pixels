@@ -152,9 +152,9 @@ Writing an animated pipeline to a format that holds one image (PNG, JPEG,
 TIFF, AVIF, raw) is `Unsupported`, unlike sharp, which stacks the frames
 silently. The host states which still it wants: `first_frame()` or
 `frame(i)` for one frame, `into_strip()` for all of them stacked top to
-bottom (sharp's result). GIF and WebP output write the animation; JPEG XL
-output does not yet, and `Output::write_with_encoder` takes an encoder of
-the host's own. Animated WebP frames hold the changed rectangle, blended
+bottom (sharp's result). GIF, WebP and JPEG XL output write the
+animation, and `Output::write_with_encoder` takes an encoder of the
+host's own. Animated WebP frames hold the changed rectangle, blended
 when the change is opaque; sharp's `minSize`, `mixed`, `kmin` and `kmax`
 are not implemented. An animated file is held in memory, compressed, so each pass
 over its frames decodes it afresh; `Limits::with_max_frames` and

@@ -8,8 +8,10 @@
     reason = "test fixtures"
 )]
 
-use otf_pixels_codec_jxl::JxlEncoder;
-use otf_pixels_core::{Encoder, ImageDescriptor, PixelFormat};
+mod common;
+
+use otf_pixels_codec_jxl::{JxlDecoder, JxlEncoder};
+use otf_pixels_core::{Encoder, ImageDescriptor, Limits, PixelFormat};
 
 /// A width x height image in `format` whose samples are a mix of gradient
 /// and noise, as raw bytes; with `flat`, blocks of one colour instead, so
@@ -136,6 +138,55 @@ fn emit_lossy_samples() {
                 std::fs::write(format!("{stem}.jxl"), &jxl).unwrap();
                 std::fs::write(format!("{stem}.rgb"), &rgb).unwrap();
             }
+        }
+    }
+}
+
+#[test]
+fn emit_animations() {
+    // Each scene lossless, whose frames djxl must give back exactly, and the
+    // 8-bit RGB one lossy, whose frames it must give within a level of ours.
+    // A `.meta` line: width, height, channels, bits, frames, loop count, then
+    // each duration.
+    let dir = std::env::var("OTF_EMIT_DIR").ok();
+    for scene in common::scenes() {
+        let lossy = scene.name == "rgb8";
+        for (mode, encoder) in [
+            ("lossless", JxlEncoder::lossless()),
+            ("lossy", JxlEncoder::new()),
+        ] {
+            if mode == "lossy" && !lossy {
+                continue;
+            }
+            let jxl = common::encode(&scene, &scene.frames, &scene.durations, encoder);
+            let mut decoder = JxlDecoder::new(&jxl[..], Limits::default()).unwrap();
+            let ours: Vec<u8> = otf_pixels_core::testing::read_frames(&mut decoder)
+                .unwrap()
+                .into_iter()
+                .flat_map(|(_, pixels)| pixels)
+                .collect();
+            let Some(dir) = &dir else { continue };
+            let expected = if mode == "lossless" {
+                scene.frames.concat()
+            } else {
+                ours
+            };
+            let stem = format!("{dir}/anim_{}_{mode}", scene.name);
+            std::fs::write(format!("{stem}.jxl"), &jxl).unwrap();
+            std::fs::write(format!("{stem}.frames"), expected).unwrap();
+            let pixel = scene.descriptor.pixel;
+            let durations: Vec<String> = scene.durations.iter().map(u32::to_string).collect();
+            let meta = format!(
+                "{} {} {} {} {} {} {}",
+                scene.descriptor.width,
+                scene.descriptor.height,
+                pixel.channels(),
+                pixel.bytes_per_pixel() / pixel.channels() * 8,
+                scene.frames.len(),
+                scene.loop_count,
+                durations.join(" ")
+            );
+            std::fs::write(format!("{stem}.meta"), meta).unwrap();
         }
     }
 }
