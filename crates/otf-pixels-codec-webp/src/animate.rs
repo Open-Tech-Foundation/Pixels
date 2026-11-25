@@ -7,10 +7,10 @@
 //! `k - 1`, its left and top rounded down to even as `ANMF` requires. Two
 //! ways to draw it, chosen per frame as libwebp's `anim_encode` would:
 //!
-//! - **Blended**, when every changed pixel is opaque: unchanged pixels
-//!   become transparent black, so the previous frame shows through them, and
-//!   the frame is alpha-blended. Transparent runs cost almost nothing, so
-//!   this is the small one.
+//! - **Blended**, when every pixel the frame draws is opaque: unchanged
+//!   pixels become transparent black, so the previous frame shows through
+//!   them, and the frame is alpha-blended. Transparent runs cost almost
+//!   nothing, so this is the small one.
 //! - **Overwritten**, otherwise: the box is written as the frame has it and
 //!   replaces what was there, translucency included. Blending a translucent
 //!   pixel would mix it with the one beneath.
@@ -232,10 +232,22 @@ impl Animator {
         }
         // The first frame is drawn on transparent black: blending gains
         // nothing there, and libwebp does not blend a key frame.
-        let blend = opaque_changes && previous.is_some();
+        // Blending is exact only where what the frame draws is opaque: the
+        // changed pixels, and any unchanged one it still draws (lossy keeps
+        // those in a block with a change). Otherwise the box is overwritten.
+        let mut blend = opaque_changes && previous.is_some();
         if blend {
             let lossless = self.options.lossless || self.options.near_lossless;
-            blank_unchanged(&mut pixels, &unchanged, rect.width as usize, lossless);
+            let mut blanked = pixels.clone();
+            blank_unchanged(&mut blanked, &unchanged, rect.width as usize, lossless);
+            if blanked
+                .chunks_exact(4)
+                .all(|p| matches!(p.get(3), Some(0 | 255)))
+            {
+                pixels = blanked;
+            } else {
+                blend = false;
+            }
         }
         self.queue(Planned {
             rect,

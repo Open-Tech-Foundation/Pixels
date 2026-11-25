@@ -274,3 +274,30 @@ fn fnv(bytes: &[u8]) -> u64 {
         (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
     })
 }
+
+#[test]
+fn a_translucent_pixel_beside_a_change_is_not_blended_onto_itself() {
+    // Found by fuzzing: 1x2, the top pixel translucent and still, the bottom
+    // changing to opaque. Lossy blanks only whole unchanged 8x8 blocks, so
+    // the still pixel is drawn again; blended over itself, its alpha 47
+    // became 85. The frame must overwrite instead.
+    let descriptor = ImageDescriptor::new(1, 2, PixelFormat::Rgba8).unwrap();
+    let scene = common::Scene {
+        name: "beside",
+        descriptor,
+        frames: vec![
+            vec![10, 20, 30, 47, 0, 0, 0, 0],
+            vec![10, 20, 30, 47, 200, 100, 50, 255],
+        ],
+        durations: vec![10, 10],
+        loop_count: 0,
+    };
+    for options in [EncodeOptions::default(), common::lossless()] {
+        let bytes = common::encode(&scene, &scene.frames, &scene.durations, &options);
+        let (_, _, frames) = decode(&bytes);
+        for (got, want) in frames.iter().zip(&scene.frames) {
+            let alpha = |v: &[u8]| v.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>();
+            assert_eq!(alpha(got), alpha(want), "{options:?}");
+        }
+    }
+}

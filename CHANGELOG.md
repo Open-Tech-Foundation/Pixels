@@ -55,7 +55,7 @@ versioning: [SemVer](https://semver.org/).
   encodes to the same bytes as before.
 - Animated WebP output: `ANIM` and `ANMF` frames, lossy or lossless as for
   a still. Each frame is the changed rectangle at even offsets, blended
-  over the frame before when every changed pixel is opaque (unchanged
+  over the frame before when every pixel it draws is opaque (unchanged
   pixels transparent, in a lossy frame only in whole unchanged 8x8
   blocks), otherwise overwriting it; repeated frames merge unless
   `keep_duplicate_frames`. libwebp, through Pillow, shows lossless frames
