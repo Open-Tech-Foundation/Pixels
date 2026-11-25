@@ -167,6 +167,10 @@ g.output(Format::Png, opts).bytes()?;        // Vec<u8>
 - `max_pixels` (default 268 MP, Sharp-compatible, per open via
   `OpenOptions::with_limits`): checked at header parse,
   before pixel allocation. Exceeding it is an error, not a truncation.
+- `max_frames` (default 10,000) and `max_animation_pixels` (frames ×
+  canvas, default 2^32): checked before an animation is processed frame by
+  frame (ADR-0020). One frame is held at a time, so these bound work, not
+  memory. `Limits::check_animation` applies both.
 - `auto_orient` (default on, `OpenOptions`): the orientation the file
   declares is applied before any op — EXIF `Orientation` in JPEG, TIFF, PNG
   (an `eXIf` chunk before `IDAT`) and WebP, `irot`/`imir` in AVIF. Decoders

@@ -149,11 +149,31 @@ pub struct Limits {
     ///
     /// Defaults to [`Limits::DEFAULT_MAX_PIXELS`].
     pub max_pixels: u64,
+    /// Maximum frames in an animation processed frame by frame.
+    ///
+    /// Defaults to [`Limits::DEFAULT_MAX_FRAMES`].
+    pub max_frames: u32,
+    /// Maximum pixels across every frame of an animation processed frame
+    /// by frame: frames × canvas width × canvas height.
+    ///
+    /// Only one frame is held at a time (ADR-0020), so this bounds work, not
+    /// memory: a file of thousands of frames on a large canvas costs its
+    /// frame count times a still of that canvas. Defaults to
+    /// [`Limits::DEFAULT_MAX_ANIMATION_PIXELS`].
+    pub max_animation_pixels: u64,
 }
 
 impl Limits {
     /// The default `max_pixels`: 268 megapixels, matching Sharp.
     pub const DEFAULT_MAX_PIXELS: u64 = 268_402_689;
+
+    /// The default `max_frames`: 10,000, more than any animation a person
+    /// would watch (at 25 fps, 400 seconds).
+    pub const DEFAULT_MAX_FRAMES: u32 = 10_000;
+
+    /// The default `max_animation_pixels`: 2^32, about 4.3 gigapixels, which
+    /// is 2,000 frames of 1920x1080 or 17,000 frames of 500x500.
+    pub const DEFAULT_MAX_ANIMATION_PIXELS: u64 = 1 << 32;
 
     /// Limits with every check disabled.
     ///
@@ -162,6 +182,8 @@ impl Limits {
     pub const fn unlimited() -> Self {
         Self {
             max_pixels: u64::MAX,
+            max_frames: u32::MAX,
+            max_animation_pixels: u64::MAX,
         }
     }
 
@@ -174,6 +196,49 @@ impl Limits {
     pub const fn with_max_pixels(mut self, max_pixels: u64) -> Self {
         self.max_pixels = max_pixels;
         self
+    }
+
+    /// The limits with `max_frames` replaced.
+    #[must_use]
+    pub const fn with_max_frames(mut self, max_frames: u32) -> Self {
+        self.max_frames = max_frames;
+        self
+    }
+
+    /// The limits with `max_animation_pixels` replaced.
+    #[must_use]
+    pub const fn with_max_animation_pixels(mut self, max_animation_pixels: u64) -> Self {
+        self.max_animation_pixels = max_animation_pixels;
+        self
+    }
+
+    /// Check an animation of `frames` frames on a `width` x `height` canvas
+    /// against these limits, before any frame is processed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::LimitExceeded`] if `frames` exceeds
+    /// [`Limits::max_frames`] or the frames' pixels together exceed
+    /// [`Limits::max_animation_pixels`].
+    pub fn check_animation(&self, frames: u32, width: u32, height: u32) -> Result<()> {
+        if frames > self.max_frames {
+            return Err(PixelsError::limit_exceeded(
+                Limit::MaxFrames,
+                u64::from(frames),
+                u64::from(self.max_frames),
+            ));
+        }
+        let pixels = u64::from(frames)
+            .saturating_mul(u64::from(width))
+            .saturating_mul(u64::from(height));
+        if pixels > self.max_animation_pixels {
+            return Err(PixelsError::limit_exceeded(
+                Limit::MaxAnimationPixels,
+                pixels,
+                self.max_animation_pixels,
+            ));
+        }
+        Ok(())
     }
 
     /// Check a dimension pair against these limits.
@@ -206,6 +271,8 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             max_pixels: Self::DEFAULT_MAX_PIXELS,
+            max_frames: Self::DEFAULT_MAX_FRAMES,
+            max_animation_pixels: Self::DEFAULT_MAX_ANIMATION_PIXELS,
         }
     }
 }
@@ -379,7 +446,10 @@ mod tests {
 
     #[test]
     fn max_pixels_is_checked_before_allocation() {
-        let limits = Limits { max_pixels: 100 };
+        let limits = Limits {
+            max_pixels: 100,
+            ..Limits::default()
+        };
         assert!(limits.check(10, 10).is_ok());
         let err = limits.check(10, 11).unwrap_err();
         assert_eq!(err.code(), ErrorCode::LimitExceeded);
@@ -444,5 +514,50 @@ mod tests {
         let desc = ImageDescriptor::new(4, 4, PixelFormat::Rgb8).unwrap();
         assert_eq!(desc.resized(2, 2).unwrap().width, 2);
         assert!(desc.resized(0, 2).is_err());
+    }
+
+    #[test]
+    fn animations_are_limited_by_frames_and_by_total_pixels() {
+        use crate::error::Limit;
+        let limits = Limits::default();
+        assert_eq!(limits.max_frames, 10_000);
+        assert_eq!(limits.max_animation_pixels, 1 << 32);
+        assert!(limits.check_animation(10_000, 100, 100).is_ok());
+        // One frame over.
+        assert!(matches!(
+            limits.check_animation(10_001, 1, 1),
+            Err(PixelsError::LimitExceeded {
+                limit: Limit::MaxFrames,
+                requested: 10_001,
+                ..
+            })
+        ));
+        // 2,000 frames of 1080p is allowed, 2,100 is not.
+        assert!(limits.check_animation(2_000, 1920, 1080).is_ok());
+        assert!(matches!(
+            limits.check_animation(2_100, 1920, 1080),
+            Err(PixelsError::LimitExceeded {
+                limit: Limit::MaxAnimationPixels,
+                ..
+            })
+        ));
+        // The product cannot overflow into acceptance.
+        assert!(
+            Limits::default()
+                .with_max_frames(u32::MAX)
+                .check_animation(u32::MAX, u32::MAX, u32::MAX)
+                .is_err()
+        );
+        assert!(
+            Limits::unlimited()
+                .check_animation(u32::MAX, u32::MAX, u32::MAX)
+                .is_ok()
+        );
+        let tight = Limits::default()
+            .with_max_frames(3)
+            .with_max_animation_pixels(30);
+        assert!(tight.check_animation(3, 5, 2).is_ok());
+        assert!(tight.check_animation(4, 1, 1).is_err());
+        assert!(tight.check_animation(3, 5, 3).is_err());
     }
 }

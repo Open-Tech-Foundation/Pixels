@@ -7,6 +7,18 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- The frame protocol of ADR-0020, the core of animation support (not yet
+  used by any codec or by the pipeline): `Decoder::advance_frame` moves a
+  decoder to its next composited frame and reports its `FrameInfo`
+  (index, duration); `Encoder::supports_animation`, `set_animation`,
+  `begin_frame` and `end_frame` write frames. The defaults keep every
+  existing codec a still, and still encoders refuse animation with
+  `Unsupported` rather than keep one frame. `Limits` gains `max_frames`
+  (default 10,000) and `max_animation_pixels` (default 2^32), checked by
+  `Limits::check_animation`, with `Limit::MaxFrames` and
+  `Limit::MaxAnimationPixels`. The `testing` feature adds
+  `FrameStubDecoder`, `FrameRecorder` and `read_frames` for checking
+  codecs against the protocol.
 - Rotation by any angle, sharp's `rotate(angle, { background })`:
   `Image::rotate` now takes any integer angle and `Image::rotate_with`
   any finite one, with `RotateOptions` for the background colour (opaque

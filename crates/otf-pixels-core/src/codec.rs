@@ -125,6 +125,25 @@ impl Animation {
     }
 }
 
+/// The frame a decoder's rows now come from, as [`Decoder::advance_frame`]
+/// reports it (ADR-0020).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct FrameInfo {
+    /// The frame's position in the animation, from 0.
+    pub index: u32,
+    /// How long it shows, in milliseconds.
+    pub duration_ms: u32,
+}
+
+impl FrameInfo {
+    /// Frame `index`, showing for `duration_ms`.
+    #[must_use]
+    pub const fn new(index: u32, duration_ms: u32) -> Self {
+        Self { index, duration_ms }
+    }
+}
+
 /// Header-only facts about an image.
 ///
 /// Answering this must not decode pixels (SPEC §Guarantees 3).
@@ -576,6 +595,30 @@ pub trait Decoder: Send + fmt::Debug {
         None
     }
 
+    /// Move the row cursor to the next frame of an animation, and say which
+    /// it is; `None` once the last frame has been reached, and always for a
+    /// still.
+    ///
+    /// Rows start on frame 0, whose timing [`Decoder::animation`] gives.
+    /// After `Some`, [`Decoder::read_row`] starts again at the top, now of
+    /// that frame **composited onto the canvas** as a viewer would show it
+    /// (disposal and blending applied), so every frame has
+    /// [`Decoder::descriptor`]'s shape. Rows of the current frame not yet
+    /// read are skipped. A resolution chosen with [`Decoder::reduce_to`]
+    /// holds for every frame, and [`Decoder::read_region`] reads the
+    /// current one.
+    ///
+    /// This is how the pipeline replays one graph per frame (ADR-0020). The
+    /// default is a still's answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::Malformed`] for a malformed frame or
+    /// [`PixelsError::Io`] on source failure.
+    fn advance_frame(&mut self) -> Result<Option<FrameInfo>> {
+        Ok(None)
+    }
+
     /// How many pages the source document holds, at least 1.
     ///
     /// A page is a separate image in one file, as in a multi-page TIFF: a
@@ -752,6 +795,69 @@ pub trait Encoder: Send {
         Ok(())
     }
 
+    /// Whether this encoder writes animations: [`Encoder::set_animation`]
+    /// and the frame calls work.
+    ///
+    /// The default is `false`, a format that holds one image.
+    fn supports_animation(&self) -> bool {
+        false
+    }
+
+    /// Write an animation that plays `loop_count` times (0 for forever)
+    /// rather than a still.
+    ///
+    /// Called before [`Encoder::write_header`], whose descriptor is then the
+    /// canvas every frame fills. The rows that follow come in frames:
+    ///
+    /// ```text
+    /// set_animation → write_header → (begin_frame → write_row × height → end_frame)+ → finish
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The default returns [`PixelsError::Unsupported`]: a still format
+    /// cannot hold an animation, and flattening one silently is the
+    /// pipeline's decision to make, not the encoder's (ADR-0020). An
+    /// animated encoder returns [`PixelsError::InvalidArgument`] if the
+    /// header has already been written.
+    fn set_animation(&mut self, loop_count: u32) -> Result<()> {
+        let _ = loop_count;
+        Err(PixelsError::unsupported(
+            "this format holds one image, not an animation",
+        ))
+    }
+
+    /// Begin the next frame of an animation, showing for `duration_ms`.
+    ///
+    /// # Errors
+    ///
+    /// The default returns [`PixelsError::Unsupported`]. An animated
+    /// encoder returns [`PixelsError::InvalidArgument`] if
+    /// [`Encoder::set_animation`] was not called, the header is not yet
+    /// written, or the previous frame is still open.
+    fn begin_frame(&mut self, duration_ms: u32, sink: &mut dyn Sink) -> Result<()> {
+        let _ = (duration_ms, sink);
+        Err(PixelsError::unsupported(
+            "this format holds one image, not an animation",
+        ))
+    }
+
+    /// End the frame [`Encoder::begin_frame`] opened, once its every row is
+    /// written.
+    ///
+    /// # Errors
+    ///
+    /// The default returns [`PixelsError::Unsupported`]. An animated
+    /// encoder returns [`PixelsError::InvalidArgument`] if no frame is open,
+    /// or [`PixelsError::Malformed`] if it is short of rows: a partial frame
+    /// is never emitted.
+    fn end_frame(&mut self, sink: &mut dyn Sink) -> Result<()> {
+        let _ = sink;
+        Err(PixelsError::unsupported(
+            "this format holds one image, not an animation",
+        ))
+    }
+
     /// Begin an image, writing any container header.
     ///
     /// Must be called exactly once, before any [`Encoder::write_row`].
@@ -781,7 +887,8 @@ pub trait Encoder: Send {
     /// Returns [`PixelsError::Io`] on sink failure, or
     /// [`PixelsError::Malformed`] if fewer rows were written than the header
     /// declared — a partial image is never silently emitted
-    /// (ARCHITECTURE §Failure model).
+    /// (ARCHITECTURE §Failure model). For an animation, a frame still open
+    /// or no frame at all is [`PixelsError::InvalidArgument`].
     fn finish(&mut self, sink: &mut dyn Sink) -> Result<()>;
 }
 
@@ -862,5 +969,56 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code(), ErrorCode::Unsupported);
         assert_eq!(Seq.capability(), DecodeCapability::Sequential);
+    }
+
+    #[test]
+    fn stills_have_no_next_frame_and_still_encoders_refuse_animation() {
+        #[derive(Debug)]
+        struct Still;
+        impl Decoder for Still {
+            fn descriptor(&self) -> ImageDescriptor {
+                ImageDescriptor::new(1, 1, PixelFormat::Gray8).unwrap()
+            }
+            fn read_row(&mut self, _: &mut [u8]) -> Result<()> {
+                Ok(())
+            }
+        }
+        assert_eq!(Still.advance_frame().unwrap(), None);
+
+        struct StillEncoder;
+        impl Encoder for StillEncoder {
+            fn write_header(&mut self, _: &ImageDescriptor, _: &mut dyn Sink) -> Result<()> {
+                Ok(())
+            }
+            fn write_row(&mut self, _: &[u8], _: &mut dyn Sink) -> Result<()> {
+                Ok(())
+            }
+            fn finish(&mut self, _: &mut dyn Sink) -> Result<()> {
+                Ok(())
+            }
+        }
+        // Refused, not ignored: an encoder that accepted frames and wrote
+        // only one would be the silent flattening ADR-0020 rules out.
+        let mut encoder = StillEncoder;
+        let mut sink = Vec::new();
+        assert!(!encoder.supports_animation());
+        assert_eq!(
+            encoder.set_animation(0).unwrap_err().code(),
+            ErrorCode::Unsupported
+        );
+        assert_eq!(
+            encoder.begin_frame(100, &mut sink).unwrap_err().code(),
+            ErrorCode::Unsupported
+        );
+        assert_eq!(
+            encoder.end_frame(&mut sink).unwrap_err().code(),
+            ErrorCode::Unsupported
+        );
+    }
+
+    #[test]
+    fn frame_info_carries_index_and_duration() {
+        let info = FrameInfo::new(3, 40);
+        assert_eq!((info.index, info.duration_ms), (3, 40));
     }
 }

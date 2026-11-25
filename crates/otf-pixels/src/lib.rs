@@ -133,10 +133,10 @@ pub use metadata::{ChannelStats, SourceMetadata, Stats};
 
 pub use otf_pixels_core::{
     AccessPattern, Animation, Background, ChannelLayout, ChromaSubsampling, Codec, ColorModel,
-    Comment, Decoder, Density, EncodeOptions, Encoder, ErrorCode, Format, ImageDescriptor, Limit,
-    Limits, Metadata, Orientation, PixelFormat, PixelsError, PlanOptions, Region, ResolutionUnit,
-    Result, RunStats, SampleKind, Scheduler, SchedulerOptions, Sink, Source, SourceInfo, TileShape,
-    evaluate as evaluate_reference,
+    Comment, Decoder, Density, EncodeOptions, Encoder, ErrorCode, Format, FrameInfo,
+    ImageDescriptor, Limit, Limits, Metadata, Orientation, PixelFormat, PixelsError, PlanOptions,
+    Region, ResolutionUnit, Result, RunStats, SampleKind, Scheduler, SchedulerOptions, Sink,
+    Source, SourceInfo, TileShape, evaluate as evaluate_reference,
 };
 pub use otf_pixels_ops::{
     Affine, AffineOptions, Blend, Composite, Conversion, ConvertFormat, Convolve, Crop,

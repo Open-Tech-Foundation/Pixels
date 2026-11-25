@@ -70,6 +70,15 @@ pub enum Limit {
     MaxPixels,
     /// A single dimension exceeded the representable maximum.
     Dimension,
+    /// An animation has more frames than [`Limits::max_frames`].
+    ///
+    /// [`Limits::max_frames`]: crate::Limits::max_frames
+    MaxFrames,
+    /// An animation's frames together exceed
+    /// [`Limits::max_animation_pixels`].
+    ///
+    /// [`Limits::max_animation_pixels`]: crate::Limits::max_animation_pixels
+    MaxAnimationPixels,
 }
 
 impl Limit {
@@ -79,6 +88,8 @@ impl Limit {
         match self {
             Self::MaxPixels => "max_pixels",
             Self::Dimension => "dimension",
+            Self::MaxFrames => "max_frames",
+            Self::MaxAnimationPixels => "max_animation_pixels",
         }
     }
 }
@@ -278,6 +289,8 @@ mod tests {
         assert_eq!(ErrorCode::Graph.as_str(), "graph");
         assert_eq!(Limit::MaxPixels.as_str(), "max_pixels");
         assert_eq!(Limit::Dimension.as_str(), "dimension");
+        assert_eq!(Limit::MaxFrames.as_str(), "max_frames");
+        assert_eq!(Limit::MaxAnimationPixels.as_str(), "max_animation_pixels");
     }
 
     #[test]

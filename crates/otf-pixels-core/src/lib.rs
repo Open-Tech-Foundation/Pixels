@@ -72,7 +72,7 @@ pub mod testing;
 pub use cache::{CacheStats, TileCache, TileKey};
 pub use codec::{
     Animation, Background, ChromaSubsampling, Codec, Comment, DecodeCapability, Decoder, Density,
-    EncodeOptions, Encoder, Format, Metadata, ResolutionUnit, SourceInfo,
+    EncodeOptions, Encoder, Format, FrameInfo, Metadata, ResolutionUnit, SourceInfo,
 };
 pub use error::{ErrorCode, Limit, PixelsError, Result};
 pub use eval::{demand, evaluate, evaluate_rows};
