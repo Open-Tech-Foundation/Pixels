@@ -47,6 +47,11 @@ versioning: [SemVer](https://semver.org/).
 - `Image::rotate` with an angle that is not a multiple of 90 rotates
   instead of failing with `InvalidArgument`.
 
+### Fixed
+- A lossy WebP whose coefficients push the VP8 inverse transform past 32
+  bits no longer panics in a build with overflow checks: the products wrap,
+  as libwebp's C arithmetic does. Found by the new WebP fuzz target.
+
 ## [0.5.0] - 2026-10-21
 
 ### Added

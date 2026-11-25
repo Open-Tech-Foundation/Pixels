@@ -6,12 +6,19 @@ const COS_MINUS_ONE: i32 = 20091;
 /// `sin(pi/8) * sqrt(2)` in Q16.
 const SIN: i32 = 35468;
 
+// The products wrap rather than overflow. Dequantized coefficients are
+// 16-bit, but after the first pass a hostile stream can push an
+// intermediate past what a Q16 product fits in 32 bits; libwebp computes
+// these in C `int`, which wraps on every platform it ships on, so wrapping
+// keeps the two decoders agreeing on such streams instead of panicking.
+// No valid encoder output comes near the range where it matters.
+
 const fn mul_cos(a: i32) -> i32 {
-    ((a * COS_MINUS_ONE) >> 16) + a
+    (a.wrapping_mul(COS_MINUS_ONE) >> 16).wrapping_add(a)
 }
 
 const fn mul_sin(a: i32) -> i32 {
-    (a * SIN) >> 16
+    a.wrapping_mul(SIN) >> 16
 }
 
 /// Inverse-transform `coeffs` (row-major) and add the result to the 4x4
@@ -100,5 +107,25 @@ mod tests {
         let mut input = [0_i16; 16];
         input[0] = 80;
         assert_eq!(inverse_wht(&input), [10; 16]);
+    }
+
+    #[test]
+    fn extreme_coefficients_wrap_instead_of_overflowing() {
+        // Found by fuzzing: first-pass intermediates past 60,547 overflow a
+        // 32-bit Q16 product. The result is whatever libwebp's wrapping C
+        // gives; the property here is only that it is a result.
+        for fill in [i16::MAX, i16::MIN] {
+            let mut block = [[128_u8; 4]; 4];
+            idct_add(&[fill; 16], &mut block);
+            let mut block = [[0_u8; 4]; 4];
+            let mut alternating = [fill; 16];
+            for (i, c) in alternating.iter_mut().enumerate() {
+                if i % 2 == 1 {
+                    *c = c.saturating_neg();
+                }
+            }
+            idct_add(&alternating, &mut block);
+        }
+        assert_eq!(mul_sin(i32::MAX), i32::MAX.wrapping_mul(SIN) >> 16);
     }
 }
