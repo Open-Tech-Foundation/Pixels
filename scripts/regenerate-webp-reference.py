@@ -257,8 +257,77 @@ def offset_animation(path: str, frame: Image.Image, canvas: tuple, at: tuple, al
         out.write(b"RIFF" + len(body).to_bytes(4, "little") + body)
 
 
-# Animations decode to their first frame on its canvas: name -> writer.
+def flagged_animation(path: str, canvas: tuple, frames: list) -> None:
+    """An animation assembled frame by frame, each `(image, at, lossless,
+    blend, dispose)`, so every blend and disposal combination libwebp's
+    compositor distinguishes is exercised, including the ones its encoder
+    rarely writes."""
+    width, height = canvas
+    vp8x = bytes([0x02 | 0x10, 0, 0, 0]) + (width - 1).to_bytes(3, "little") + (height - 1).to_bytes(3, "little")
+    body = b""
+    for image, at, lossless, blend, dispose in frames:
+        header = (at[0] // 2).to_bytes(3, "little") + (at[1] // 2).to_bytes(3, "little")
+        header += (image.width - 1).to_bytes(3, "little") + (image.height - 1).to_bytes(3, "little")
+        flags = (0 if blend else 0x02) | (0x01 if dispose else 0)
+        header += (60).to_bytes(3, "little") + bytes([flags])
+        body += riff_chunk(b"ANMF", header + image_chunks(image, lossless))
+    body = b"WEBP" + riff_chunk(b"VP8X", vp8x) + riff_chunk(b"ANIM", bytes(6)) + body
+    with open(path, "wb") as out:
+        out.write(b"RIFF" + len(body).to_bytes(4, "little") + body)
+
+
+def moving_square(width: int, height: int, count: int, alpha: bool) -> list:
+    """`count` frames of a square crossing a gradient, so consecutive frames
+    differ in a small rectangle: libwebp's encoder then writes sub-frames
+    and chooses blending and disposal itself."""
+    frames = []
+    for k in range(count):
+        image = gradient(width, height, alpha).copy()
+        x, y = 2 + k * 5, 3 + k * 3
+        for yy in range(y, min(y + 9, height)):
+            for xx in range(x, min(x + 9, width)):
+                image.putpixel((xx, yy), (250, 40, 30, 255) if alpha else (250, 40, 30))
+        frames.append(image)
+    return frames
+
+
+def save_frames(path: str, frames: list, **options) -> None:
+    frames[0].save(path, "WEBP", save_all=True, append_images=frames[1:], duration=80, **options)
+
+
+# Every frame of these is checked against libwebp's animation decoder.
 ANIMATED = {
+    "anim_flags": lambda p: flagged_animation(p, (40, 30), [
+        # A key frame: the first.
+        (noise(40, 30, 60, alpha=True, smooth=True), (0, 0), True, True, False),
+        # Blended over it, then cleared.
+        (noise(16, 12, 61, alpha=True, smooth=True), (4, 6), True, True, True),
+        # Overlapping the cleared rectangle: blended outside it only.
+        (noise(20, 14, 62, alpha=True, smooth=True), (10, 8), False, True, False),
+        # Full canvas, not blended: a key frame; cleared after.
+        (noise(40, 30, 63, alpha=True, smooth=True), (0, 0), True, False, True),
+        # After a cleared key frame: a key frame too, so not blended.
+        (noise(12, 10, 64, alpha=True, smooth=True), (2, 2), True, True, False),
+        # An ordinary blend.
+        (noise(10, 10, 65, alpha=True, smooth=True), (28, 18), False, True, False),
+        # Overwritten without blending, mid-canvas.
+        (noise(14, 8, 66, alpha=True, smooth=True), (6, 20), True, False, False),
+    ]),
+    # A partial first frame (a key frame) cleared after: the next frame is
+    # then a key frame too, drawn on transparent black without blending,
+    # even where it lies outside the cleared rectangle.
+    "anim_partial_key": lambda p: flagged_animation(p, (40, 30), [
+        (noise(16, 12, 70, alpha=True, smooth=True), (4, 4), True, True, True),
+        (noise(20, 14, 71, alpha=True, smooth=True), (12, 10), True, True, False),
+        (noise(18, 10, 72, alpha=True, smooth=True), (20, 16), False, True, False),
+    ]),
+    "anim_moving_lossy": lambda p: save_frames(
+        p, moving_square(40, 30, 6, True), quality=70, minimize_size=True),
+    "anim_moving_mixed": lambda p: save_frames(
+        p, moving_square(36, 28, 5, False), allow_mixed=True, kmax=3),
+    "anim_moving_lossless": lambda p: save_frames(
+        p, moving_square(36, 28, 5, True), lossless=True, kmin=2, kmax=4),
+
     "anim_lossless": lambda p: noise(40, 30, 50, smooth=True).save(
         p, "WEBP", save_all=True, lossless=True,
         append_images=[noise(40, 30, 51, smooth=True)], duration=100),
@@ -283,21 +352,26 @@ def write_animated(fixtures: str) -> None:
     os.makedirs(directory, exist_ok=True)
     manifest = [
         "# Regenerate with scripts/regenerate-webp-reference.py",
-        "# name width height channels",
+        "# name width height channels frames",
     ]
     for name, write in sorted(ANIMATED.items()):
         path = os.path.join(directory, f"{name}.webp")
         write(path)
+        frames = []
         with Image.open(path) as decoded:
-            decoded.seek(0)
-            decoded.load()
+            for k in range(getattr(decoded, "n_frames", 1)):
+                decoded.seek(k)
+                decoded.load()
+                frames.append(decoded.tobytes())
             mode = decoded.mode
-            raster = decoded.tobytes()
             width, height = decoded.size
         channels = {"RGB": 3, "RGBA": 4}[mode]
+        # The first frame alone, and every frame in order.
         with open(os.path.join(directory, f"{name}.raw"), "wb") as out:
-            out.write(raster)
-        manifest.append(f"{name} {width} {height} {channels}")
+            out.write(frames[0])
+        with open(os.path.join(directory, f"{name}.frames.raw"), "wb") as out:
+            out.write(b"".join(frames))
+        manifest.append(f"{name} {width} {height} {channels} {len(frames)}")
         print(f"animated/{name}: {width}x{height}x{channels}, {os.path.getsize(path)} bytes")
     with open(os.path.join(directory, "REFERENCE"), "w") as out:
         out.write("\n".join(manifest) + "\n")

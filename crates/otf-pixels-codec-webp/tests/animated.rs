@@ -1,8 +1,13 @@
-//! Animated WebP decodes to its first frame, as libwebp's animation decoder
-//! renders it: a transparent-black canvas with the first frame written into
-//! its rectangle, unblended.
+//! Animated WebP decodes frame by frame, as libwebp's animation decoder
+//! renders it: the first on a transparent-black canvas, every later one
+//! blended and disposed by `anim_decode.c`'s rules. Each frame is compared
+//! with libwebp's, byte for byte.
 //!
-//! Two fixtures come from Pillow's animation encoder, which always codes a
+//! `anim_flags` is assembled frame by frame to reach every blend and
+//! disposal case the compositor distinguishes, key frames included; the
+//! `anim_moving_*` files are Pillow's encoder choosing sub-frames itself.
+//!
+//! Of the original four, two come from Pillow's animation encoder, which always codes a
 //! full-canvas first frame; two are assembled by the regeneration script with
 //! the first frame at an offset on a larger canvas, which the format allows
 //! and that encoder never writes. Every raster is libwebp's own decode.
@@ -23,6 +28,14 @@ fn dir() -> String {
 }
 
 fn cases() -> Vec<(String, u32, u32, usize)> {
+    frame_cases()
+        .into_iter()
+        .map(|(name, w, h, c, _)| (name, w, h, c))
+        .collect()
+}
+
+/// The manifest with each animation's frame count.
+fn frame_cases() -> Vec<(String, u32, u32, usize, usize)> {
     std::fs::read_to_string(format!("{}/REFERENCE", dir()))
         .unwrap()
         .lines()
@@ -34,9 +47,62 @@ fn cases() -> Vec<(String, u32, u32, usize)> {
                 f[1].parse().unwrap(),
                 f[2].parse().unwrap(),
                 f[3].parse().unwrap(),
+                f[4].parse().unwrap(),
             )
         })
         .collect()
+}
+
+#[test]
+fn every_frame_matches_libwebps_animation_decoder() {
+    let cases = frame_cases();
+    assert!(
+        cases.iter().any(|c| c.0 == "anim_flags"),
+        "the corpus went missing"
+    );
+    for (name, width, height, channels, count) in cases {
+        let file = std::fs::read(format!("{}/{name}.webp", dir())).unwrap();
+        let expected = std::fs::read(format!("{}/{name}.frames.raw", dir())).unwrap();
+        let frame_len = (width * height) as usize * channels;
+        assert_eq!(expected.len(), frame_len * count, "{name}: reference size");
+
+        let mut decoder = WebPDecoder::new(&file[..], Limits::default()).unwrap();
+        let durations = decoder.animation().unwrap().frame_durations_ms;
+        let frames = otf_pixels_core::testing::read_frames(&mut decoder)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(frames.len(), count, "{name}: frame count");
+        for (k, ((info, ours), theirs)) in frames
+            .iter()
+            .zip(expected.chunks_exact(frame_len))
+            .enumerate()
+        {
+            assert_eq!(info.index as usize, k, "{name}");
+            assert_eq!(info.duration_ms, durations[k], "{name} frame {k}");
+            if let Some(i) = ours.iter().zip(theirs).position(|(a, b)| a != b) {
+                let p = i / channels;
+                panic!(
+                    "{name} frame {k}: pixel ({}, {}) channel {} is {} in ours, {} in libwebp's",
+                    p as u32 % width,
+                    p as u32 / width,
+                    i % channels,
+                    ours[i],
+                    theirs[i]
+                );
+            }
+        }
+        assert_eq!(
+            decoder.advance_frame().unwrap(),
+            None,
+            "{name}: past the end"
+        );
+    }
+}
+
+#[test]
+fn a_still_has_no_next_frame() {
+    let file = std::fs::read(format!("{}/../lossless/blocks_m6.webp", dir())).unwrap();
+    let mut decoder = WebPDecoder::new(&file[..], Limits::default()).unwrap();
+    assert_eq!(decoder.advance_frame().unwrap(), None);
 }
 
 fn decode(bytes: &[u8]) -> otf_pixels_core::Result<(Vec<u8>, otf_pixels_core::ImageDescriptor)> {
@@ -103,6 +169,35 @@ fn every_truncation_of_an_animation_is_an_error_never_a_panic() {
                     ErrorCode::Malformed,
                     "{name} at {len}: {error}"
                 );
+            }
+        }
+    }
+}
+
+/// Decode every frame, as the pipeline would.
+fn decode_frames(bytes: &[u8]) -> otf_pixels_core::Result<usize> {
+    let mut decoder = WebPDecoder::new(bytes, Limits::default())?;
+    Ok(otf_pixels_core::testing::read_frames(&mut decoder)?.len())
+}
+
+#[test]
+fn every_truncation_and_corruption_of_later_frames_is_an_error_never_a_panic() {
+    for name in ["anim_flags", "anim_moving_mixed"] {
+        let file = std::fs::read(format!("{}/{name}.webp", dir())).unwrap();
+        for len in (0..file.len()).step_by(3) {
+            if let Err(error) = decode_frames(&file[..len]) {
+                assert_eq!(
+                    error.code(),
+                    ErrorCode::Malformed,
+                    "{name} at {len}: {error}"
+                );
+            }
+        }
+        for at in (20..file.len()).step_by(5) {
+            for flip in [0x01_u8, 0x80, 0xff] {
+                let mut bad = file.clone();
+                bad[at] ^= flip;
+                let _ = decode_frames(&bad);
             }
         }
     }

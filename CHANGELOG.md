@@ -22,6 +22,13 @@ versioning: [SemVer](https://semver.org/).
 - GIF implements the frame protocol: `GifDecoder` advances frame by frame
   with disposal applied, matching libgif's frames and the durations
   `animation()` reports.
+- WebP implements the frame protocol: every `ANMF` frame decodes and
+  composites as libwebp's `WebPAnimDecoder` renders it, key frames,
+  blending and background disposal included, byte for byte against
+  libwebp on ten animations (`tests/animated.rs`); a damaged later frame is
+  an error when it is reached, not when the file opens.
+- Fuzz targets for GIF and WebP decode, walking every frame of an
+  animation (`gif_decode`, `webp_decode`), run by `scripts/fuzz.sh`.
 - Rotation by any angle, sharp's `rotate(angle, { background })`:
   `Image::rotate` now takes any integer angle and `Image::rotate_with`
   any finite one, with `RotateOptions` for the background colour (opaque

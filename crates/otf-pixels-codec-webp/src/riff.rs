@@ -65,6 +65,29 @@ pub struct Container<'a> {
     pub loop_count: u32,
     /// Each `ANMF` frame's duration in milliseconds; empty for a still.
     pub frame_durations_ms: Vec<u32>,
+    /// Each `ANMF` chunk's payload, in order; empty for a still. Parsed
+    /// with [`anmf`] when the frame is reached, so a damaged late frame
+    /// does not stop the first from opening.
+    pub anmf: Vec<&'a [u8]>,
+}
+
+/// One frame of an animation (§2.7.1.1): its image, where it goes and how.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnimFrame<'a> {
+    /// The coded image.
+    pub bitstream: Bitstream<'a>,
+    /// Its rectangle on the canvas.
+    pub rect: Frame,
+    /// How long it shows, in milliseconds.
+    pub duration_ms: u32,
+    /// Whether the bitstream carries alpha, as libwebp's demuxer reports it:
+    /// an `ALPH` chunk, or the `VP8L` header's `alpha_is_used` hint.
+    pub has_alpha: bool,
+    /// Alpha-blend onto the canvas (`B` clear), rather than overwrite.
+    pub blend: bool,
+    /// Clear the rectangle to transparent black before the next frame (`D`
+    /// set).
+    pub dispose_background: bool,
 }
 
 /// One chunk: its FourCC and payload.
@@ -223,6 +246,7 @@ fn simple(width: u32, height: u32, has_alpha: bool, bitstream: Bitstream<'_>) ->
         xmp: None,
         loop_count: 0,
         frame_durations_ms: Vec::new(),
+        anmf: Vec::new(),
     }
 }
 
@@ -250,6 +274,7 @@ fn extended<'a>(
     let mut xmp: Option<&'a [u8]> = None;
     let mut loop_count = 0;
     let mut frame_durations_ms = Vec::new();
+    let mut anmf_chunks = Vec::new();
     for chunk in chunks {
         let chunk = chunk?;
         match &chunk.kind {
@@ -267,8 +292,10 @@ fn extended<'a>(
                 if let Some(&[a, b, c]) = chunk.payload.get(12..15) {
                     frame_durations_ms.push(u32::from_le_bytes([a, b, c, 0]));
                 }
+                anmf_chunks.push(chunk.payload);
                 if image.is_none() {
-                    image = Some(first_frame(chunk.payload)?);
+                    let first = anmf(chunk.payload)?;
+                    image = Some((first.bitstream, first.rect));
                 }
             }
             _ if image.is_some() => {}
@@ -312,6 +339,7 @@ fn extended<'a>(
         xmp,
         loop_count,
         frame_durations_ms,
+        anmf: anmf_chunks,
     })
 }
 
@@ -324,36 +352,40 @@ const fn whole(width: u32, height: u32) -> Frame {
     }
 }
 
-/// The image inside an `ANMF` chunk (§2.7.1.1) and its rectangle.
-fn first_frame(anmf: &[u8]) -> Result<(Bitstream<'_>, Frame)> {
-    let header = anmf
-        .first_chunk::<12>()
+/// The frame inside an `ANMF` chunk's payload (§2.7.1.1).
+///
+/// # Errors
+///
+/// Returns [`PixelsError::Malformed`] for a header cut short, a frame with no
+/// bitstream, or a bitstream whose size is not the frame's.
+pub fn anmf(payload: &[u8]) -> Result<AnimFrame<'_>> {
+    let header = payload
+        .first_chunk::<16>()
         .ok_or_else(|| malformed("the ANMF chunk is cut short"))?;
-    if anmf.len() < 16 {
-        return Err(malformed("the ANMF chunk is cut short"));
-    }
-    let frame = Frame {
+    let rect = Frame {
         x: u24(&[header[0], header[1], header[2]]) * 2,
         y: u24(&[header[3], header[4], header[5]]) * 2,
         width: u24(&[header[6], header[7], header[8]]) + 1,
         height: u24(&[header[9], header[10], header[11]]) + 1,
     };
+    let duration_ms = u24(&[header[12], header[13], header[14]]);
+    let flags = header[15];
     let mut alpha = None;
-    for chunk in chunks(anmf.get(16..).unwrap_or(&[])) {
+    for chunk in chunks(payload.get(16..).unwrap_or(&[])) {
         let chunk = chunk?;
-        let size = match &chunk.kind {
+        let (size, has_alpha) = match &chunk.kind {
             b"ALPH" => {
                 alpha = alpha.or(Some(chunk.payload));
                 continue;
             }
-            b"VP8 " => vp8_size(chunk.payload)?,
+            b"VP8 " => (vp8_size(chunk.payload)?, alpha.is_some()),
             b"VP8L" => {
-                let (w, h, _) = vp8l_size(chunk.payload)?;
-                (w, h)
+                let (w, h, alpha_is_used) = vp8l_size(chunk.payload)?;
+                ((w, h), alpha_is_used)
             }
             _ => continue,
         };
-        if size != (frame.width, frame.height) {
+        if size != (rect.width, rect.height) {
             return Err(malformed(
                 "an animation frame's bitstream does not match its size",
             ));
@@ -366,9 +398,16 @@ fn first_frame(anmf: &[u8]) -> Result<(Bitstream<'_>, Frame)> {
                 alpha,
             }
         };
-        return Ok((bitstream, frame));
+        return Ok(AnimFrame {
+            bitstream,
+            rect,
+            duration_ms,
+            has_alpha,
+            blend: flags & 0x02 == 0,
+            dispose_background: flags & 0x01 != 0,
+        });
     }
-    Err(malformed("the first animation frame holds no bitstream"))
+    Err(malformed("an animation frame holds no bitstream"))
 }
 
 #[cfg(test)]

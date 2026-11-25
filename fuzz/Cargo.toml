@@ -14,6 +14,8 @@ otf-pixels-codec-png = { path = "../crates/otf-pixels-codec-png" }
 otf-pixels-codec-jpeg = { path = "../crates/otf-pixels-codec-jpeg" }
 otf-pixels-codec-avif = { path = "../crates/otf-pixels-codec-avif" }
 otf-pixels-codec-jxl = { path = "../crates/otf-pixels-codec-jxl" }
+otf-pixels-codec-gif = { path = "../crates/otf-pixels-codec-gif" }
+otf-pixels-codec-webp = { path = "../crates/otf-pixels-codec-webp" }
 
 [[bin]]
 name = "png_decode"
@@ -60,6 +62,20 @@ bench = false
 [[bin]]
 name = "jxl_decode"
 path = "fuzz_targets/jxl_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gif_decode"
+path = "fuzz_targets/gif_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "webp_decode"
+path = "fuzz_targets/webp_decode.rs"
 test = false
 doc = false
 bench = false

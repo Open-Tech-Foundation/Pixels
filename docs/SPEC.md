@@ -47,8 +47,10 @@ implementation detail and may change without notice.
   at `EncodeOptions::quality`, mapped to the quantizer as libwebp maps it,
   and lossless with `EncodeOptions::lossless`; alpha is always coded
   losslessly, even in a lossy file. Greyscale has no native WebP mode and
-  returns as RGB. Animation decodes to the first frame, placed on its canvas
-  as libwebp's animation decoder does.
+  returns as RGB. Animation decodes frame by frame
+  (`Decoder::advance_frame`), composited exactly as libwebp's animation
+  decoder does; the pipeline takes the first frame until ADR-0020's
+  multi-frame pipeline lands.
 - AVIF v1 scope: owned outright, container and AV1 bitstream both (ADR-0013).
   Still images only — an AVIF still is an AV1 **key frame**, so inter-coded
   content is out of scope. Image *sequences* (the `avis` brand) are animation

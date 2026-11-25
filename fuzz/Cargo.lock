@@ -77,6 +77,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "otf-pixels-codec-gif"
+version = "0.5.0"
+dependencies = [
+ "otf-pixels-compress",
+ "otf-pixels-core",
+]
+
+[[package]]
 name = "otf-pixels-codec-jpeg"
 version = "0.5.0"
 dependencies = [
@@ -99,6 +107,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "otf-pixels-codec-webp"
+version = "0.5.0"
+dependencies = [
+ "otf-pixels-core",
+]
+
+[[package]]
 name = "otf-pixels-compress"
 version = "0.5.0"
 
@@ -112,9 +127,11 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "otf-pixels-codec-avif",
+ "otf-pixels-codec-gif",
  "otf-pixels-codec-jpeg",
  "otf-pixels-codec-jxl",
  "otf-pixels-codec-png",
+ "otf-pixels-codec-webp",
  "otf-pixels-core",
 ]
 

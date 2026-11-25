@@ -2,12 +2,24 @@
 //!
 //! The container is parsed here (`riff`); the image decodes through the owned
 //! VP8L (`vp8l`) or VP8 (`vp8`) decoder, with `ALPH` alpha (`alpha`) and
-//! libwebp's YUV-to-RGB conversion (`yuv`). An animation decodes to its first
-//! frame, placed on its canvas as libwebp's animation decoder does.
+//! libwebp's YUV-to-RGB conversion (`yuv`).
+//!
+//! # Animation
+//!
+//! An animation's rows are the current frame composited onto its canvas,
+//! the first until [`Decoder::advance_frame`] moves on, exactly as libwebp's
+//! `WebPAnimDecoder` (`anim_decode.c`) renders it — which is not only the
+//! RFC's blend and dispose: whether a frame is a *key frame* decides
+//! whether it blends at all, pixels a background disposal just cleared are
+//! written rather than blended, and blending is libwebp's integer
+//! approximation of source-over. Each of those changes a pixel value, so
+//! each is reproduced, not approximated. The canvas starts transparent
+//! black and disposal clears to transparent black; the `ANIM` background
+//! colour is a hint libwebp's decoder ignores, and so is it here.
 
 use otf_pixels_core::{
-    Animation, Codec, DecodeCapability, Decoder, Format, ImageDescriptor, Limits, Orientation,
-    PixelFormat, PixelsError, Result, Source, SourceInfo,
+    Animation, Codec, DecodeCapability, Decoder, Format, FrameInfo, ImageDescriptor, Limits,
+    Orientation, PixelFormat, PixelsError, Result, Source, SourceInfo,
 };
 
 /// The most compressed bytes read before a file is called hostile.
@@ -39,6 +51,24 @@ pub struct WebPDecoder {
     info: SourceInfo,
     /// The animation's frames and timing, for an animated file.
     animation: Option<Animation>,
+    /// Where each `ANMF` payload lies in `bytes`; empty for a still.
+    frames: Vec<std::ops::Range<usize>>,
+    /// The animation's canvas state, once its first frame is drawn.
+    compositor: Option<Compositor>,
+}
+
+/// libwebp's `WebPAnimDecoder` state between frames.
+#[derive(Debug)]
+struct Compositor {
+    /// The current frame composited, RGBA.
+    canvas: Vec<u8>,
+    /// The canvas after the previous frame's disposal: what the next frame
+    /// is drawn over (`prev_frame_disposed_`).
+    disposed: Vec<u8>,
+    /// The frame now on the canvas.
+    index: u32,
+    /// Its rectangle, disposal and whether it was a key frame.
+    previous: (crate::riff::Frame, bool, bool),
 }
 
 impl WebPDecoder {
@@ -110,6 +140,15 @@ impl WebPDecoder {
             .exif
             .map(|block| block.strip_prefix(b"Exif\0\0").unwrap_or(block).to_vec());
         let animation = Animation::new(container.frame_durations_ms.clone(), container.loop_count);
+        let base = bytes.as_ptr() as usize;
+        let frames = container
+            .anmf
+            .iter()
+            .map(|payload| {
+                let start = payload.as_ptr() as usize - base;
+                start..start + payload.len()
+            })
+            .collect();
         Ok(Self {
             descriptor,
             bytes,
@@ -121,6 +160,8 @@ impl WebPDecoder {
             xmp,
             info,
             animation,
+            frames,
+            compositor: None,
         })
     }
 
@@ -159,6 +200,150 @@ impl WebPDecoder {
         }
         Ok(pixels)
     }
+
+    /// Draw animation frame `index` the way `WebPAnimDecoder::GetNext`
+    /// does, and return the canvas in the output pixel format.
+    fn draw_frame(&mut self, index: u32) -> Result<Vec<u8>> {
+        let range = self
+            .frames
+            .get(index as usize)
+            .cloned()
+            .ok_or_else(|| PixelsError::malformed("webp", "the animation has no such frame"))?;
+        let payload = self.bytes.get(range).ok_or_else(|| {
+            PixelsError::malformed("webp", "an animation frame lies outside the file")
+        })?;
+        let frame = crate::riff::anmf(payload)?;
+        let (width, height) = (self.descriptor.width, self.descriptor.height);
+        let rect = frame.rect;
+        if u64::from(rect.x) + u64::from(rect.width) > u64::from(width)
+            || u64::from(rect.y) + u64::from(rect.height) > u64::from(height)
+        {
+            return Err(PixelsError::malformed(
+                "webp",
+                format!(
+                    "frame {index}, {}x{} at ({}, {}), does not fit the {width}x{height} canvas",
+                    rect.width, rect.height, rect.x, rect.y
+                ),
+            ));
+        }
+        let rgba = decode_rgba(frame.bitstream, rect.width as usize, rect.height as usize)?;
+        let canvas_len = width as usize * height as usize * 4;
+        let full = |r: crate::riff::Frame| (r.width, r.height) == (width, height);
+
+        // IsKeyFrame.
+        let key = match &self.compositor {
+            None => true,
+            Some(state) => {
+                let (previous, dispose_background, previous_key) = state.previous;
+                ((!frame.has_alpha || !frame.blend) && full(rect))
+                    || (dispose_background && (full(previous) || previous_key))
+            }
+        };
+        let mut state = self.compositor.take().unwrap_or_else(|| Compositor {
+            canvas: Vec::new(),
+            disposed: vec![0; canvas_len],
+            index: 0,
+            previous: (rect, false, true),
+        });
+        // A key frame starts from transparent black, any other from the
+        // previous frame as disposed.
+        state.canvas = if key {
+            vec![0; canvas_len]
+        } else {
+            state.disposed.clone()
+        };
+
+        // The frame's pixels into its rectangle, overwriting...
+        let stride = width as usize * 4;
+        let frame_stride = rect.width as usize * 4;
+        for (y, source) in rgba.chunks_exact(frame_stride).enumerate() {
+            let at = (rect.y as usize + y) * stride + rect.x as usize * 4;
+            if let Some(target) = state.canvas.get_mut(at..at + frame_stride) {
+                target.copy_from_slice(source);
+            }
+        }
+        // ...then, on a blended frame that is not a key frame, blended over
+        // the disposed canvas: every pixel but those the previous frame's
+        // background disposal cleared (FindBlendRangeAtRow).
+        if !key && frame.blend {
+            let (previous, dispose_background, _) = state.previous;
+            for y in rect.y..rect.y + rect.height {
+                for x in rect.x..rect.x + rect.width {
+                    let cleared = dispose_background
+                        && (previous.x..previous.x + previous.width).contains(&x)
+                        && (previous.y..previous.y + previous.height).contains(&y);
+                    if cleared {
+                        continue;
+                    }
+                    let at = y as usize * stride + x as usize * 4;
+                    let pixel = |canvas: &[u8]| -> Option<[u8; 4]> {
+                        canvas.get(at..at + 4)?.try_into().ok()
+                    };
+                    let (Some(src), Some(dst)) = (pixel(&state.canvas), pixel(&state.disposed))
+                    else {
+                        continue;
+                    };
+                    let blended = blend_non_premultiplied(src, dst);
+                    if let Some(slot) = state.canvas.get_mut(at..at + 4) {
+                        slot.copy_from_slice(&blended);
+                    }
+                }
+            }
+        }
+
+        // This frame becomes the previous, disposed for the next.
+        state.disposed.clone_from(&state.canvas);
+        if frame.dispose_background {
+            for y in rect.y..rect.y + rect.height {
+                let at = y as usize * stride + rect.x as usize * 4;
+                if let Some(row) = state.disposed.get_mut(at..at + frame_stride) {
+                    row.fill(0);
+                }
+            }
+        }
+        state.previous = (rect, frame.dispose_background, key);
+        state.index = index;
+
+        let channels = self.descriptor.pixel.channels();
+        let out = if channels == 4 {
+            state.canvas.clone()
+        } else {
+            state
+                .canvas
+                .chunks_exact(4)
+                .flat_map(|p| p.iter().take(3).copied())
+                .collect()
+        };
+        self.compositor = Some(state);
+        Ok(out)
+    }
+}
+
+/// libwebp's `BlendPixelNonPremult`: `src` over `dst`, both unassociated
+/// RGBA, in its integer arithmetic. Opaque and fully transparent sources are
+/// libwebp's early outs (`BlendPixelRowNonPremult` skips the first).
+fn blend_non_premultiplied(src: [u8; 4], dst: [u8; 4]) -> [u8; 4] {
+    let src_a = u32::from(src[3]);
+    if src_a == 255 {
+        return src;
+    }
+    if src_a == 0 {
+        return dst;
+    }
+    // dst_a · (255 - src_a) / 255, approximated as libwebp does.
+    let dst_factor_a = (u32::from(dst[3]) * (256 - src_a)) >> 8;
+    let blend_a = src_a + dst_factor_a;
+    let scale = (1_u32 << 24) / blend_a;
+    let channel = |s: u8, d: u8| {
+        let unscaled = u32::from(s) * src_a + u32::from(d) * dst_factor_a;
+        ((u64::from(unscaled) * u64::from(scale)) >> 24) as u8
+    };
+    [
+        channel(src[0], dst[0]),
+        channel(src[1], dst[1]),
+        channel(src[2], dst[2]),
+        blend_a as u8,
+    ]
 }
 
 /// Decode one coded image of `width` x `height` to RGBA.
@@ -237,6 +422,31 @@ impl Decoder for WebPDecoder {
         self.animation.clone()
     }
 
+    /// The next frame, composited as libwebp's animation decoder does (see
+    /// the module docs).
+    fn advance_frame(&mut self) -> Result<Option<FrameInfo>> {
+        if self.frames.len() < 2 {
+            self.row = self.descriptor.height;
+            return Ok(None);
+        }
+        if self.compositor.is_none() {
+            self.pixels = Some(self.draw_frame(0)?);
+        }
+        let next = self.compositor.as_ref().map_or(0, |state| state.index) + 1;
+        if next as usize >= self.frames.len() {
+            self.row = self.descriptor.height;
+            return Ok(None);
+        }
+        self.pixels = Some(self.draw_frame(next)?);
+        self.row = 0;
+        let duration = self
+            .animation
+            .as_ref()
+            .and_then(|a| a.frame_durations_ms.get(next as usize).copied())
+            .unwrap_or(0);
+        Ok(Some(FrameInfo::new(next, duration)))
+    }
+
     fn capability(&self) -> DecodeCapability {
         // The image is already in memory, but `Sequential` is what the row
         // contract describes; claiming `Regions` would promise a
@@ -259,9 +469,14 @@ impl Decoder for WebPDecoder {
             ));
         }
         if self.pixels.is_none() {
-            self.pixels = Some(self.decode_canvas()?);
-            // Decoded, the compressed file is no longer needed.
-            self.bytes = Vec::new();
+            if self.frames.is_empty() {
+                self.pixels = Some(self.decode_canvas()?);
+                // Decoded, the compressed file is no longer needed.
+                self.bytes = Vec::new();
+            } else {
+                // Later frames are drawn from the file, so it stays.
+                self.pixels = Some(self.draw_frame(0)?);
+            }
         }
         let start = self.row as usize * row_bytes;
         let row = self

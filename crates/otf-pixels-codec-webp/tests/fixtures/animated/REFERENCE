@@ -1,7 +1,12 @@
 # Regenerate with scripts/regenerate-webp-reference.py
-# name width height channels
-anim_lossless 40 30 3
-anim_lossy_alpha 40 30 4
-anim_offset_lossless 40 30 3
-anim_offset_lossy_alpha 37 29 4
-anim_timing 24 16 4
+# name width height channels frames
+anim_flags 40 30 4 7
+anim_lossless 40 30 3 2
+anim_lossy_alpha 40 30 4 2
+anim_moving_lossless 36 28 4 5
+anim_moving_lossy 40 30 4 6
+anim_moving_mixed 36 28 3 5
+anim_offset_lossless 40 30 3 2
+anim_offset_lossy_alpha 37 29 4 2
+anim_partial_key 40 30 4 3
+anim_timing 24 16 4 3
