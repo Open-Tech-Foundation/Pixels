@@ -29,6 +29,9 @@ versioning: [SemVer](https://semver.org/).
   an error when it is reached, not when the file opens.
 - Fuzz targets for GIF and WebP decode, walking every frame of an
   animation (`gif_decode`, `webp_decode`), run by `scripts/fuzz.sh`.
+- An `animated_roundtrip` fuzz target: an arbitrary animation written as
+  GIF, WebP or JPEG XL must come back frame for frame (lossless exactly,
+  GIF's transparency and delays exactly, lossy WebP's alpha exactly).
 - The multi-frame pipeline (ADR-0020): with `OpenOptions::animated`,
   every op chained onto a GIF, WebP or JPEG XL animation applies to each
   frame, one graph replayed per frame with fresh node identities (core's

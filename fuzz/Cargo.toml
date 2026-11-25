@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-otf-pixels-core = { path = "../crates/otf-pixels-core" }
+otf-pixels-core = { path = "../crates/otf-pixels-core", features = ["testing"] }
 otf-pixels-codec-png = { path = "../crates/otf-pixels-codec-png" }
 otf-pixels-codec-jpeg = { path = "../crates/otf-pixels-codec-jpeg" }
 otf-pixels-codec-avif = { path = "../crates/otf-pixels-codec-avif" }
@@ -84,3 +84,10 @@ bench = false
 # pulls in libfuzzer, neither of which should burden an ordinary build.
 [workspace]
 members = ["."]
+
+[[bin]]
+name = "animated_roundtrip"
+path = "fuzz_targets/animated_roundtrip.rs"
+test = false
+doc = false
+bench = false

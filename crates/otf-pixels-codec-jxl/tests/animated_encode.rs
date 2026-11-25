@@ -218,3 +218,35 @@ fn still_output_is_unchanged_by_the_animation_support() {
         assert_eq!(hash, pinned, "{format} {w}x{h}: still bytes changed");
     }
 }
+
+#[test]
+fn frames_differing_only_under_transparency_are_both_kept() {
+    // Lossless JPEG XL keeps the colour of a transparent pixel, so two
+    // frames that look alike but differ there are two frames; identical
+    // ones are one.
+    let descriptor = ImageDescriptor::new(22, 39, PixelFormat::Rgba8).unwrap();
+    let blank = vec![0_u8; descriptor.byte_len().unwrap()];
+    let mut tinted = blank.clone();
+    tinted[0] = 200; // red under alpha 0
+    for (second, frames) in [(blank.clone(), 1), (tinted, 2)] {
+        let scene = common::Scene {
+            name: "transparent",
+            descriptor,
+            frames: vec![blank.clone(), second],
+            durations: vec![10, 10],
+            loop_count: 0,
+        };
+        let bytes = common::encode(
+            &scene,
+            &scene.frames,
+            &scene.durations,
+            JxlEncoder::lossless(),
+        );
+        let mut decoder = JxlDecoder::new(&bytes[..], Limits::default()).unwrap();
+        let decoded = otf_pixels_core::testing::read_frames(&mut decoder).unwrap();
+        assert_eq!(decoded.len(), frames);
+        for (got, want) in decoded.iter().zip(&scene.frames) {
+            assert_eq!(&got.1, want);
+        }
+    }
+}
