@@ -72,6 +72,11 @@ versioning: [SemVer](https://semver.org/).
   `jxlinfo` reports the durations and loop counts
   (`scripts/check-jxl-interop.sh`). Still JPEG XL encodes to the same bytes
   as before.
+- sharp's output `loop` and `delay`: `Image::with_loop_count`,
+  `with_frame_duration` (every frame) and `with_frame_durations` (one per
+  frame) override the source's timing in GIF, WebP and JPEG XL output;
+  `Image::output_timing` reports what will be written. On a still, or with
+  a list of the wrong length, they are `InvalidArgument`.
 - JPEG XL implements the frame protocol: each displayed frame decodes in
   turn, blended from the reference frames earlier ones saved, checked
   against `djxl --output_frames` on five animations (lossless exactly,

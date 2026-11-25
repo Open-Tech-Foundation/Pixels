@@ -621,3 +621,80 @@ fn an_animation_written_as_lossless_jpeg_xl_reads_back_exactly() {
         }
     }
 }
+
+#[test]
+fn loop_and_delay_overrides_reach_every_animated_format() {
+    for format in [Format::Gif, Format::WebP, Format::Jxl] {
+        let image = open(WEBP, animated());
+        let count = image.frame_count() as usize;
+        let durations: Vec<u32> = (0..count as u32).map(|k| 20 + k * 10).collect();
+        let retimed = image
+            .with_loop_count(4)
+            .with_frame_durations(durations.clone());
+        assert_eq!(retimed.output_timing(), Some((4, &durations[..])));
+        let bytes = retimed
+            .output(format, EncodeOptions::default())
+            .bytes()
+            .unwrap();
+        let back = Image::from_stream_with(std::io::Cursor::new(bytes), animated()).unwrap();
+        let timing = back.animation().unwrap();
+        assert_eq!(timing.loop_count, 4, "{format}");
+        assert_eq!(timing.frame_durations_ms, durations, "{format}");
+
+        // One delay for every frame, and forever.
+        let bytes = open(WEBP, animated())
+            .with_frame_duration(70)
+            .with_loop_count(0)
+            .output(format, EncodeOptions::default())
+            .bytes()
+            .unwrap();
+        let back = Image::from_stream_with(std::io::Cursor::new(bytes), animated()).unwrap();
+        assert_eq!(
+            back.animation().unwrap().frame_durations_ms,
+            vec![70; count],
+            "{format}"
+        );
+        assert_eq!(back.animation().unwrap().loop_count, 0, "{format}");
+    }
+}
+
+#[test]
+fn timing_overrides_follow_a_frame_range_and_refuse_what_does_not_fit() {
+    let range = open(WEBP, animated().with_frames(1, Some(3)));
+    assert_eq!(
+        range
+            .clone()
+            .with_frame_durations(vec![5, 6, 7])
+            .output_timing()
+            .unwrap()
+            .1,
+        [5, 6, 7]
+    );
+    let wrong = range
+        .with_frame_durations(vec![5, 6])
+        .output(Format::Gif, EncodeOptions::default())
+        .bytes()
+        .unwrap_err();
+    assert_eq!(wrong.code(), ErrorCode::InvalidArgument);
+
+    // A still has nothing to time; a still made from frames loses the timing.
+    let still = Image::open(codec_fixture("gif", "static.gif")).unwrap();
+    for image in [
+        still.clone().with_loop_count(2),
+        still.with_frame_duration(10),
+    ] {
+        let error = image
+            .output(Format::Png, EncodeOptions::default())
+            .bytes()
+            .unwrap_err();
+        assert_eq!(error.code(), ErrorCode::InvalidArgument);
+    }
+    let first = open(GIF, animated()).with_loop_count(3).first_frame();
+    assert_eq!(first.output_timing(), None);
+    assert!(
+        first
+            .output(Format::Png, EncodeOptions::default())
+            .bytes()
+            .is_ok()
+    );
+}

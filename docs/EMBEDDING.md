@@ -104,7 +104,7 @@ any allocation.
 | `jxl({ quality, lossless })` | `output(Format::Jxl, EncodeOptions::with_quality(q)?.with_lossless(..))`: lossy VarDCT at the distance `cjxl` gives `quality` (90 is distance 1), or lossless Modular; images with alpha are lossless for now. `distance` is `quality` by `cjxl`'s mapping; `effort` has no effect yet |
 | `jpeg/png/webp/avif/gif/tiff({ quality, lossless })` | `output(Format::.., EncodeOptions::with_quality(q)?.with_lossless(..))` |
 | `png({ palette, colours, dither, compressionLevel })` | `EncodeOptions::default().with_palette(true).with_colours(n)?.with_dither(d)?.with_compression_level(l)?`; `colours` or `dither` imply `palette`, as in sharp. PNG `quality` and `effort`, which steer libimagequant, have no counterpart: the palette is a median cut |
-| `gif({ colours, dither, interFrameMaxError, interPaletteMaxError, keepDuplicateFrames })` | `with_colours(n)?`, `with_dither(d)?`, `with_inter_frame_max_error(e)?`, `with_inter_palette_max_error(e)?`, `with_keep_duplicate_frames(b)`; `loop` and `delay` come from the source animation. An animation's frames hold the changed rectangle only, with one-index transparency (alpha under one half is transparent); sharp's `reuse` and `progressive` are not implemented |
+| `gif({ colours, dither, interFrameMaxError, interPaletteMaxError, keepDuplicateFrames })` | `with_colours(n)?`, `with_dither(d)?`, `with_inter_frame_max_error(e)?`, `with_inter_palette_max_error(e)?`, `with_keep_duplicate_frames(b)`; `loop` and `delay` are `Image::with_loop_count(n)`, `with_frame_duration(ms)` and `with_frame_durations(vec)`, the source's when unset. An animation's frames hold the changed rectangle only, with one-index transparency (alpha under one half is transparent); sharp's `reuse` and `progressive` are not implemented |
 | `webp({ effort, alphaQuality, nearLossless })` | `with_effort(e)?`, `with_alpha_quality(q)?`, `with_near_lossless(true)` (at `quality`, as in sharp); efforts above 2 give the same lossy file, since the VP8 search has nothing further to try; `smartSubsample` and `preset` have no counterpart |
 | `jpeg({ progressive })` | `with_progressive(true)`: libjpeg's default scan script with per-scan optimized tables. mozjpeg's `optimiseScans` search and `trellisQuantisation` have no counterpart |
 | `jpeg({ chromaSubsampling })`, `avif({ chromaSubsampling, effort })` | `with_chroma_subsampling(ChromaSubsampling::Yuv444)` for `'4:4:4'`, `Yuv420` for `'4:2:0'`; `with_effort(e)?`. sharp's AVIF default is 4:4:4 and ours 4:2:0, so pass `Yuv444` to match it. AVIF effort above 4 searches no further |
@@ -154,7 +154,11 @@ silently. The host states which still it wants: `first_frame()` or
 `frame(i)` for one frame, `into_strip()` for all of them stacked top to
 bottom (sharp's result). GIF, WebP and JPEG XL output write the
 animation, and `Output::write_with_encoder` takes an encoder of the
-host's own. Animated WebP frames hold the changed rectangle, blended
+host's own. sharp's output `loop` and `delay` are `Image::with_loop_count(n)`,
+`with_frame_duration(ms)` (every frame) and `with_frame_durations(vec)`
+(one per frame); unset, the source's timing is kept, and
+`Image::output_timing()` says what will be written. Set on a still, or
+with the wrong number of durations, they are `InvalidArgument`. Animated WebP frames hold the changed rectangle, blended
 when the change is opaque; sharp's `minSize`, `mixed`, `kmin` and `kmax`
 are not implemented. An animated file is held in memory, compressed, so each pass
 over its frames decodes it afresh; `Limits::with_max_frames` and

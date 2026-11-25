@@ -1281,6 +1281,83 @@ impl Image {
         self.frames.as_ref().map_or(1, |f| f.count())
     }
 
+    /// Play an animated pipeline's output `loop_count` times, 0 for
+    /// forever, instead of as the source did (sharp's `loop`).
+    ///
+    /// A still has no animation to loop: that is
+    /// [`PixelsError::InvalidArgument`], surfaced at the terminal.
+    #[must_use]
+    pub fn with_loop_count(self, loop_count: u32) -> Self {
+        self.retimed("loop_count", |frames| {
+            frames.loop_count = loop_count;
+            Ok(())
+        })
+    }
+
+    /// Show every frame of an animated pipeline's output for `ms`
+    /// milliseconds (sharp's `delay` as one number). A still is
+    /// [`PixelsError::InvalidArgument`].
+    #[must_use]
+    pub fn with_frame_duration(self, ms: u32) -> Self {
+        self.retimed("duration", |frames| {
+            frames.durations.fill(ms);
+            Ok(())
+        })
+    }
+
+    /// Show each frame of an animated pipeline's output for its own number
+    /// of milliseconds, one per frame in order (sharp's `delay` as an
+    /// array). A list whose length is not [`Image::frame_count`], or a still,
+    /// is [`PixelsError::InvalidArgument`].
+    #[must_use]
+    pub fn with_frame_durations(self, ms: Vec<u32>) -> Self {
+        self.retimed("durations", move |frames| {
+            if ms.len() != frames.durations.len() {
+                return Err(PixelsError::invalid_argument(
+                    "durations",
+                    format!(
+                        "{} durations were given for {} frames",
+                        ms.len(),
+                        frames.durations.len()
+                    ),
+                ));
+            }
+            frames.durations = ms;
+            Ok(())
+        })
+    }
+
+    /// This image with its frames' timing changed by `change`.
+    fn retimed(self, what: &'static str, change: impl FnOnce(&mut Frames) -> Result<()>) -> Self {
+        if self.inner.is_err() {
+            return self;
+        }
+        let Some(frames) = self.frames.as_deref() else {
+            return Self::failed(PixelsError::invalid_argument(
+                what,
+                "a still has no frames to time; open it with `animated`",
+            ));
+        };
+        let mut frames = frames.clone();
+        match change(&mut frames) {
+            Ok(()) => Self {
+                frames: Some(Arc::new(frames)),
+                ..self
+            },
+            Err(error) => Self::failed(error),
+        }
+    }
+
+    /// The loop count and per-frame durations an animated pipeline writes:
+    /// the source's, or what [`Image::with_loop_count`] and
+    /// [`Image::with_frame_durations`] made them. `None` for a still.
+    #[must_use]
+    pub fn output_timing(&self) -> Option<(u32, &[u32])> {
+        self.frames
+            .as_deref()
+            .map(|f| (f.loop_count, f.durations.as_slice()))
+    }
+
     /// The first frame of an animated pipeline, as a still; a still as it
     /// is. Shorthand for [`Image::frame`]`(0)`.
     #[must_use]
