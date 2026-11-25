@@ -24,6 +24,9 @@ versioning: [SemVer](https://semver.org/).
   any-angle rotate.
 
 ### Changed
+- ADR-0020 records how animation will work: one graph replayed per
+  frame, GIF/WebP/JPEG XL read and written, and no silent flattening to a
+  still format (`first_frame` or `into_strip` must be asked for).
 - The `otf-pixels` crate docs no longer list arbitrary-angle rotation as
   missing.
 - `Image::rotate` with an angle that is not a multiple of 90 rotates

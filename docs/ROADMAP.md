@@ -89,7 +89,9 @@ Ordered by expected value, each gated on its own ADR before work starts:
    rendering intents and non-sRGB targets remain.
 4. ~~**Progressive JPEG encode; WebP from scratch**~~ — both done: WebP
    (ADR-0014) and progressive JPEG output, with per-scan optimized tables.
-5. **Animation pipelines** — multi-frame GIF/WebP/AVIF encode.
+5. **Animation pipelines** — multi-frame GIF/WebP/JPEG XL, decode and
+   encode, as a per-frame replay of one graph (ADR-0020). AVIF sequences
+   stay out: they need AV1 inter coding.
 6. **ThumbHash placeholders** — cheap LQIP terminal.
 
 ## Explicit non-goals
