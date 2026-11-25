@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use otf_pixels_core::{
     Animation, Background, ChannelLayout, Comment, Density, Format, ImageDescriptor, Orientation,
-    PixelFormat, SampleKind, SourceInfo,
+    PixelFormat, SampleKind,
 };
 
 /// What a source file says about itself, read from its headers (sharp's
@@ -70,6 +70,15 @@ impl SourceMetadata {
         clippy::too_many_arguments,
         reason = "everything a decoder reports, once"
     )]
+    #[cfg(any(
+        feature = "png",
+        feature = "gif",
+        feature = "jpeg",
+        feature = "tiff",
+        feature = "webp",
+        feature = "avif",
+        feature = "jxl"
+    ))]
     pub(crate) fn new(
         format: Format,
         stored: ImageDescriptor,
@@ -79,7 +88,7 @@ impl SourceMetadata {
         icc: Option<&[u8]>,
         exif: Option<&[u8]>,
         xmp: Option<Arc<[u8]>>,
-        info: SourceInfo,
+        info: otf_pixels_core::SourceInfo,
     ) -> Self {
         Self {
             format,

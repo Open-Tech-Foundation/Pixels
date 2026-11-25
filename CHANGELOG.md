@@ -118,6 +118,9 @@ versioning: [SemVer](https://semver.org/).
   instead of failing with `InvalidArgument`.
 
 ### Fixed
+- `otf-pixels` builds without warnings with no decoding codec enabled
+  (`--no-default-features`, or `raw` alone), so CI's `features` task
+  passes; it had failed since 0.5.0 on an unused `SourceMetadata::new`.
 - A lossy WebP whose coefficients push the VP8 inverse transform past 32
   bits no longer panics in a build with overflow checks: the products wrap,
   as libwebp's C arithmetic does. Found by the new WebP fuzz target.
