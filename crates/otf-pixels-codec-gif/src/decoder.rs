@@ -347,30 +347,36 @@ impl<S: Source> GifDecoder<S> {
         }
     }
 
-    /// Restore a frame's rectangle from a saved copy.
+    /// The part of `area` that lies on the canvas, as `(left, top, width,
+    /// height)`; empty when none does.
+    ///
+    /// A frame may declare a rectangle overhanging the canvas, or far past
+    /// it: viewers clip, and so does every buffer here. Sizing one by the
+    /// declared rectangle would let a 100-byte file ask for 17 GB.
+    fn clip(&self, area: ImageDescriptor) -> (u32, u32, u32, u32) {
+        let (width, height) = (self.descriptor.width, self.descriptor.height);
+        let left = u32::from(area.left).min(width);
+        let top = u32::from(area.top).min(height);
+        let right = (u32::from(area.left) + u32::from(area.width)).min(width);
+        let bottom = (u32::from(area.top) + u32::from(area.height)).min(height);
+        (left, top, right - left, bottom - top)
+    }
+
+    /// Restore a frame's rectangle, clipped to the canvas, from the copy
+    /// [`GifDecoder::save_area`] made.
     fn restore_area(&mut self, area: ImageDescriptor, saved: &[u8]) {
-        let width = self.descriptor.width;
-        let height = self.descriptor.height;
-        let area_width = u32::from(area.width) as usize;
-        for row in 0..u32::from(area.height) {
-            let y = u32::from(area.top) + row;
-            if y >= height {
-                break;
-            }
-            for column in 0..u32::from(area.width) {
-                let x = u32::from(area.left) + column;
-                if x >= width {
-                    break;
-                }
-                let from = ((row as usize * area_width) + column as usize) * 4;
-                let to = ((y * width + x) * 4) as usize;
-                let (Some(source), Some(target)) =
-                    (saved.get(from..from + 4), self.canvas.get_mut(to..to + 4))
-                else {
-                    continue;
-                };
-                target.copy_from_slice(source);
-            }
+        let (left, top, width, height) = self.clip(area);
+        let stride = self.descriptor.width as usize * 4;
+        let span = width as usize * 4;
+        for row in 0..height as usize {
+            let to = (top as usize + row) * stride + left as usize * 4;
+            let (Some(source), Some(target)) = (
+                saved.get(row * span..(row + 1) * span),
+                self.canvas.get_mut(to..to + span),
+            ) else {
+                continue;
+            };
+            target.copy_from_slice(source);
         }
     }
 
@@ -432,32 +438,16 @@ impl<S: Source> GifDecoder<S> {
         Ok(())
     }
 
-    /// Copy a rectangle of the canvas, for `Disposal::Previous`.
+    /// Copy a rectangle of the canvas, clipped to it, for
+    /// `Disposal::Previous`.
     fn save_area(&self, area: ImageDescriptor) -> Vec<u8> {
-        let width = self.descriptor.width;
-        let height = self.descriptor.height;
-        let mut out =
-            vec![0_u8; u32::from(area.width) as usize * u32::from(area.height) as usize * 4];
-        let area_width = u32::from(area.width) as usize;
-        for row in 0..u32::from(area.height) {
-            let y = u32::from(area.top) + row;
-            if y >= height {
-                break;
-            }
-            for column in 0..u32::from(area.width) {
-                let x = u32::from(area.left) + column;
-                if x >= width {
-                    break;
-                }
-                let from = ((y * width + x) * 4) as usize;
-                let to = ((row as usize * area_width) + column as usize) * 4;
-                let (Some(source), Some(target)) =
-                    (self.canvas.get(from..from + 4), out.get_mut(to..to + 4))
-                else {
-                    continue;
-                };
-                target.copy_from_slice(source);
-            }
+        let (left, top, width, height) = self.clip(area);
+        let stride = self.descriptor.width as usize * 4;
+        let span = width as usize * 4;
+        let mut out = Vec::with_capacity(span * height as usize);
+        for row in 0..height as usize {
+            let from = (top as usize + row) * stride + left as usize * 4;
+            out.extend_from_slice(self.canvas.get(from..from + span).unwrap_or_default());
         }
         out
     }

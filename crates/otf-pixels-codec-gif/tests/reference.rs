@@ -197,6 +197,17 @@ fn advancing_mid_frame_skips_to_the_next_frames_top() {
 }
 
 #[test]
+fn a_frame_far_larger_than_its_canvas_costs_only_the_canvas() {
+    // Found by fuzzing: 125 bytes declaring a 65535-wide frame with
+    // "restore previous" disposal on a tiny canvas. Saving that rectangle
+    // unclipped asked for 17 GB; clipped, it is the canvas at most.
+    let bytes = std::fs::read(format!("{}/oversized_previous.gif", fixture_dir())).unwrap();
+    if let Ok(mut decoder) = GifDecoder::new(&bytes[..], Limits::default()) {
+        let _ = otf_pixels_core::testing::read_frames(&mut decoder);
+    }
+}
+
+#[test]
 fn interlaced_and_non_interlaced_decode_identically() {
     // The strongest interlace check available: the same image, both ways. A
     // row emitted twice or in the wrong pass shows up here and nowhere else

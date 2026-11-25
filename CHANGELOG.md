@@ -51,6 +51,10 @@ versioning: [SemVer](https://semver.org/).
 - A lossy WebP whose coefficients push the VP8 inverse transform past 32
   bits no longer panics in a build with overflow checks: the products wrap,
   as libwebp's C arithmetic does. Found by the new WebP fuzz target.
+- A GIF frame declaring a rectangle far larger than its canvas, with
+  "restore previous" disposal, no longer allocates that rectangle: 125
+  bytes could ask for 17 GB. Saved and restored areas are clipped to the
+  canvas. Found by the new GIF fuzz target.
 
 ## [0.5.0] - 2026-10-21
 
