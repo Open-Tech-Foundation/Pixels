@@ -475,13 +475,6 @@ fn grow(frame: FramePlanes, header: &FrameHeader, image: &ImageHeader) -> Frame 
     }
 }
 
-/// The decoded image.
-#[derive(Debug, Clone)]
-pub struct Image {
-    pub header: ImageHeader,
-    pub canvas: Canvas,
-}
-
 /// Parse the codestream's headers and every frame header, without decoding
 /// pixels.
 ///
@@ -544,87 +537,142 @@ fn skip_preview(r: &mut BitReader<'_>, header: &ImageHeader) -> Result<()> {
     r.skip(toc.total * 8)
 }
 
-/// Decode the codestream to its first displayed frame.
+/// The decode of a codestream, one displayed frame at a time.
 ///
-/// # Errors
-///
-/// For malformed data or features not implemented.
-pub fn decode(codestream: &[u8]) -> Result<Image> {
-    let mut r = BitReader::new(codestream);
-    let header = ImageHeader::parse(&mut r)?;
-    read_icc(&mut r, &header)?;
-    skip_preview(&mut r, &header)?;
-    let (width, height) = (header.width as usize, header.height as usize);
-    let mut references = References::default();
-    let mut lf_frames: [Option<FramePlanes>; 5] = Default::default();
-    let mut canvas = None;
-    let (mut index, mut last_visible, mut visible) = (0_u64, None::<u64>, 0_u64);
-    loop {
-        r.zero_pad_to_byte()?;
-        let frame = FrameHeader::parse(&mut r, &header)?;
-        check_frame_size(&frame, &header)?;
-        let toc = Toc::parse(&mut r, &frame)?;
-        let start = r.position() / 8;
-        let data = codestream
-            .get(start..start + toc.total)
-            .ok_or_else(|| malformed("a frame runs past the codestream"))?;
-        r.skip(toc.total * 8)?;
-        if canvas.is_none() {
-            let (mut planes, mut features) =
-                super::frame::decode(data, &toc, &header, &frame, &lf_frames, &references)?;
+/// Holds what persists between frames — the reference slots, the LF
+/// frames, the count of frames seen and where the next frame header starts
+/// — but not the codestream, which every call is handed again: the decoder
+/// that owns this owns the bytes too.
+#[derive(Debug)]
+pub struct Renderer {
+    pub header: ImageHeader,
+    /// Bit position of the next frame header.
+    position: usize,
+    references: References,
+    lf_frames: [Option<FramePlanes>; 5],
+    /// Frames read, displayed or not.
+    index: u64,
+    /// The index of the last displayed frame.
+    last_visible: Option<u64>,
+    /// Displayed frames so far.
+    visible: u64,
+    /// Whether the last frame has been read.
+    finished: bool,
+}
+
+impl Renderer {
+    /// Parse the image header and skip the ICC profile and preview, ready
+    /// for the first frame.
+    ///
+    /// # Errors
+    ///
+    /// For a malformed header.
+    pub fn new(codestream: &[u8]) -> Result<Self> {
+        let mut r = BitReader::new(codestream);
+        let header = ImageHeader::parse(&mut r)?;
+        read_icc(&mut r, &header)?;
+        skip_preview(&mut r, &header)?;
+        Ok(Self {
+            header,
+            position: r.position(),
+            references: References::default(),
+            lf_frames: Default::default(),
+            index: 0,
+            last_visible: None,
+            visible: 0,
+            finished: false,
+        })
+    }
+
+    /// Decode frames until the next displayed one, and return it composited
+    /// onto the canvas with straight alpha; `None` after the last frame.
+    ///
+    /// Frames that are not displayed — reference-only, LF, and zero-length
+    /// frames of an animation — are decoded on the way, since later frames
+    /// blend from them.
+    ///
+    /// # Errors
+    ///
+    /// For malformed data or features not implemented.
+    pub fn next_displayed(&mut self, codestream: &[u8]) -> Result<Option<Canvas>> {
+        let header = &self.header;
+        let (width, height) = (header.width as usize, header.height as usize);
+        let mut r = BitReader::new(codestream);
+        r.skip(self.position)?;
+        let mut shown = None;
+        while shown.is_none() && !self.finished {
+            r.zero_pad_to_byte()?;
+            let frame = FrameHeader::parse(&mut r, header)?;
+            check_frame_size(&frame, header)?;
+            let toc = Toc::parse(&mut r, &frame)?;
+            let start = r.position() / 8;
+            let data = codestream
+                .get(start..start + toc.total)
+                .ok_or_else(|| malformed("a frame runs past the codestream"))?;
+            r.skip(toc.total * 8)?;
+            let index = self.index;
+            self.index += 1;
+            self.finished = frame.is_last;
+
+            let (mut planes, mut features) = super::frame::decode(
+                data,
+                &toc,
+                header,
+                &frame,
+                &self.lf_frames,
+                &self.references,
+            )?;
             if frame.is_keyframe() {
-                visible += 1;
-                features.visible = visible;
+                self.visible += 1;
+                features.visible = self.visible;
                 features.invisible = 0;
             } else {
-                features.visible = visible;
-                features.invisible = last_visible.map_or(index + 1, |v| index - v);
+                features.visible = self.visible;
+                features.invisible = self.last_visible.map_or(index + 1, |v| index - v);
+            }
+            if frame.is_keyframe() {
+                self.last_visible = Some(index);
             }
             super::filter::restore(&mut planes, &frame)?;
             if frame.frame_type == FrameType::Lf {
-                if let Some(slot) = lf_frames.get_mut(frame.lf_level as usize) {
+                if let Some(slot) = self.lf_frames.get_mut(frame.lf_level as usize) {
                     *slot = Some(planes);
                 }
-                index += 1;
                 continue;
             }
-            let mut full = grow(planes, &frame, &header);
-            features.apply(&mut full, &frame, &header, &references)?;
+            let mut full = grow(planes, &frame, header);
+            features.apply(&mut full, &frame, header, &self.references)?;
             if !frame.save_before_ct {
-                colour_transform(&mut full.colour, &header, &frame);
+                colour_transform(&mut full.colour, header, &frame);
             }
-            let blended = blend(&frame, &header, &full, &references, width, height);
+            let blended = blend(&frame, header, &full, &self.references, width, height);
             if frame.can_reference() || frame.frame_type == FrameType::ReferenceOnly {
-                references.slots[frame.save_as_reference as usize] = Some(blended.clone());
+                self.references.slots[frame.save_as_reference as usize] = Some(blended.clone());
             }
             if frame.is_keyframe() {
-                canvas = Some(blended);
+                shown = Some(blended);
             }
         }
-        if frame.is_keyframe() {
-            last_visible = Some(index);
-        }
-        index += 1;
-        if frame.is_last || canvas.is_some() {
-            break;
-        }
-    }
-    let mut canvas = canvas.ok_or_else(|| malformed("no frame is displayed"))?;
-    // Straight alpha out.
-    for (e, info) in header.extra.iter().enumerate() {
-        if let ExtraKind::Alpha {
-            premultiplied: true,
-        } = info.kind
-        {
-            let alpha = canvas.extra[e].clone();
-            for plane in &mut canvas.colour {
-                for (v, &a) in plane.iter_mut().zip(&alpha) {
-                    if a > 0.0 {
-                        *v /= a;
+        self.position = r.position();
+        let Some(mut canvas) = shown else {
+            return Ok(None);
+        };
+        // Straight alpha out.
+        for (e, info) in header.extra.iter().enumerate() {
+            if let ExtraKind::Alpha {
+                premultiplied: true,
+            } = info.kind
+            {
+                let alpha = canvas.extra[e].clone();
+                for plane in &mut canvas.colour {
+                    for (v, &a) in plane.iter_mut().zip(&alpha) {
+                        if a > 0.0 {
+                            *v /= a;
+                        }
                     }
                 }
             }
         }
+        Ok(Some(canvas))
     }
-    Ok(Image { header, canvas })
 }

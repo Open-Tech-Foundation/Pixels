@@ -13,8 +13,10 @@
 //! progressive passes, JPEG recompression with chroma subsampling), ANS and
 //! prefix codes with LZ77, patches, splines, noise, Gaborish, the
 //! edge-preserving filter, upsampling, extra channels and blending. Rows
-//! are the first displayed frame; an animation's frames and timing are
-//! reported. XYB images are delivered as sRGB (or their declared transfer
+//! are the first displayed frame, until `Decoder::advance_frame` moves to
+//! the next as libjxl composites it (`tests/reference.rs` checks every
+//! displayed frame against `djxl --output_frames`); an animation's frames
+//! and timing are reported. XYB images are delivered as sRGB (or their declared transfer
 //! function), so their ICC profile, if any, is not reported; other images
 //! report theirs. Lossless files decode exactly to libjxl's pixels, lossy
 //! ones within a level (`tests/reference.rs`).
@@ -28,7 +30,8 @@
 //! Internally buffered both ways. The encoder fits its codes to every
 //! residual before the first is written; the decoder holds the file and
 //! decodes it whole on the first row, as JPEG XL's groups may come in any
-//! order and frames blend onto a canvas.
+//! order and frames blend onto a canvas. An animation keeps the file, its
+//! reference frames and one canvas between displayed frames.
 
 mod bits;
 mod decode;

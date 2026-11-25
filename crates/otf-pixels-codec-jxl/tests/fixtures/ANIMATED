@@ -1,0 +1,7 @@
+# Regenerate with scripts/regenerate-jxl-reference.py
+# name width height channels tolerance frames
+anim 64 48 4 0 3
+anim_lossy 64 48 4 1 3
+anim_sparse 48 36 4 0 5
+anim_sparse_lossy 48 36 4 1 5
+anim_timing 40 30 4 0 3

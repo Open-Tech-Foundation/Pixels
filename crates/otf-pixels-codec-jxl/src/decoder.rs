@@ -1,5 +1,7 @@
 //! The JPEG XL decoder: a bare codestream or the ISOBMFF container, decoded
-//! to its first displayed frame.
+//! one displayed frame at a time: the first, until
+//! [`Decoder::advance_frame`] moves on. Each displayed frame is what libjxl
+//! shows for it, blended from the reference frames earlier ones saved.
 
 #![allow(
     clippy::indexing_slicing,
@@ -7,8 +9,8 @@
 )]
 
 use otf_pixels_core::{
-    Animation, Codec, Decoder, Format, ImageDescriptor, Limits, Orientation, PixelFormat,
-    PixelsError, Result, Source, SourceInfo,
+    Animation, Codec, Decoder, Format, FrameInfo, ImageDescriptor, Limits, Orientation,
+    PixelFormat, PixelsError, Result, Source, SourceInfo,
 };
 
 use crate::decode::{container, header::ExtraKind, render};
@@ -20,10 +22,17 @@ const MAX_COMPRESSED: usize = 256 * 1024 * 1024;
 #[derive(Debug)]
 pub struct JxlDecoder {
     descriptor: ImageDescriptor,
-    /// The codestream, until the first row is asked for.
+    /// The codestream: until the first row is asked for, or for an
+    /// animation until its last frame.
     codestream: Vec<u8>,
-    /// The decoded image, interleaved in the output format.
+    /// The current frame, interleaved in the output format.
     pixels: Option<Vec<u8>>,
+    /// The decode so far, between frames.
+    renderer: Option<render::Renderer>,
+    /// The displayed frame on the canvas.
+    frame: u32,
+    /// Set once the last frame has been passed.
+    done: bool,
     row: u32,
     orientation: Orientation,
     icc: Option<Vec<u8>>,
@@ -108,6 +117,9 @@ impl JxlDecoder {
             descriptor,
             codestream,
             pixels: None,
+            renderer: None,
+            frame: 0,
+            done: false,
             row: 0,
             orientation,
             icc,
@@ -118,11 +130,26 @@ impl JxlDecoder {
         })
     }
 
-    fn decode_pixels(&self) -> Result<Vec<u8>> {
-        let image = render::decode(&self.codestream)?;
-        let canvas = &image.canvas;
-        let alpha = image
-            .header
+    /// Decode the next displayed frame into the output format; `None` after
+    /// the last.
+    fn render_next(&mut self) -> Result<Option<Vec<u8>>> {
+        let mut renderer = match self.renderer.take() {
+            Some(renderer) => renderer,
+            None => render::Renderer::new(&self.codestream)?,
+        };
+        let canvas = renderer.next_displayed(&self.codestream)?;
+        let pixels = canvas.map(|canvas| self.interleave(&renderer.header, &canvas));
+        self.renderer = Some(renderer);
+        Ok(pixels)
+    }
+
+    /// A canvas in the output pixel format.
+    fn interleave(
+        &self,
+        header: &crate::decode::header::ImageHeader,
+        canvas: &render::Canvas,
+    ) -> Vec<u8> {
+        let alpha = header
             .extra
             .iter()
             .position(|e| matches!(e.kind, ExtraKind::Alpha { .. }))
@@ -155,7 +182,7 @@ impl JxlDecoder {
                 }
             }
         }
-        Ok(out)
+        out
     }
 }
 
@@ -190,6 +217,38 @@ impl Decoder for JxlDecoder {
         self.animation.clone()
     }
 
+    /// The next displayed frame, as libjxl shows it; its duration is the
+    /// one [`Decoder::animation`] reported.
+    fn advance_frame(&mut self) -> Result<Option<FrameInfo>> {
+        let Some(animation) = self.animation.clone().filter(|_| !self.done) else {
+            self.row = self.descriptor.height;
+            return Ok(None);
+        };
+        if self.pixels.is_none() {
+            self.pixels = self.render_next()?;
+        }
+        match self.render_next()? {
+            Some(pixels) => {
+                self.pixels = Some(pixels);
+                self.frame += 1;
+                self.row = 0;
+                let duration = animation
+                    .frame_durations_ms
+                    .get(self.frame as usize)
+                    .copied()
+                    .unwrap_or(0);
+                Ok(Some(FrameInfo::new(self.frame, duration)))
+            }
+            None => {
+                self.row = self.descriptor.height;
+                self.codestream = Vec::new();
+                self.renderer = None;
+                self.done = true;
+                Ok(None)
+            }
+        }
+    }
+
     fn read_row(&mut self, out: &mut [u8]) -> Result<()> {
         if self.row >= self.descriptor.height {
             return Err(PixelsError::invalid_argument(
@@ -205,8 +264,15 @@ impl Decoder for JxlDecoder {
             ));
         }
         if self.pixels.is_none() {
-            self.pixels = Some(self.decode_pixels()?);
-            self.codestream = Vec::new();
+            let pixels = self
+                .render_next()?
+                .ok_or_else(|| PixelsError::malformed("jxl", "no frame is displayed"))?;
+            self.pixels = Some(pixels);
+            if self.animation.is_none() {
+                // A still: the compressed file is no longer needed.
+                self.codestream = Vec::new();
+                self.renderer = None;
+            }
         }
         let start = self.row as usize * row_bytes;
         let row = self

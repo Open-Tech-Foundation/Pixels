@@ -29,6 +29,10 @@ versioning: [SemVer](https://semver.org/).
   an error when it is reached, not when the file opens.
 - Fuzz targets for GIF and WebP decode, walking every frame of an
   animation (`gif_decode`, `webp_decode`), run by `scripts/fuzz.sh`.
+- JPEG XL implements the frame protocol: each displayed frame decodes in
+  turn, blended from the reference frames earlier ones saved, checked
+  against `djxl --output_frames` on five animations (lossless exactly,
+  lossy within one level). The `jxl_decode` fuzz target walks frames too.
 - Rotation by any angle, sharp's `rotate(angle, { background })`:
   `Image::rotate` now takes any integer angle and `Image::rotate_with`
   any finite one, with `RotateOptions` for the background colour (opaque

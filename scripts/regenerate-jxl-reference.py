@@ -161,6 +161,57 @@ def main():
         manifest.append(f"{name} {width} {height} {depth} {tolerance} {16 if maxval > 255 else 8}")
     open(os.path.join(OUT, "REFERENCE"), "w").write("\n".join(manifest) + "\n")
 
+    # Animations, every displayed frame checked: what `djxl --output_frames`
+    # writes, each frame composited onto the canvas as libjxl shows it.
+    # Transparency, frames covering part of the canvas, and every GIF
+    # disposal: cjxl turns these into cropped JPEG XL frames that blend
+    # from the reference frames earlier ones saved. (APNG would add
+    # translucency, but libjxl 0.11's APNG reader rejects Pillow's and
+    # ffmpeg's alike; translucent animation is checked through this
+    # crate's own encoder instead.)
+    sparse = os.path.join(tmp, "sparse.gif")
+    moving = []
+    for i in range(5):
+        frame = Image.new("RGBA", (48, 36), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(frame)
+        draw.rectangle((2 + i * 7, 3 + i * 3, 14 + i * 7, 15 + i * 3), fill=(230, 60, 40, 255))
+        draw.ellipse((28, 18, 44, 32), fill=(30, 140 + i * 20, 90, 255))
+        moving.append(frame)
+    moving[0].save(sparse, save_all=True, append_images=moving[1:], duration=[70, 70, 140, 70, 70],
+                   loop=0, disposal=[1, 2, 3, 1, 2], transparency=0)
+    timed = os.path.join(tmp, "timed.gif")
+    ticks = []
+    for i in range(3):
+        frame = Image.new("RGB", (40, 30), (200, 210, 220))
+        ImageDraw.Draw(frame).rectangle((2 + i * 10, 4, 14 + i * 10, 24), fill=(10 + i * 80, 30, 90))
+        ticks.append(frame)
+    ticks[0].save(timed, save_all=True, append_images=ticks[1:], duration=[50, 200, 120], loop=3, disposal=1)
+    animated = [
+        # name, source, cjxl arguments (None: the fixture above), tolerance
+        ("anim", None, None, 0),
+        ("anim_lossy", gif, ["-d", "1"], 1),
+        ("anim_sparse", sparse, ["-d", "0"], 0),
+        ("anim_sparse_lossy", sparse, ["-d", "1.5"], 1),
+        ("anim_timing", timed, ["-d", "0", "-e", "3"], 0),
+    ]
+    manifest = ["# Regenerate with scripts/regenerate-jxl-reference.py",
+                "# name width height channels tolerance frames"]
+    for name, src, args, tolerance in animated:
+        jxl = os.path.join(OUT, name + ".jxl")
+        if args is not None:
+            run("cjxl", src, jxl, *args)
+        out = os.path.join(tmp, name + ".pam")
+        run("djxl", jxl, out, "--output_frames", "--bits_per_sample", "8")
+        frames = []
+        k = 0
+        while os.path.exists(f"{out}-{k}.pam"):
+            width, height, depth, _, pixels = pam_pixels(f"{out}-{k}.pam")
+            frames.append(pixels)
+            k += 1
+        open(os.path.join(OUT, name + ".frames.raw"), "wb").write(b"".join(frames))
+        manifest.append(f"{name} {width} {height} {depth} {tolerance} {len(frames)}")
+    open(os.path.join(OUT, "ANIMATED"), "w").write("\n".join(manifest) + "\n")
+
 
 if __name__ == "__main__":
     main()

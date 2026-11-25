@@ -96,6 +96,82 @@ fn an_animation_reports_its_frames_and_decodes_the_first() {
 }
 
 #[test]
+fn every_displayed_frame_matches_libjxls() {
+    // `djxl --output_frames`: each displayed frame as libjxl composites it.
+    // The animations come from GIFs, so later frames are crops that blend
+    // from reference frames earlier ones saved; a frame decoded on its own
+    // would be wrong everywhere it does not cover.
+    let manifest = String::from_utf8(fixture("ANIMATED")).unwrap();
+    let mut checked = 0;
+    for line in manifest
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.is_empty())
+    {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        let [name, width, height, channels, tolerance, count] = f[..] else {
+            panic!("bad manifest line {line}");
+        };
+        let (width, height, channels, tolerance, count): (usize, usize, usize, u8, usize) = (
+            width.parse().unwrap(),
+            height.parse().unwrap(),
+            channels.parse().unwrap(),
+            tolerance.parse().unwrap(),
+            count.parse().unwrap(),
+        );
+        let mut decoder =
+            JxlDecoder::new(&fixture(&format!("{name}.jxl"))[..], Limits::default()).unwrap();
+        assert_eq!(decoder.descriptor().pixel.channels(), channels, "{name}");
+        let durations = decoder.animation().expect("animated").frame_durations_ms;
+        let frames = otf_pixels_core::testing::read_frames(&mut decoder)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let expected = fixture(&format!("{name}.frames.raw"));
+        let frame_len = width * height * channels;
+        assert_eq!(expected.len(), frame_len * count, "{name}: reference size");
+        assert_eq!(frames.len(), count, "{name}: displayed frames");
+        for (k, ((info, ours), theirs)) in frames
+            .iter()
+            .zip(expected.chunks_exact(frame_len))
+            .enumerate()
+        {
+            assert_eq!(info.duration_ms, durations[k], "{name} frame {k}");
+            let worst = ours
+                .iter()
+                .zip(theirs)
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap_or(0);
+            assert!(
+                worst <= tolerance,
+                "{name} frame {k}: off by {worst}, tolerance {tolerance}"
+            );
+        }
+        assert_eq!(
+            decoder.advance_frame().unwrap(),
+            None,
+            "{name}: past the end"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 5, "the manifest lists {checked} animations");
+}
+
+#[test]
+fn an_animations_timing_is_what_the_codestream_says() {
+    let decoder = JxlDecoder::new(&fixture("anim_timing.jxl")[..], Limits::default()).unwrap();
+    let animation = decoder.animation().unwrap();
+    assert_eq!(animation.frame_durations_ms, [50, 200, 120]);
+    // The GIF loops three times, but cjxl writes num_loops = 0 (forever),
+    // as `jxlinfo` reports: the codestream is the truth here.
+    assert_eq!(animation.loop_count, 0);
+}
+
+#[test]
+fn a_still_has_no_next_frame() {
+    let (_, _, mut decoder) = decode(&fixture("photo_d1.jxl"));
+    assert_eq!(decoder.advance_frame().unwrap(), None);
+}
+
+#[test]
 fn a_still_image_has_no_animation_and_no_profile_for_xyb() {
     let (_, _, decoder) = decode(&fixture("photo_d1.jxl"));
     assert!(decoder.animation().is_none());

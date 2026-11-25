@@ -7,7 +7,8 @@
 //! JPEG XL's attack surface is mostly sizes it states for itself: frames
 //! cropped beyond the image, tables of contents pointing past the frame,
 //! entropy codes whose histograms must sum exactly, MA trees that must end,
-//! and transforms that rearrange channels by indices the stream chooses.
+//! transforms that rearrange channels by indices the stream chooses, and
+//! frames that blend from reference frames earlier ones saved.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -21,11 +22,17 @@ fuzz_target!(|data: &[u8]| {
     };
     let descriptor = decoder.descriptor();
     let mut row = vec![0_u8; descriptor.row_bytes()];
-    let mut rows = 0;
-    while rows < descriptor.height {
-        if decoder.read_row(&mut row).is_err() {
-            break;
+    // Every displayed frame of an animation, as the pipeline walks them
+    // (ADR-0020), up to a cap that keeps a run quick.
+    for _ in 0..16 {
+        for _ in 0..descriptor.height {
+            if decoder.read_row(&mut row).is_err() {
+                return;
+            }
         }
-        rows += 1;
+        match decoder.advance_frame() {
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => return,
+        }
     }
 });

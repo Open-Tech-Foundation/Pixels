@@ -40,6 +40,9 @@ implementation detail and may change without notice.
   for the multi-frame pipeline: set, an animated input is refused as
   `Unsupported` rather than flattened. Counting GIF frames reads the whole
   stream at open; its compressed bytes are buffered (at most 512 MiB).
+  Every animated decoder already yields each frame composited onto the
+  canvas through `Decoder::advance_frame`, matching libgif, libwebp and
+  libjxl frame by frame (ADR-0020).
 - GIF v1 scope: full decode (all frames, disposal handled); encode is
   single-frame + palette quantization. Animation pipelines are v2.
 - WebP v1 scope: decode covers lossy, lossless and alpha, owned and matching
@@ -69,8 +72,9 @@ implementation detail and may change without notice.
   libgav1 must decode every emitted file to our decoder's pixels
   (`scripts/check-avif-interop.sh`).
 - JPEG XL v1 scope: owned outright (ADR-0019). Decode accepts every coding
-  tool in bare codestreams and the container and yields the first displayed
-  frame as Gray/GrayA/RGB/RGBA at 8 or 16 bits (float samples as F32),
+  tool in bare codestreams and the container and yields each displayed
+  frame in turn (`Decoder::advance_frame`), composited from the reference
+  frames as libjxl shows it, as Gray/GrayA/RGB/RGBA at 8 or 16 bits (float samples as F32),
   straight alpha (premultiplied files are divided out); XYB images come out
   as sRGB and report no ICC profile, others report theirs; the codestream's
   orientation and the `Exif` box are reported. Lossless files must decode to
