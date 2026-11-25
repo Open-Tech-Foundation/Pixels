@@ -41,7 +41,12 @@ impl FrameReplay {
     ///
     /// Returns [`PixelsError::Graph`] if `template` has no node `source`, or
     /// whatever evaluating a frame-independent sub-graph returns.
-    pub fn new(template: &Image, source: NodeId, producer: Arc<dyn Producer>) -> Result<Self> {
+    pub fn new(
+        template: &Image,
+        source: NodeId,
+        producer: Arc<dyn Producer>,
+        cancel: &crate::Cancel,
+    ) -> Result<Self> {
         let mut depends = HashMap::new();
         if !reads(template.node(), source, &mut depends) {
             return Err(PixelsError::graph(
@@ -49,7 +54,7 @@ impl FrameReplay {
             ));
         }
         let mut statics = HashMap::new();
-        collect_statics(template, template.node(), &depends, &mut statics)?;
+        collect_statics(template, template.node(), &depends, &mut statics, cancel)?;
         Ok(Self {
             template: template.clone(),
             source,
@@ -127,16 +132,17 @@ fn collect_statics(
     node: &Arc<Node>,
     depends: &HashMap<NodeId, bool>,
     statics: &mut HashMap<NodeId, Image>,
+    cancel: &crate::Cancel,
 ) -> Result<()> {
     for input in node.inputs() {
         if statics.contains_key(&input.id()) {
             continue;
         }
         if depends.get(&input.id()).copied().unwrap_or(false) {
-            collect_statics(template, input, depends, statics)?;
+            collect_statics(template, input, depends, statics, cancel)?;
         } else {
             let sub = template.with_node(Arc::clone(input));
-            let pixels = crate::evaluate(&sub)?;
+            let pixels = crate::evaluate_cancellable(&sub, cancel)?;
             let buffer = BufferSource::new(input.descriptor(), Arc::new(pixels))?;
             statics.insert(
                 input.id(),
@@ -235,8 +241,13 @@ mod tests {
             canvas(),
             3,
         ))));
-        let replay =
-            FrameReplay::new(&template, source_id, Arc::clone(&live) as Arc<dyn Producer>).unwrap();
+        let replay = FrameReplay::new(
+            &template,
+            source_id,
+            Arc::clone(&live) as Arc<dyn Producer>,
+            &crate::Cancel::never(),
+        )
+        .unwrap();
         assert_eq!(
             replay.statics.len(),
             1,
@@ -270,7 +281,15 @@ mod tests {
             2,
         ))));
         let unrelated = Image::from_producer(Arc::clone(&b) as Arc<dyn Producer>, Format::Raw);
-        assert!(FrameReplay::new(&a, unrelated.node().id(), b.clone()).is_err());
+        assert!(
+            FrameReplay::new(
+                &a,
+                unrelated.node().id(),
+                b.clone(),
+                &crate::Cancel::never()
+            )
+            .is_err()
+        );
         assert!(rebind_source(&a, unrelated.node().id(), b).is_err());
     }
 }

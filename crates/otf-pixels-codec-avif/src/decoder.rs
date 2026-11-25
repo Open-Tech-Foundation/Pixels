@@ -81,6 +81,8 @@ struct AlphaItem {
 /// Decodes an AVIF stream.
 #[derive(Debug)]
 pub struct AvifDecoder {
+    /// What stops this codec's long work (ADR-0021).
+    cancel: otf_pixels_core::Cancel,
     descriptor: ImageDescriptor,
     info: AvifInfo,
     /// The primary item's coded AV1 bytes, retained for the lazy pixel decode.
@@ -123,6 +125,7 @@ impl AvifDecoder {
         let exif = locate_exif(&bytes);
         let xmp = locate_xmp(&bytes);
         Ok(Self {
+            cancel: otf_pixels_core::Cancel::never(),
             descriptor,
             info,
             frame_data,
@@ -583,46 +586,52 @@ impl Decoder for AvifDecoder {
     }
 
     fn read_row(&mut self, out: &mut [u8]) -> Result<()> {
-        // Validate the call even though it cannot yet be served, so that the
-        // contract is already enforced when the bitstream decoder lands.
-        if self.row >= self.descriptor.height {
-            return Err(PixelsError::invalid_argument(
-                "out",
-                format!("all {} rows have already been read", self.descriptor.height),
-            ));
-        }
-        let row_bytes = self.descriptor.row_bytes();
-        if out.len() != row_bytes {
-            return Err(PixelsError::invalid_argument(
-                "out",
-                format!("row buffer is {} bytes, expected {row_bytes}", out.len()),
-            ));
-        }
+        let cancel = self.cancel.clone();
+        cancel.scope(|| {
+            // Validate the call even though it cannot yet be served, so that the
+            // contract is already enforced when the bitstream decoder lands.
+            if self.row >= self.descriptor.height {
+                return Err(PixelsError::invalid_argument(
+                    "out",
+                    format!("all {} rows have already been read", self.descriptor.height),
+                ));
+            }
+            let row_bytes = self.descriptor.row_bytes();
+            if out.len() != row_bytes {
+                return Err(PixelsError::invalid_argument(
+                    "out",
+                    format!("row buffer is {} bytes, expected {row_bytes}", out.len()),
+                ));
+            }
 
-        // Reconstruct the whole frame on the first row: an AVIF still is coded
-        // as one AV1 frame with no prefix that yields a partial raster, so the
-        // decode is inherently whole-image (SPEC §Memory). Later rows are served
-        // from the cached raster.
-        if self.raster.is_none() {
-            let frame_data = self
-                .frame_data
-                .as_deref()
-                .ok_or_else(|| PixelsError::unsupported("avif: grid images are not decoded yet"))?;
-            self.raster = Some(decode_raster(
-                &self.info,
-                self.descriptor.pixel,
-                frame_data,
-                self.alpha.as_ref(),
-            )?);
-        }
-        let raster = self.raster.as_deref().unwrap_or(&[]);
-        let start = self.row as usize * row_bytes;
-        let src = raster
-            .get(start..start + row_bytes)
-            .ok_or_else(|| PixelsError::malformed("avif", "the reconstructed raster is short"))?;
-        out.copy_from_slice(src);
-        self.row += 1;
-        Ok(())
+            // Reconstruct the whole frame on the first row: an AVIF still is coded
+            // as one AV1 frame with no prefix that yields a partial raster, so the
+            // decode is inherently whole-image (SPEC §Memory). Later rows are served
+            // from the cached raster.
+            if self.raster.is_none() {
+                let frame_data = self.frame_data.as_deref().ok_or_else(|| {
+                    PixelsError::unsupported("avif: grid images are not decoded yet")
+                })?;
+                self.raster = Some(decode_raster(
+                    &self.info,
+                    self.descriptor.pixel,
+                    frame_data,
+                    self.alpha.as_ref(),
+                )?);
+            }
+            let raster = self.raster.as_deref().unwrap_or(&[]);
+            let start = self.row as usize * row_bytes;
+            let src = raster.get(start..start + row_bytes).ok_or_else(|| {
+                PixelsError::malformed("avif", "the reconstructed raster is short")
+            })?;
+            out.copy_from_slice(src);
+            self.row += 1;
+            Ok(())
+        })
+    }
+
+    fn set_cancel(&mut self, cancel: otf_pixels_core::Cancel) {
+        self.cancel = cancel;
     }
 }
 

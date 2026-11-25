@@ -193,6 +193,7 @@ impl Animator {
 
     /// Append `frame` to the codestream.
     fn code(&mut self, frame: &Planned, is_last: bool) -> Result<()> {
+        otf_pixels_core::Cancel::checkpoint()?;
         let (width, height) = frame
             .crop
             .map_or((self.descriptor.width, self.descriptor.height), |c| {

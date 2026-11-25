@@ -211,6 +211,7 @@ pub fn decode(
 
     // LF groups.
     for i in 0..num_lf {
+        otf_pixels_core::Cancel::checkpoint()?;
         let pos = (i % lf_cols as usize, i / lf_cols as usize);
         sections.with(1 + i, |r| {
             if let (Some(state), Some(global)) = (vardct.as_mut(), vardct_global.as_ref()) {
@@ -248,6 +249,7 @@ pub fn decode(
     let shifts = frame.pass_shifts();
     for (pass, &shift) in shifts.iter().enumerate() {
         for g in 0..num_groups {
+            otf_pixels_core::Cancel::checkpoint()?;
             let pos = (g % group_cols as usize, g / group_cols as usize);
             sections.with(2 + num_lf + pass * num_groups + g, |r| {
                 if let Some(state) = vardct.as_mut() {

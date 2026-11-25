@@ -51,6 +51,32 @@ The global pool's workers sleep while there is no work and live as long as
 the process. Its tile cache holds at most 64 MB, shared across all
 requests.
 
+## Cancelling a run
+
+A run blocks its thread until it finishes, and a thread cannot be stopped
+from outside, so a request that times out or whose client goes away would
+otherwise keep its worker busy to the end. Give the image a `Cancel`
+(ADR-0021), and the run stops itself at its next check — between tiles,
+rows, codec blocks and frames, within milliseconds even inside a
+whole-image decode — failing with `ErrorCode::Cancelled` (`"cancelled"`):
+
+```rust
+use std::time::Duration;
+use otf_pixels::Cancel;
+
+let cancel = Cancel::after(Duration::from_secs(5)); // or Cancel::new()
+let image = Image::from_stream_with(std::io::Cursor::new(buffer), options)?
+    .with_cancel(&cancel);
+// from any thread, at any time: cancel.cancel();
+let bytes = image.resize(400, 300).output(format, options).bytes(); // Err(Cancelled)
+```
+
+Attach it once, to the image a request starts from: everything chained on
+carries it — overlays, `trim`, `stats`, `into_strip`, every frame of an
+animation, the output. A JS binding maps an `AbortSignal` (or a `timeout`
+option, sharp's `.timeout()`) onto one `Cancel` per call and rejects with
+an `AbortError` on `Cancelled`.
+
 ## Input
 
 ```rust

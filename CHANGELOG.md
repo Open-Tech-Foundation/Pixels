@@ -7,6 +7,18 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Cooperative cancellation (ADR-0021): `Cancel::new()` or
+  `Cancel::after(timeout)`, attached once with `Image::with_cancel`, stops
+  every run of the pipeline — output, `trim`, `stats`, `into_strip`, each
+  animation frame — when `cancel()` is called from any thread or the
+  deadline passes, failing with the new `ErrorCode::Cancelled`. The
+  scheduler checks before each tile, the reference evaluator before each
+  node, a decoded source per row, and every buffering codec (GIF, WebP,
+  JPEG XL, AVIF, progressive JPEG) inside its own loops, so a whole-image
+  decode stops within milliseconds. `Producer`, `Decoder` and `Encoder`
+  gain `set_cancel` (no-op defaults); `Scheduler::run_cancellable`,
+  `evaluate_cancellable` and `evaluate_rows_cancellable`; `Cancel::scope`
+  and `Cancel::checkpoint` for a codec's inner loops.
 - The frame protocol of ADR-0020, the core of animation support (not yet
   used by any codec or by the pipeline): `Decoder::advance_frame` moves a
   decoder to its next composited frame and reports its `FrameInfo`

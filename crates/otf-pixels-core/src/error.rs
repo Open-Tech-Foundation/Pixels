@@ -35,6 +35,9 @@ pub enum ErrorCode {
     InvalidArgument,
     /// The op graph is not evaluable as constructed.
     Graph,
+    /// The run was stopped by its [`Cancel`](crate::Cancel): cancelled, or
+    /// its deadline passed (ADR-0021).
+    Cancelled,
 }
 
 impl ErrorCode {
@@ -50,6 +53,7 @@ impl ErrorCode {
             Self::LimitExceeded => "limit_exceeded",
             Self::InvalidArgument => "invalid_argument",
             Self::Graph => "graph",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -150,6 +154,11 @@ pub enum PixelsError {
         /// Why the graph is invalid.
         detail: String,
     },
+    /// The run was stopped by its [`Cancel`](crate::Cancel).
+    Cancelled {
+        /// Whether the deadline passed, rather than `cancel()` being called.
+        deadline: bool,
+    },
 }
 
 impl PixelsError {
@@ -163,7 +172,14 @@ impl PixelsError {
             Self::LimitExceeded { .. } => ErrorCode::LimitExceeded,
             Self::InvalidArgument { .. } => ErrorCode::InvalidArgument,
             Self::Graph { .. } => ErrorCode::Graph,
+            Self::Cancelled { .. } => ErrorCode::Cancelled,
         }
+    }
+
+    /// Report a run stopped by its `Cancel`; `deadline` when it timed out.
+    #[must_use]
+    pub const fn cancelled(deadline: bool) -> Self {
+        Self::Cancelled { deadline }
     }
 
     /// Wrap an I/O error with the engine context it happened in.
@@ -237,6 +253,8 @@ impl fmt::Display for PixelsError {
                 write!(f, "invalid argument `{parameter}`: {detail}")
             }
             Self::Graph { detail } => write!(f, "invalid graph: {detail}"),
+            Self::Cancelled { deadline: true } => f.write_str("cancelled: the deadline passed"),
+            Self::Cancelled { deadline: false } => f.write_str("cancelled"),
         }
     }
 }

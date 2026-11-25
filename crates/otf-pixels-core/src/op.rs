@@ -209,6 +209,14 @@ pub trait Producer: Send + Sync + fmt::Debug {
     /// [`PixelsError::InvalidArgument`]: crate::PixelsError::InvalidArgument
     fn produce(&self, region: Region, output: &mut TileMut<'_>) -> Result<()>;
 
+    /// Stop this producer's long work when `cancel` is cancelled
+    /// (ADR-0021): a decoded source hands it to its decoder. The default
+    /// ignores it, which is right for a producer whose every call is short:
+    /// the scheduler checks between tiles anyway.
+    fn set_cancel(&self, cancel: &crate::Cancel) {
+        let _ = cancel;
+    }
+
     /// What this producer would emit if asked for `target` or larger, when it
     /// can reach that size more cheaply than by producing full resolution.
     ///

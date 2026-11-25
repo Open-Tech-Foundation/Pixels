@@ -310,6 +310,7 @@ impl Animator {
 
     /// Write `frame`, and the file's header before the first.
     fn write_frame(&mut self, frame: &Planned, sink: &mut dyn Sink) -> Result<()> {
+        otf_pixels_core::Cancel::checkpoint()?;
         let rect = frame.rect;
         let stride = self.width as usize * 4;
         // The rectangle's pixels, and which of them are drawn.

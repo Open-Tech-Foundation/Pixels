@@ -238,8 +238,26 @@ impl Scheduler {
     pub fn run(
         &self,
         image: &Image,
+        consume: impl FnMut(Region, &Tile<'_>) -> Result<()>,
+    ) -> Result<RunStats> {
+        self.run_cancellable(image, &crate::Cancel::never(), consume)
+    }
+
+    /// [`Scheduler::run`], stopped by `cancel` (ADR-0021): checked before
+    /// each batch of tiles and before each op computes a tile, so a cancelled
+    /// run ends within a tile's work.
+    ///
+    /// # Errors
+    ///
+    /// As [`Scheduler::run`], and [`PixelsError::Cancelled`] once `cancel`
+    /// is cancelled.
+    pub fn run_cancellable(
+        &self,
+        image: &Image,
+        cancel: &crate::Cancel,
         mut consume: impl FnMut(Region, &Tile<'_>) -> Result<()>,
     ) -> Result<RunStats> {
+        cancel.check()?;
         let plan = Plan::build(image, self.options.plan)?;
         let root = Arc::clone(image.node());
         let mut stats = RunStats::default();
@@ -254,7 +272,7 @@ impl Scheduler {
         );
 
         // Phase 1: realize the nodes ADR-0009 marked, in dependency order.
-        let materialized = self.materialize(&root, &plan, &cacheable, &mut stats)?;
+        let materialized = self.materialize(&root, &plan, &cacheable, cancel, &mut stats)?;
 
         // Phase 2: stream output tiles in batches.
         let batch_size = if self.options.batch_tiles == 0 {
@@ -266,6 +284,7 @@ impl Scheduler {
         let tiles = plan.output_tiles().to_vec();
 
         for batch in tiles.chunks(batch_size) {
+            cancel.check()?;
             // Source bands first, serially and in order: a forward-only
             // producer cannot serve concurrent out-of-order requests.
             let sources = self.pull_sources(&root, batch, &materialized)?;
@@ -275,6 +294,7 @@ impl Scheduler {
                 materialized: Arc::clone(&materialized),
                 sources: Arc::new(sources),
                 cacheable: Arc::clone(&cacheable),
+                cancel: cancel.clone(),
             });
 
             // Evaluate the batch's tiles in parallel.
@@ -333,6 +353,7 @@ impl Scheduler {
         root: &Arc<Node>,
         plan: &Plan,
         cacheable: &Arc<std::collections::HashSet<NodeId>>,
+        cancel: &crate::Cancel,
         stats: &mut RunStats,
     ) -> Result<Arc<HashMap<NodeId, Arc<TileBuf>>>> {
         let mut materialized: HashMap<NodeId, Arc<TileBuf>> = HashMap::new();
@@ -348,6 +369,7 @@ impl Scheduler {
                 materialized: Arc::new(materialized.clone()),
                 sources: Arc::new(HashMap::new()),
                 cacheable: Arc::clone(cacheable),
+                cancel: cancel.clone(),
             };
             let whole = node.descriptor().region();
             let buffer = produce_uncached(&node, whole, &context)?;
@@ -404,6 +426,8 @@ struct Context {
     ///
     /// [`NodePlan::cacheable`]: crate::NodePlan::cacheable
     cacheable: Arc<std::collections::HashSet<NodeId>>,
+    /// Checked before each op computes (ADR-0021).
+    cancel: crate::Cancel,
 }
 
 /// Produce `region` of `node`, consulting the cache where that can pay off.
@@ -448,6 +472,7 @@ fn produce_uncached(node: &Arc<Node>, region: Region, context: &Context) -> Resu
     let op = node.op().ok_or_else(|| {
         PixelsError::graph(format!("node `{}` is neither op nor source", node.name()))
     })?;
+    context.cancel.check()?;
     let descriptors: Vec<_> = node.inputs().iter().map(|n| n.descriptor()).collect();
     let requested = op.input_regions(region, &descriptors)?;
     if requested.len() != node.inputs().len() {

@@ -601,6 +601,7 @@ impl Renderer {
         r.skip(self.position)?;
         let mut shown = None;
         while shown.is_none() && !self.finished {
+            otf_pixels_core::Cancel::checkpoint()?;
             r.zero_pad_to_byte()?;
             let frame = FrameHeader::parse(&mut r, header)?;
             check_frame_size(&frame, header)?;

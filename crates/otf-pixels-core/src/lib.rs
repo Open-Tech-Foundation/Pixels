@@ -49,6 +49,7 @@
 //! threads and meeting the engine at the [`Source`]/[`Sink`] boundary.
 
 mod cache;
+mod cancel;
 mod codec;
 mod error;
 mod eval;
@@ -71,12 +72,13 @@ mod tile;
 pub mod testing;
 
 pub use cache::{CacheStats, TileCache, TileKey};
+pub use cancel::Cancel;
 pub use codec::{
     Animation, Background, ChromaSubsampling, Codec, Comment, DecodeCapability, Decoder, Density,
     EncodeOptions, Encoder, Format, FrameInfo, Metadata, ResolutionUnit, SourceInfo,
 };
 pub use error::{ErrorCode, Limit, PixelsError, Result};
-pub use eval::{demand, evaluate, evaluate_rows};
+pub use eval::{demand, evaluate, evaluate_cancellable, evaluate_rows, evaluate_rows_cancellable};
 pub use frames::{FrameReplay, rebind_source};
 pub use geometry::{ImageDescriptor, Limits, Region};
 pub use graph::{Image, Node, NodeId};

@@ -567,6 +567,7 @@ pub fn encode(planes: &Planes, params: Params) -> Result<Vec<u8>> {
     let mut above_nz = vec![[false; 9]; mb_cols];
     let default_probs: Box<CoeffProbs> = Box::new(DEFAULT_COEFF_PROBS);
     for my in 0..mb_rows {
+        otf_pixels_core::Cancel::checkpoint()?;
         let mut left_modes = [b::DC; 4];
         let mut left_nz = [false; 9];
         for mx in 0..mb_cols {
@@ -753,6 +754,7 @@ pub fn encode(planes: &Planes, params: Params) -> Result<Vec<u8>> {
     let mut partitions: Vec<BoolEncoder> = (0..count).map(|_| BoolEncoder::new()).collect();
     let mut above_nz = vec![[false; 9]; mb_cols];
     for my in 0..mb_rows {
+        otf_pixels_core::Cancel::checkpoint()?;
         let mut left_nz = [false; 9];
         let sink = &mut partitions[my % count];
         for mx in 0..mb_cols {

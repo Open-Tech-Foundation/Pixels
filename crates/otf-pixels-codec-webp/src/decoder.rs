@@ -32,6 +32,8 @@ const MAX_COMPRESSED: usize = 256 * 1024 * 1024;
 /// Decodes a WebP stream.
 #[derive(Debug)]
 pub struct WebPDecoder {
+    /// What stops this codec's long work (ADR-0021).
+    cancel: otf_pixels_core::Cancel,
     descriptor: ImageDescriptor,
     /// The whole file, until the first row is asked for.
     bytes: Vec<u8>,
@@ -150,6 +152,7 @@ impl WebPDecoder {
             })
             .collect();
         Ok(Self {
+            cancel: otf_pixels_core::Cancel::never(),
             descriptor,
             bytes,
             pixels: None,
@@ -425,26 +428,29 @@ impl Decoder for WebPDecoder {
     /// The next frame, composited as libwebp's animation decoder does (see
     /// the module docs).
     fn advance_frame(&mut self) -> Result<Option<FrameInfo>> {
-        if self.frames.len() < 2 {
-            self.row = self.descriptor.height;
-            return Ok(None);
-        }
-        if self.compositor.is_none() {
-            self.pixels = Some(self.draw_frame(0)?);
-        }
-        let next = self.compositor.as_ref().map_or(0, |state| state.index) + 1;
-        if next as usize >= self.frames.len() {
-            self.row = self.descriptor.height;
-            return Ok(None);
-        }
-        self.pixels = Some(self.draw_frame(next)?);
-        self.row = 0;
-        let duration = self
-            .animation
-            .as_ref()
-            .and_then(|a| a.frame_durations_ms.get(next as usize).copied())
-            .unwrap_or(0);
-        Ok(Some(FrameInfo::new(next, duration)))
+        let cancel = self.cancel.clone();
+        cancel.scope(|| {
+            if self.frames.len() < 2 {
+                self.row = self.descriptor.height;
+                return Ok(None);
+            }
+            if self.compositor.is_none() {
+                self.pixels = Some(self.draw_frame(0)?);
+            }
+            let next = self.compositor.as_ref().map_or(0, |state| state.index) + 1;
+            if next as usize >= self.frames.len() {
+                self.row = self.descriptor.height;
+                return Ok(None);
+            }
+            self.pixels = Some(self.draw_frame(next)?);
+            self.row = 0;
+            let duration = self
+                .animation
+                .as_ref()
+                .and_then(|a| a.frame_durations_ms.get(next as usize).copied())
+                .unwrap_or(0);
+            Ok(Some(FrameInfo::new(next, duration)))
+        })
     }
 
     fn capability(&self) -> DecodeCapability {
@@ -455,40 +461,47 @@ impl Decoder for WebPDecoder {
     }
 
     fn read_row(&mut self, out: &mut [u8]) -> Result<()> {
-        if self.row >= self.descriptor.height {
-            return Err(PixelsError::invalid_argument(
-                "out",
-                format!("all {} rows have already been read", self.descriptor.height),
-            ));
-        }
-        let row_bytes = self.descriptor.row_bytes();
-        if out.len() != row_bytes {
-            return Err(PixelsError::invalid_argument(
-                "out",
-                format!("row buffer is {} bytes, expected {row_bytes}", out.len()),
-            ));
-        }
-        if self.pixels.is_none() {
-            if self.frames.is_empty() {
-                self.pixels = Some(self.decode_canvas()?);
-                // Decoded, the compressed file is no longer needed.
-                self.bytes = Vec::new();
-            } else {
-                // Later frames are drawn from the file, so it stays.
-                self.pixels = Some(self.draw_frame(0)?);
+        let cancel = self.cancel.clone();
+        cancel.scope(|| {
+            if self.row >= self.descriptor.height {
+                return Err(PixelsError::invalid_argument(
+                    "out",
+                    format!("all {} rows have already been read", self.descriptor.height),
+                ));
             }
-        }
-        let start = self.row as usize * row_bytes;
-        let row = self
-            .pixels
-            .as_deref()
-            .unwrap_or(&[])
-            .get(start..)
-            .and_then(|rest| rest.get(..row_bytes))
-            .ok_or_else(|| PixelsError::malformed("webp", "decoded image is short"))?;
-        out.copy_from_slice(row);
-        self.row += 1;
-        Ok(())
+            let row_bytes = self.descriptor.row_bytes();
+            if out.len() != row_bytes {
+                return Err(PixelsError::invalid_argument(
+                    "out",
+                    format!("row buffer is {} bytes, expected {row_bytes}", out.len()),
+                ));
+            }
+            if self.pixels.is_none() {
+                if self.frames.is_empty() {
+                    self.pixels = Some(self.decode_canvas()?);
+                    // Decoded, the compressed file is no longer needed.
+                    self.bytes = Vec::new();
+                } else {
+                    // Later frames are drawn from the file, so it stays.
+                    self.pixels = Some(self.draw_frame(0)?);
+                }
+            }
+            let start = self.row as usize * row_bytes;
+            let row = self
+                .pixels
+                .as_deref()
+                .unwrap_or(&[])
+                .get(start..)
+                .and_then(|rest| rest.get(..row_bytes))
+                .ok_or_else(|| PixelsError::malformed("webp", "decoded image is short"))?;
+            out.copy_from_slice(row);
+            self.row += 1;
+            Ok(())
+        })
+    }
+
+    fn set_cancel(&mut self, cancel: otf_pixels_core::Cancel) {
+        self.cancel = cancel;
     }
 }
 

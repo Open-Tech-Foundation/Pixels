@@ -728,6 +728,7 @@ impl TileState {
         // recursion. The left contexts reset at the start of each SB row.
         let mut sb_row = tile.row_start;
         while sb_row < tile.row_end {
+            otf_pixels_core::Cancel::checkpoint()?;
             self.reset_left_context();
             let mut sb_col = tile.col_start;
             while sb_col < tile.col_end {

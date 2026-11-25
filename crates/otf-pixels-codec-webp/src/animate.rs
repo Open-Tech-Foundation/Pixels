@@ -295,6 +295,7 @@ impl Animator {
 
     /// Append `frame` as an `ANMF` chunk.
     fn code(&mut self, frame: &Planned) -> Result<()> {
+        otf_pixels_core::Cancel::checkpoint()?;
         let rect = frame.rect;
         let descriptor = ImageDescriptor::new(rect.width, rect.height, PixelFormat::Rgba8)?;
         let (image, _) = crate::encoder::encode_image(&descriptor, &frame.pixels, &self.options)?;

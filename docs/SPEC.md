@@ -199,6 +199,11 @@ g.output(Format::Png, opts).bytes()?;        // Vec<u8>
   it off yields the pixels as stored; `Image::orient` applies one by hand. A
   quarter turn over a sequential source is the reverse-order exception of
   §Guarantees 1, at the shrink-on-load size when that applies.
+- Cancellation (ADR-0021): `Image::with_cancel(&Cancel)` stops every run
+  of a pipeline when the flag is cancelled or its deadline passes, at the
+  next check — between tiles and rows, and inside every buffering codec per
+  macroblock row, group, superblock row, scan or frame — with
+  `ErrorCode::Cancelled`.
 - Malformed input never panics and never aborts the process; all codec
   parsers are fuzzed in CI.
 - Decompression bombs beyond dimensions (e.g. malicious deflate streams)

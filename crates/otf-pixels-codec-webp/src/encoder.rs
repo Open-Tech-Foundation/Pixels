@@ -17,6 +17,8 @@ use otf_pixels_core::{
 /// Encodes a WebP stream.
 #[derive(Debug)]
 pub struct WebPEncoder {
+    /// What stops this codec's long work (ADR-0021).
+    cancel: otf_pixels_core::Cancel,
     /// Set by `write_header`; its presence means the header was written.
     state: Option<State>,
     options: EncodeOptions,
@@ -59,6 +61,7 @@ impl WebPEncoder {
     #[must_use]
     pub const fn from_options(options: &EncodeOptions) -> Self {
         Self {
+            cancel: otf_pixels_core::Cancel::never(),
             state: None,
             options: *options,
             icc: None,
@@ -112,10 +115,13 @@ impl Encoder for WebPEncoder {
     }
 
     fn end_frame(&mut self, _sink: &mut dyn Sink) -> Result<()> {
-        self.animator
-            .as_mut()
-            .ok_or_else(|| not_animated("end_frame"))?
-            .end_frame()
+        let cancel = self.cancel.clone();
+        cancel.scope(|| {
+            self.animator
+                .as_mut()
+                .ok_or_else(|| not_animated("end_frame"))?
+                .end_frame()
+        })
     }
 
     fn set_icc_profile(&mut self, profile: Option<&[u8]>) -> Result<()> {
@@ -219,54 +225,64 @@ impl Encoder for WebPEncoder {
     }
 
     fn finish(&mut self, sink: &mut dyn Sink) -> Result<()> {
-        if let Some(animator) = self.animator.as_mut() {
-            return animator.finish(
+        let cancel = self.cancel.clone();
+        cancel.scope(|| {
+            if let Some(animator) = self.animator.as_mut() {
+                return animator.finish(
+                    self.icc.as_deref(),
+                    self.exif.as_deref(),
+                    self.xmp.as_deref(),
+                    sink,
+                );
+            }
+            let Some(state) = self.state.as_mut() else {
+                return Err(PixelsError::invalid_argument(
+                    "sink",
+                    "finish called before write_header",
+                ));
+            };
+            if state.rows_written < state.descriptor.height {
+                return Err(PixelsError::malformed(
+                    "webp",
+                    format!(
+                        "{} of {} rows were written",
+                        state.rows_written, state.descriptor.height
+                    ),
+                ));
+            }
+
+            let options = self.options;
+            let lossless = options.lossless || options.near_lossless;
+            let (body, alpha) = encode_state(state, &options)?;
+            let (width, height) = (state.descriptor.width, state.descriptor.height);
+            // VP8L carries its own alpha; only a lossy ALPH chunk needs VP8X.
+            let needs_vp8x = alpha && !lossless;
+            let file = container(
+                width,
+                height,
+                &body,
+                alpha,
+                needs_vp8x,
                 self.icc.as_deref(),
                 self.exif.as_deref(),
                 self.xmp.as_deref(),
-                sink,
             );
-        }
-        let Some(state) = self.state.as_mut() else {
-            return Err(PixelsError::invalid_argument(
-                "sink",
-                "finish called before write_header",
-            ));
-        };
-        if state.rows_written < state.descriptor.height {
-            return Err(PixelsError::malformed(
-                "webp",
-                format!(
-                    "{} of {} rows were written",
-                    state.rows_written, state.descriptor.height
-                ),
-            ));
-        }
+            sink.write_all(&file)?;
+            sink.flush()
+        })
+    }
 
-        let options = self.options;
-        let lossless = options.lossless || options.near_lossless;
-        let (body, alpha) = encode_state(state, &options)?;
-        let (width, height) = (state.descriptor.width, state.descriptor.height);
-        // VP8L carries its own alpha; only a lossy ALPH chunk needs VP8X.
-        let needs_vp8x = alpha && !lossless;
-        let file = container(
-            width,
-            height,
-            &body,
-            alpha,
-            needs_vp8x,
-            self.icc.as_deref(),
-            self.exif.as_deref(),
-            self.xmp.as_deref(),
-        );
-        sink.write_all(&file)?;
-        sink.flush()
+    fn set_cancel(&mut self, cancel: otf_pixels_core::Cancel) {
+        self.cancel = cancel;
     }
 }
 
 /// The image chunks for `state` by `options`: `VP8L`, or `ALPH` and
 /// `VP8 `; and whether the image has transparency.
 fn encode_state(state: &State, options: &EncodeOptions) -> Result<(Vec<u8>, bool)> {
+    // VP8 checks per macroblock row; the lossless encoder runs whole, so
+    // it is checked before it starts (ADR-0021).
+    otf_pixels_core::Cancel::checkpoint()?;
     let effort = options.effort.unwrap_or(DEFAULT_EFFORT).min(6);
     if options.lossless || options.near_lossless {
         let near = options.near_lossless.then_some(options.quality);

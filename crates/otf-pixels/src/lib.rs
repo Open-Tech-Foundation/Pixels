@@ -134,8 +134,8 @@ mod metadata;
 pub use metadata::{ChannelStats, SourceMetadata, Stats};
 
 pub use otf_pixels_core::{
-    AccessPattern, Animation, Background, ChannelLayout, ChromaSubsampling, Codec, ColorModel,
-    Comment, Decoder, Density, EncodeOptions, Encoder, ErrorCode, Format, FrameInfo,
+    AccessPattern, Animation, Background, Cancel, ChannelLayout, ChromaSubsampling, Codec,
+    ColorModel, Comment, Decoder, Density, EncodeOptions, Encoder, ErrorCode, Format, FrameInfo,
     ImageDescriptor, Limit, Limits, Metadata, Orientation, PixelFormat, PixelsError, PlanOptions,
     Region, ResolutionUnit, Result, RunStats, SampleKind, Scheduler, SchedulerOptions, Sink,
     Source, SourceInfo, TileShape, evaluate as evaluate_reference,
@@ -339,6 +339,8 @@ pub struct Image {
     /// The animated source, when the image was opened with
     /// [`OpenOptions::animated`] and has frames left to process.
     frames: Option<Arc<Frames>>,
+    /// What stops this pipeline's runs (ADR-0021); never, by default.
+    cancel: Cancel,
 }
 
 /// The frames of an animated pipeline (ADR-0020): how to decode the file
@@ -374,12 +376,13 @@ impl Frames {
         self.durations.len() as u32
     }
 
-    /// A fresh decoder, on frame `first + index` once it is read.
-    fn decoder_at(&self, index: u32) -> Result<Box<dyn Decoder>> {
-        Ok(Box::new(SkipFrames::new(
-            (self.open)()?,
-            self.first + index,
-        )))
+    /// A fresh decoder, on frame `first + index` once it is read, stopped
+    /// by `cancel`.
+    fn decoder_at(&self, index: u32, cancel: &Cancel) -> Result<Box<dyn Decoder>> {
+        let mut decoder: Box<dyn Decoder> =
+            Box::new(SkipFrames::new((self.open)()?, self.first + index));
+        decoder.set_cancel(cancel.clone());
+        Ok(decoder)
     }
 
     /// Run `template` once per frame, over a fresh decode of the file:
@@ -387,15 +390,21 @@ impl Frames {
     fn replay(
         &self,
         template: &otf_pixels_core::Image,
+        cancel: &Cancel,
         mut each: impl FnMut(usize, &otf_pixels_core::Image) -> Result<()>,
     ) -> Result<()> {
-        let source = Arc::new(otf_pixels_core::DecodedSource::new(self.decoder_at(0)?));
+        let source = Arc::new(otf_pixels_core::DecodedSource::new(
+            self.decoder_at(0, cancel)?,
+        ));
+        source.set_cancel(cancel);
         let replay = otf_pixels_core::FrameReplay::new(
             template,
             self.source,
             Arc::clone(&source) as Arc<dyn Producer>,
+            cancel,
         )?;
         for k in 0..self.count() {
+            cancel.check()?;
             if k > 0 && source.advance_frame()?.is_none() {
                 return Err(PixelsError::malformed(
                     "animation",
@@ -476,6 +485,9 @@ impl Decoder for SkipFrames {
     ) -> Result<()> {
         self.arrive()?;
         self.inner.read_region(region, out)
+    }
+    fn set_cancel(&mut self, cancel: Cancel) {
+        self.inner.set_cancel(cancel);
     }
 }
 
@@ -815,6 +827,7 @@ impl Image {
             density: None,
             source: None,
             frames: None,
+            cancel: Cancel::never(),
             inner: Ok(otf_pixels_core::Image::from_producer(producer, format)),
         }
     }
@@ -1191,13 +1204,7 @@ impl Image {
         // decodes a JPEG at a reduced size.
         let (graph, _) = otf_pixels_core::shrink_on_load(self.graph()?)?;
         let descriptor = graph.descriptor();
-        let mut pixels = TileBuf::for_image(&descriptor)?;
-        {
-            let mut view = pixels.as_tile_mut()?;
-            default_scheduler()?.run(&graph, |region, tile| {
-                otf_pixels_core::copy_region(tile, &mut view, region)
-            })?;
-        }
+        let pixels = render(&graph, &self.cancel)?;
 
         let (pixels, cut) = match options.find(&pixels.as_tile()?)? {
             Some(kept) if kept != descriptor.region() => {
@@ -1227,6 +1234,7 @@ impl Image {
             density: self.density,
             source: self.source,
             frames: None,
+            cancel: self.cancel,
         })
     }
 
@@ -1237,8 +1245,8 @@ impl Image {
         let template = self.graph()?.clone();
         let descriptor = template.descriptor();
         let mut union: Option<(u32, u32, u32, u32)> = None;
-        frames.replay(&template, |_, graph| {
-            let pixels = render(graph)?;
+        frames.replay(&template, &self.cancel, |_, graph| {
+            let pixels = render(graph, &self.cancel)?;
             if let Some(kept) = options.find(&pixels.as_tile()?)? {
                 let (right, bottom) = (kept.x + kept.width, kept.y + kept.height);
                 union = Some(
@@ -1265,6 +1273,35 @@ impl Image {
         let mut cropped = self.crop(cut.x, cut.y, cut.width, cut.height);
         cropped.trim_offset = Some((cut.x, cut.y));
         Ok(cropped)
+    }
+
+    /// Stop this pipeline when `cancel` is cancelled or its deadline passes
+    /// (ADR-0021): every run it makes — the output, and [`Image::trim`],
+    /// [`Image::stats`] and [`Image::into_strip`] on the way — fails with
+    /// [`ErrorCode::Cancelled`] at its next check, which is never more than a
+    /// tile's, a row's or a codec block's work away.
+    ///
+    /// Attach it once, to the image a request starts from: what is chained
+    /// on carries it, overlays composited later included.
+    #[must_use]
+    pub fn with_cancel(self, cancel: &Cancel) -> Self {
+        if let Ok(graph) = &self.inner {
+            let mut seen = std::collections::HashSet::new();
+            let mut stack = vec![Arc::clone(graph.node())];
+            while let Some(node) = stack.pop() {
+                if !seen.insert(node.id()) {
+                    continue;
+                }
+                if let Some(producer) = node.producer() {
+                    producer.set_cancel(cancel);
+                }
+                stack.extend(node.inputs().iter().cloned());
+            }
+        }
+        Self {
+            cancel: cancel.clone(),
+            ..self
+        }
     }
 
     /// Whether this pipeline processes an animation frame by frame: opened
@@ -1395,7 +1432,8 @@ impl Image {
                 ),
             ));
         }
-        let source = otf_pixels_core::DecodedSource::new(frames.decoder_at(index)?);
+        let source = otf_pixels_core::DecodedSource::new(frames.decoder_at(index, &self.cancel)?);
+        source.set_cancel(&self.cancel);
         let graph = otf_pixels_core::rebind_source(self.graph()?, frames.source, Arc::new(source))?;
         Ok(Self {
             inner: Ok(graph),
@@ -1433,6 +1471,7 @@ impl Image {
             frames,
             template,
             pixels: std::sync::OnceLock::new(),
+            cancel: std::sync::Mutex::new(self.cancel.clone()),
         };
         let format = self.metadata()?.format;
         Ok(Self {
@@ -1496,6 +1535,13 @@ impl Image {
             self.exif,
         );
         let (xmp, density, source, frames) = (self.xmp, self.density, self.source, self.frames);
+        // The base's flag stops the overlay's sources too.
+        let cancel = self.cancel;
+        let overlay = if cancel.is_never() {
+            overlay
+        } else {
+            overlay.with_cancel(&cancel)
+        };
         if overlay.frames.is_some() {
             return Self::failed(PixelsError::unsupported(
                 "an animated overlay is not composited frame by frame; \
@@ -1519,6 +1565,7 @@ impl Image {
             density,
             source,
             frames,
+            cancel,
         }
     }
 
@@ -1540,6 +1587,7 @@ impl Image {
             density: None,
             source: None,
             frames: None,
+            cancel: Cancel::never(),
         }
     }
 
@@ -1749,6 +1797,7 @@ impl Image {
             density: self.density,
             source: self.source,
             frames: self.frames,
+            cancel: self.cancel,
             inner: match self.inner {
                 Ok(image) => image.apply(op).map_err(Arc::new),
                 // An earlier failure short-circuits: later ops never run.
@@ -1796,6 +1845,10 @@ fn rebuild(error: &Arc<PixelsError>) -> PixelsError {
         ErrorCode::Unsupported => PixelsError::unsupported(detail),
         ErrorCode::InvalidArgument => PixelsError::invalid_argument("pipeline", detail),
         ErrorCode::Graph => PixelsError::graph(detail),
+        ErrorCode::Cancelled => match **error {
+            PixelsError::Cancelled { deadline } => PixelsError::cancelled(deadline),
+            _ => PixelsError::cancelled(false),
+        },
         ErrorCode::LimitExceeded => match **error {
             PixelsError::LimitExceeded {
                 limit,
@@ -2017,6 +2070,8 @@ impl Output {
         let encodable = self.image.clone().encodable_as(self.format);
         let (image, reduction) = otf_pixels_core::shrink_on_load(encodable.graph()?)?;
         let descriptor = image.descriptor();
+        let cancel = &self.image.cancel;
+        encoder.set_cancel(cancel.clone());
         self.describe(encoder)?;
         encoder.write_header(&descriptor, &mut sink)?;
 
@@ -2031,7 +2086,7 @@ impl Output {
             (None, None) => default_scheduler()?,
         };
         let mut rows = RowAssembler::new(descriptor);
-        let mut stats = scheduler.run(&image, |region, tile| {
+        let mut stats = scheduler.run_cancellable(&image, cancel, |region, tile| {
             rows.accept(region, tile, &mut |row| encoder.write_row(row, &mut sink))
         })?;
         rows.finish(&mut |row| encoder.write_row(row, &mut sink))?;
@@ -2079,10 +2134,13 @@ impl Output {
         let encodable = self.image.clone().encodable_as(self.format);
         let (image, _) = otf_pixels_core::shrink_on_load(encodable.graph()?)?;
         let descriptor = image.descriptor();
+        encoder.set_cancel(self.image.cancel.clone());
         self.describe(encoder)?;
         let mut sink = Vec::with_capacity(descriptor.byte_len().unwrap_or_default());
         encoder.write_header(&descriptor, &mut sink)?;
-        otf_pixels_core::evaluate_rows(&image, |_, row| encoder.write_row(row, &mut sink))?;
+        otf_pixels_core::evaluate_rows_cancellable(&image, &self.image.cancel, |_, row| {
+            encoder.write_row(row, &mut sink)
+        })?;
         encoder.finish(&mut sink)?;
         Ok(sink)
     }
@@ -2112,6 +2170,7 @@ impl Output {
             .graph()?
             .clone();
         let descriptor = template.descriptor();
+        encoder.set_cancel(self.image.cancel.clone());
         encoder.set_animation(frames.loop_count)?;
         self.describe(encoder)?;
         encoder.write_header(&descriptor, sink)?;
@@ -2125,13 +2184,14 @@ impl Output {
             })
         };
         let mut total = RunStats::default();
-        frames.replay(&template, |k, graph| {
+        let cancel = &self.image.cancel;
+        frames.replay(&template, cancel, |k, graph| {
             let duration = frames.durations.get(k).copied().unwrap_or(0);
             encoder.begin_frame(duration, sink)?;
             match &scheduler {
                 Some(scheduler) => {
                     let mut rows = RowAssembler::new(descriptor);
-                    let stats = scheduler.run(graph, |region, tile| {
+                    let stats = scheduler.run_cancellable(graph, cancel, |region, tile| {
                         rows.accept(region, tile, &mut |row| encoder.write_row(row, sink))
                     })?;
                     // This frame's graph never runs again.
@@ -2142,7 +2202,9 @@ impl Output {
                     total.peak_bytes = total.peak_bytes.max(stats.peak_bytes);
                 }
                 None => {
-                    otf_pixels_core::evaluate_rows(graph, |_, row| encoder.write_row(row, sink))?;
+                    otf_pixels_core::evaluate_rows_cancellable(graph, cancel, |_, row| {
+                        encoder.write_row(row, sink)
+                    })?;
                 }
             }
             encoder.end_frame(sink)
@@ -2172,12 +2234,12 @@ impl Output {
 }
 
 /// Run `graph` on the default scheduler into one buffer.
-fn render(graph: &otf_pixels_core::Image) -> Result<TileBuf> {
+fn render(graph: &otf_pixels_core::Image, cancel: &Cancel) -> Result<TileBuf> {
     let mut pixels = TileBuf::for_image(&graph.descriptor())?;
     let scheduler = default_scheduler()?;
     {
         let mut view = pixels.as_tile_mut()?;
-        scheduler.run(graph, |region, tile| {
+        scheduler.run_cancellable(graph, cancel, |region, tile| {
             otf_pixels_core::copy_region(tile, &mut view, region)
         })?;
     }
@@ -2195,6 +2257,8 @@ struct StripSource {
     template: otf_pixels_core::Image,
     /// The strip, or why it could not be built.
     pixels: std::sync::OnceLock<std::result::Result<Arc<TileBuf>, Arc<PixelsError>>>,
+    /// What stops building it.
+    cancel: std::sync::Mutex<Cancel>,
 }
 
 impl StripSource {
@@ -2203,8 +2267,9 @@ impl StripSource {
         let height = self.template.descriptor().height;
         {
             let mut view = strip.as_tile_mut()?;
-            self.frames.replay(&self.template, |k, graph| {
-                let frame = render(graph)?;
+            let cancel = self.cancel.lock().map(|c| c.clone()).unwrap_or_default();
+            self.frames.replay(&self.template, &cancel, |k, graph| {
+                let frame = render(graph, &cancel)?;
                 let frame = frame.as_tile()?;
                 for y in 0..height {
                     let (Some(from), Some(to)) =
@@ -2233,6 +2298,12 @@ impl Producer for StripSource {
     fn capability(&self) -> otf_pixels_core::DecodeCapability {
         // Held whole once built.
         otf_pixels_core::DecodeCapability::Regions
+    }
+
+    fn set_cancel(&self, cancel: &Cancel) {
+        if let Ok(mut slot) = self.cancel.lock() {
+            slot.clone_from(cancel);
+        }
     }
 
     fn produce(&self, region: Region, output: &mut otf_pixels_core::TileMut<'_>) -> Result<()> {

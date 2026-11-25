@@ -131,6 +131,8 @@ pub struct DecodedSource {
     state: Mutex<DecodeState>,
     /// The most recently decoded band, reused for repeated demand.
     window: Mutex<Option<(Region, Arc<TileBuf>)>>,
+    /// Checked before each row is read (ADR-0021).
+    cancel: Mutex<crate::Cancel>,
 }
 
 impl DecodedSource {
@@ -144,6 +146,7 @@ impl DecodedSource {
             capability: decoder.capability(),
             state: Mutex::new(DecodeState::Reading { decoder, cursor: 0 }),
             window: Mutex::new(None),
+            cancel: Mutex::new(crate::Cancel::never()),
         }
     }
 
@@ -242,12 +245,14 @@ impl DecodedSource {
             None
         };
 
+        let cancel = self.cancel.lock().map(|c| c.clone()).unwrap_or_default();
         let outcome = Self::fill_band(
             decoder.as_mut(),
             cursor,
             band,
             self.shape(),
             carry.as_deref(),
+            &cancel,
         );
         match outcome {
             Ok(buffer) => Ok(Arc::new(buffer)),
@@ -268,9 +273,11 @@ impl DecodedSource {
         band: Region,
         descriptor: ImageDescriptor,
         carry: Option<&TileBuf>,
+        cancel: &crate::Cancel,
     ) -> Result<TileBuf> {
         let mut scratch = vec![0_u8; descriptor.row_bytes()];
         while *cursor < band.y {
+            cancel.check()?;
             decoder.read_row(&mut scratch)?;
             *cursor += 1;
         }
@@ -303,6 +310,7 @@ impl DecodedSource {
                         })?;
                     continue;
                 }
+                cancel.check()?;
                 decoder.read_row(row)?;
                 *cursor += 1;
             }
@@ -372,6 +380,19 @@ impl DecodedSource {
 impl Producer for DecodedSource {
     fn name(&self) -> &'static str {
         "decoded"
+    }
+
+    /// Kept for the per-row checks, and handed to the decoder for the
+    /// checks inside its own work.
+    fn set_cancel(&self, cancel: &crate::Cancel) {
+        if let Ok(mut slot) = self.cancel.lock() {
+            slot.clone_from(cancel);
+        }
+        if let Ok(mut state) = self.state.lock() {
+            if let DecodeState::Reading { decoder, .. } = &mut *state {
+                decoder.set_cancel(cancel.clone());
+            }
+        }
     }
 
     fn descriptor(&self) -> ImageDescriptor {

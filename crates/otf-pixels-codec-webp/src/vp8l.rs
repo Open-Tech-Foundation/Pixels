@@ -637,7 +637,12 @@ fn decode_pixels(
             .ok_or_else(|| malformed("a block names a prefix code group that is missing"))
     };
 
+    let mut next_check = 0;
     while pixels.len() < total {
+        if pixels.len() >= next_check {
+            otf_pixels_core::Cancel::checkpoint()?;
+            next_check = pixels.len() + (1 << 16);
+        }
         let group = group_at(pixels.len())?;
         let symbol = group.codes[0].read(bits)?;
         if symbol < 256 {

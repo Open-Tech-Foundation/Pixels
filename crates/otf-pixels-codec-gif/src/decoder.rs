@@ -71,6 +71,8 @@ pub struct Frame {
 /// [`GifDecoder::next_frame`] walks the frames as whole-canvas copies.
 #[derive(Debug)]
 pub struct GifDecoder<S: Source> {
+    /// What stops this codec's long work (ADR-0021).
+    cancel: otf_pixels_core::Cancel,
     descriptor: CoreDescriptor,
     screen: Screen,
     /// The stream after the global colour table, read whole at construction
@@ -186,6 +188,7 @@ impl<S: Source> GifDecoder<S> {
             .map(|c| Background::Rgb(c[0].into(), c[1].into(), c[2].into()));
 
         Ok(Self {
+            cancel: otf_pixels_core::Cancel::never(),
             descriptor,
             screen,
             source: Some(std::io::Cursor::new(rest)),
@@ -254,6 +257,7 @@ impl<S: Source> GifDecoder<S> {
 
     /// The body of [`GifDecoder::next_frame`], with the source borrowed out.
     fn decode_next(&mut self, source: &mut Bytes) -> Result<Option<GraphicControl>> {
+        otf_pixels_core::Cancel::checkpoint()?;
         // Apply the previous frame's disposal before drawing this one. It
         // happens here rather than after drawing because `Previous` needs the
         // saved rectangle, and saving it is only worth doing if a later frame
@@ -646,22 +650,25 @@ impl<S: Source + std::fmt::Debug> Decoder for GifDecoder<S> {
     /// previous frame's applied. Its duration is the one
     /// [`Decoder::animation`] reported, so the two always agree.
     fn advance_frame(&mut self) -> Result<Option<FrameInfo>> {
-        self.ensure_started()?;
-        match self.draw_next()? {
-            Some(control) => {
-                self.row = 0;
-                let duration = self
-                    .animation
-                    .as_ref()
-                    .and_then(|a| a.frame_durations_ms.get(self.frame as usize).copied())
-                    .unwrap_or(u32::from(control.delay_centiseconds) * 10);
-                Ok(Some(FrameInfo::new(self.frame, duration)))
+        let cancel = self.cancel.clone();
+        cancel.scope(|| {
+            self.ensure_started()?;
+            match self.draw_next()? {
+                Some(control) => {
+                    self.row = 0;
+                    let duration = self
+                        .animation
+                        .as_ref()
+                        .and_then(|a| a.frame_durations_ms.get(self.frame as usize).copied())
+                        .unwrap_or(u32::from(control.delay_centiseconds) * 10);
+                    Ok(Some(FrameInfo::new(self.frame, duration)))
+                }
+                None => {
+                    self.row = self.descriptor.height;
+                    Ok(None)
+                }
             }
-            None => {
-                self.row = self.descriptor.height;
-                Ok(None)
-            }
-        }
+        })
     }
 
     /// Palette, the first frame's interlace, the screen's background colour
@@ -671,28 +678,35 @@ impl<S: Source + std::fmt::Debug> Decoder for GifDecoder<S> {
     }
 
     fn read_row(&mut self, out: &mut [u8]) -> Result<()> {
-        self.ensure_started()?;
-        if self.row >= self.descriptor.height {
-            return Err(PixelsError::invalid_argument(
-                "out",
-                format!("all {} rows have already been read", self.descriptor.height),
-            ));
-        }
-        let row_bytes = self.descriptor.row_bytes();
-        if out.len() != row_bytes {
-            return Err(PixelsError::invalid_argument(
-                "out",
-                format!("row buffer is {} bytes, expected {row_bytes}", out.len()),
-            ));
-        }
-        let start = self.row as usize * row_bytes;
-        let row = self
-            .canvas
-            .get(start..start + row_bytes)
-            .ok_or_else(|| PixelsError::malformed("gif", "canvas is short"))?;
-        out.copy_from_slice(row);
-        self.row += 1;
-        Ok(())
+        let cancel = self.cancel.clone();
+        cancel.scope(|| {
+            self.ensure_started()?;
+            if self.row >= self.descriptor.height {
+                return Err(PixelsError::invalid_argument(
+                    "out",
+                    format!("all {} rows have already been read", self.descriptor.height),
+                ));
+            }
+            let row_bytes = self.descriptor.row_bytes();
+            if out.len() != row_bytes {
+                return Err(PixelsError::invalid_argument(
+                    "out",
+                    format!("row buffer is {} bytes, expected {row_bytes}", out.len()),
+                ));
+            }
+            let start = self.row as usize * row_bytes;
+            let row = self
+                .canvas
+                .get(start..start + row_bytes)
+                .ok_or_else(|| PixelsError::malformed("gif", "canvas is short"))?;
+            out.copy_from_slice(row);
+            self.row += 1;
+            Ok(())
+        })
+    }
+
+    fn set_cancel(&mut self, cancel: otf_pixels_core::Cancel) {
+        self.cancel = cancel;
     }
 }
 

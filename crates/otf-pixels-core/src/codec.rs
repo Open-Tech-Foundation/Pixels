@@ -676,6 +676,15 @@ pub trait Decoder: Send + fmt::Debug {
         Ok(None)
     }
 
+    /// Check `cancel` in this decoder's long loops — per row, group,
+    /// macroblock or superblock row, frame — and fail with
+    /// [`PixelsError::Cancelled`] once it is cancelled (ADR-0021). The
+    /// default ignores it: a decoder that does little per call is stopped
+    /// between rows by its source anyway.
+    fn set_cancel(&mut self, cancel: crate::Cancel) {
+        let _ = cancel;
+    }
+
     /// How many pages the source document holds, at least 1.
     ///
     /// A page is a separate image in one file, as in a multi-page TIFF: a
@@ -850,6 +859,13 @@ pub trait Encoder: Send {
     fn set_density(&mut self, density: Option<Density>) -> Result<()> {
         let _ = density;
         Ok(())
+    }
+
+    /// Check `cancel` in this encoder's long loops, for one that does its
+    /// work in [`Encoder::finish`] (ADR-0021). The default ignores it: an
+    /// encoder that writes as rows arrive is stopped between them anyway.
+    fn set_cancel(&mut self, cancel: crate::Cancel) {
+        let _ = cancel;
     }
 
     /// Whether this encoder writes animations: [`Encoder::set_animation`]

@@ -22,6 +22,8 @@ use std::f32::consts::{PI, SQRT_2};
 
 use crate::bits::{BitWriter, bits, val};
 use crate::entropy::{EntropyCode, HybridUint, Token, with_runs};
+use otf_pixels_core::Result;
+
 use crate::headers::{
     FrameSpec, ImageInfo, write_image_header, write_toc, write_vardct_frame_header,
 };
@@ -430,26 +432,33 @@ fn lf_group_streams(
 
 /// The whole codestream of a VarDCT image from non-linear sRGB samples in
 /// 0..=1, at `distance`.
-pub fn encode(rgb: &[[f32; 3]], info: &ImageInfo, distance: f32) -> Vec<u8> {
+pub fn encode(rgb: &[[f32; 3]], info: &ImageInfo, distance: f32) -> Result<Vec<u8>> {
     let mut out = BitWriter::new();
     write_image_header(&mut out, info);
     let mut bytes = out.finish();
-    bytes.extend(encode_frame(rgb, info, distance, &FrameSpec::STILL));
-    bytes
+    bytes.extend(encode_frame(rgb, info, distance, &FrameSpec::STILL)?);
+    Ok(bytes)
 }
 
 /// One VarDCT frame, header to last section, of `info`'s size and placed by
 /// `frame`: what follows the image header, or the frame before.
+///
+/// # Errors
+///
+/// [`otf_pixels_core::PixelsError::Cancelled`] once the run's `Cancel` is,
+/// checked between stages and per group (ADR-0021).
 pub fn encode_frame(
     rgb: &[[f32; 3]],
     info: &ImageInfo,
     distance: f32,
     frame: &FrameSpec,
-) -> Vec<u8> {
+) -> Result<Vec<u8>> {
     let (width, height) = (info.width as usize, info.height as usize);
     let xyb = Xyb::new(rgb, width, height);
+    otf_pixels_core::Cancel::checkpoint()?;
     let quantizer = Quantizer::for_distance(distance);
     let q = quantize_image(&xyb, &quantizer);
+    otf_pixels_core::Cancel::checkpoint()?;
     let (bw, bh) = (xyb.bw, xyb.bh);
 
     // Modular streams (LF and metadata) share one tree and one code.
@@ -494,7 +503,13 @@ pub fn encode_frame(
             })
         })
         .collect();
-    let hf: Vec<Vec<Token>> = groups.iter().map(|&g| hf_tokens(&q, bw, g)).collect();
+    let hf: Vec<Vec<Token>> = groups
+        .iter()
+        .map(|&g| {
+            otf_pixels_core::Cancel::checkpoint()?;
+            Ok(hf_tokens(&q, bw, g))
+        })
+        .collect::<Result<_>>()?;
     let all_hf: Vec<Token> = hf.iter().flatten().copied().collect();
     let hf_code = EntropyCode::build(495 * BLOCK_CLUSTERS as usize, &all_hf, HybridUint::DEFAULT);
 
@@ -560,7 +575,7 @@ pub fn encode_frame(
         write_toc(&mut out, &[all.len()]);
         let mut bytes = out.finish();
         bytes.extend_from_slice(&all);
-        return bytes;
+        return Ok(bytes);
     }
     let sections: Vec<Vec<u8>> = std::iter::once(lf_global)
         .chain(lf_sections)
@@ -574,7 +589,7 @@ pub fn encode_frame(
     for s in &sections {
         bytes.extend_from_slice(s);
     }
-    bytes
+    Ok(bytes)
 }
 
 #[cfg(test)]

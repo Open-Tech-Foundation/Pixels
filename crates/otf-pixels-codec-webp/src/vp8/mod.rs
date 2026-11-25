@@ -384,6 +384,7 @@ impl FrameDecoder {
         partitions: &mut [BoolDecoder<'_>],
     ) -> Result<()> {
         for my in 0..self.mb_rows {
+            otf_pixels_core::Cancel::checkpoint()?;
             let mut left_modes = [b::DC; 4];
             let mut left_nz = [false; 9];
             let partition = &mut partitions[my % partitions.len()];

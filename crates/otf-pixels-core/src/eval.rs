@@ -27,8 +27,17 @@ use std::sync::Arc;
 /// fails the whole evaluation — partial output is never returned
 /// (ARCHITECTURE §Failure model).
 pub fn evaluate(image: &Image) -> Result<TileBuf> {
+    evaluate_cancellable(image, &crate::Cancel::never())
+}
+
+/// [`evaluate`], stopped by `cancel` (ADR-0021), checked before each node.
+///
+/// # Errors
+///
+/// As [`evaluate`], and [`PixelsError::Cancelled`] once `cancel` is.
+pub fn evaluate_cancellable(image: &Image, cancel: &crate::Cancel) -> Result<TileBuf> {
     let mut cache: HashMap<NodeId, Arc<TileBuf>> = HashMap::new();
-    let buffer = evaluate_node(image.node(), &mut cache)?;
+    let buffer = evaluate_node(image.node(), &mut cache, cancel)?;
     // The root is usually uniquely owned; unwrap the Arc when it is, and fall
     // back to a clone when the root is also an interior node of a shared graph.
     Ok(Arc::try_unwrap(buffer).unwrap_or_else(|shared| (*shared).clone()))
@@ -43,6 +52,7 @@ pub fn evaluate(image: &Image) -> Result<TileBuf> {
 fn evaluate_node(
     root: &Arc<Node>,
     cache: &mut HashMap<NodeId, Arc<TileBuf>>,
+    cancel: &crate::Cancel,
 ) -> Result<Arc<TileBuf>> {
     /// One step of the explicit work stack.
     enum Step {
@@ -69,6 +79,7 @@ fn evaluate_node(
                 if cache.contains_key(&node.id()) {
                     continue;
                 }
+                cancel.check()?;
                 let buffer = compute_node(&node, cache)?;
                 cache.insert(node.id(), Arc::new(buffer));
             }
@@ -151,11 +162,21 @@ fn compute_node(node: &Arc<Node>, cache: &HashMap<NodeId, Arc<TileBuf>>) -> Resu
 /// # Errors
 ///
 /// Propagates evaluation errors, and any error `consume` returns.
-pub fn evaluate_rows(
+pub fn evaluate_rows(image: &Image, consume: impl FnMut(u32, &[u8]) -> Result<()>) -> Result<()> {
+    evaluate_rows_cancellable(image, &crate::Cancel::never(), consume)
+}
+
+/// [`evaluate_rows`], stopped by `cancel` (ADR-0021).
+///
+/// # Errors
+///
+/// As [`evaluate_rows`], and [`PixelsError::Cancelled`] once `cancel` is.
+pub fn evaluate_rows_cancellable(
     image: &Image,
+    cancel: &crate::Cancel,
     mut consume: impl FnMut(u32, &[u8]) -> Result<()>,
 ) -> Result<()> {
-    let buffer = evaluate(image)?;
+    let buffer = evaluate_cancellable(image, cancel)?;
     let tile = buffer.as_tile()?;
     let region = tile.region();
     for y in region.y..region.y.saturating_add(region.height) {

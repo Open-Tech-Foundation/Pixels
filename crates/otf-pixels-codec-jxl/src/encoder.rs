@@ -38,6 +38,8 @@ const MAX_DIMENSION: u32 = 1 << 30;
 /// Encodes a JPEG XL codestream.
 #[derive(Debug)]
 pub struct JxlEncoder {
+    /// What stops this codec's long work (ADR-0021).
+    cancel: otf_pixels_core::Cancel,
     state: Option<State>,
     /// `None` for lossless; otherwise the Butteraugli-style distance.
     distance: Option<f32>,
@@ -78,6 +80,7 @@ impl JxlEncoder {
     #[must_use]
     pub const fn new() -> Self {
         Self {
+            cancel: otf_pixels_core::Cancel::never(),
             state: None,
             distance: Some(1.0),
             exif: None,
@@ -92,6 +95,7 @@ impl JxlEncoder {
     #[must_use]
     pub const fn lossless() -> Self {
         Self {
+            cancel: otf_pixels_core::Cancel::never(),
             state: None,
             distance: None,
             exif: None,
@@ -107,6 +111,7 @@ impl JxlEncoder {
     #[must_use]
     pub const fn with_distance(distance: f32) -> Self {
         Self {
+            cancel: otf_pixels_core::Cancel::never(),
             state: None,
             distance: Some(distance),
             exif: None,
@@ -202,7 +207,7 @@ fn channels_of(descriptor: &ImageDescriptor, pixels: &[u8]) -> Vec<Channel> {
 /// The whole lossy codestream for `pixels`, which have no alpha.
 fn encode_lossy(descriptor: &ImageDescriptor, pixels: &[u8], distance: f32) -> Result<Vec<u8>> {
     let (rgb, info) = lossy_input(descriptor, pixels)?;
-    Ok(crate::vardct::encode(&rgb, &info, distance))
+    crate::vardct::encode(&rgb, &info, distance)
 }
 
 /// The header a lossy image of `descriptor` declares: XYB colour, which
@@ -228,7 +233,7 @@ pub(crate) fn lossy_frame(
         animation: image.animation,
         ..info
     };
-    Ok(crate::vardct::encode_frame(&rgb, &info, distance, frame))
+    crate::vardct::encode_frame(&rgb, &info, distance, frame)
 }
 
 /// The samples of a lossy image as non-linear sRGB in 0..=1, and its
@@ -325,6 +330,7 @@ pub(crate) fn lossless_frame(
     let single = groups_x * groups_y == 1;
     let mut group_tokens: Vec<Vec<Token>> = Vec::with_capacity(groups_x * groups_y);
     for gy in 0..groups_y {
+        otf_pixels_core::Cancel::checkpoint()?;
         for gx in 0..groups_x {
             let (x0, y0) = (gx * GROUP, gy * GROUP);
             let region = (x0, y0, GROUP.min(width - x0), GROUP.min(height - y0));
@@ -440,10 +446,13 @@ impl Encoder for JxlEncoder {
     }
 
     fn end_frame(&mut self, _sink: &mut dyn Sink) -> Result<()> {
-        self.animator
-            .as_mut()
-            .ok_or_else(|| not_animated("end_frame"))?
-            .end_frame()
+        let cancel = self.cancel.clone();
+        cancel.scope(|| {
+            self.animator
+                .as_mut()
+                .ok_or_else(|| not_animated("end_frame"))?
+                .end_frame()
+        })
     }
 
     /// Written in an `Exif` box, which puts the file in the container.
@@ -537,42 +546,49 @@ impl Encoder for JxlEncoder {
     }
 
     fn finish(&mut self, sink: &mut dyn Sink) -> Result<()> {
-        if let Some(animator) = self.animator.as_mut() {
-            let codestream = animator.finish()?;
-            return crate::animate::deliver(
-                &codestream,
-                self.exif.as_deref(),
-                self.xmp.as_deref(),
-                sink,
-            );
-        }
-        let Some(state) = self.state.as_ref() else {
-            return Err(PixelsError::invalid_argument(
-                "sink",
-                "finish called before write_header",
-            ));
-        };
-        if state.rows_written < state.descriptor.height {
-            return Err(PixelsError::malformed(
-                "jxl",
-                format!(
-                    "{} of {} rows were written",
-                    state.rows_written, state.descriptor.height
-                ),
-            ));
-        }
-        let bytes = match self.distance {
-            Some(distance) if !state.descriptor.pixel.layout().has_alpha() => {
-                encode_lossy(&state.descriptor, &state.pixels, distance)?
+        let cancel = self.cancel.clone();
+        cancel.scope(|| {
+            if let Some(animator) = self.animator.as_mut() {
+                let codestream = animator.finish()?;
+                return crate::animate::deliver(
+                    &codestream,
+                    self.exif.as_deref(),
+                    self.xmp.as_deref(),
+                    sink,
+                );
             }
-            _ => encode(&state.descriptor, &state.pixels)?,
-        };
-        let bytes = if self.exif.is_some() || self.xmp.is_some() {
-            contained(&bytes, self.exif.as_deref(), self.xmp.as_deref())
-        } else {
-            bytes
-        };
-        sink.write_all(&bytes)?;
-        sink.flush()
+            let Some(state) = self.state.as_ref() else {
+                return Err(PixelsError::invalid_argument(
+                    "sink",
+                    "finish called before write_header",
+                ));
+            };
+            if state.rows_written < state.descriptor.height {
+                return Err(PixelsError::malformed(
+                    "jxl",
+                    format!(
+                        "{} of {} rows were written",
+                        state.rows_written, state.descriptor.height
+                    ),
+                ));
+            }
+            let bytes = match self.distance {
+                Some(distance) if !state.descriptor.pixel.layout().has_alpha() => {
+                    encode_lossy(&state.descriptor, &state.pixels, distance)?
+                }
+                _ => encode(&state.descriptor, &state.pixels)?,
+            };
+            let bytes = if self.exif.is_some() || self.xmp.is_some() {
+                contained(&bytes, self.exif.as_deref(), self.xmp.as_deref())
+            } else {
+                bytes
+            };
+            sink.write_all(&bytes)?;
+            sink.flush()
+        })
+    }
+
+    fn set_cancel(&mut self, cancel: otf_pixels_core::Cancel) {
+        self.cancel = cancel;
     }
 }

@@ -165,6 +165,7 @@ impl Coefficients {
     }
 
     fn write_scan(&self, spec: &ScanSpec, sink: &mut dyn Sink) -> Result<()> {
+        otf_pixels_core::Cancel::checkpoint()?;
         let dc = spec.ss == 0;
         let refine_dc = dc && spec.ah > 0;
         // DC scans code each component with its own table; an AC scan has

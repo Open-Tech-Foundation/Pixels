@@ -71,6 +71,8 @@ impl Subsampling {
 /// Encodes a baseline JPEG stream.
 #[derive(Debug)]
 pub struct JpegEncoder {
+    /// What stops this codec's long work (ADR-0021).
+    cancel: otf_pixels_core::Cancel,
     quality: u8,
     subsampling: Subsampling,
     /// Write a progressive (`SOF2`) file rather than a baseline one.
@@ -241,6 +243,7 @@ impl JpegEncoder {
     #[must_use]
     pub const fn new() -> Self {
         Self {
+            cancel: otf_pixels_core::Cancel::never(),
             quality: EncodeOptions::DEFAULT_QUALITY,
             subsampling: Subsampling::Both,
             progressive: false,
@@ -270,6 +273,7 @@ impl JpegEncoder {
             ));
         }
         Ok(Self {
+            cancel: otf_pixels_core::Cancel::never(),
             quality,
             subsampling: if quality >= 90 {
                 Subsampling::None
@@ -949,40 +953,47 @@ impl Encoder for JpegEncoder {
     }
 
     fn finish(&mut self, sink: &mut dyn Sink) -> Result<()> {
-        let Some(state) = self.state.as_mut() else {
-            return Err(PixelsError::invalid_argument(
-                "sink",
-                "finish called before write_header",
-            ));
-        };
-        if state.rows_written < state.descriptor.height {
-            return Err(PixelsError::malformed(
-                "jpeg",
-                format!(
-                    "{} of {} rows were written",
-                    state.rows_written, state.descriptor.height
-                ),
-            ));
-        }
+        let cancel = self.cancel.clone();
+        cancel.scope(|| {
+            let Some(state) = self.state.as_mut() else {
+                return Err(PixelsError::invalid_argument(
+                    "sink",
+                    "finish called before write_header",
+                ));
+            };
+            if state.rows_written < state.descriptor.height {
+                return Err(PixelsError::malformed(
+                    "jpeg",
+                    format!(
+                        "{} of {} rows were written",
+                        state.rows_written, state.descriptor.height
+                    ),
+                ));
+            }
 
-        // A final partial MCU row still has to be coded: the format has no
-        // way to say "this image ends mid-block". `fill_planes` pads it by
-        // replicating the last real row.
-        if state.band_rows > 0 {
-            state.fill_planes();
-            state.encode_band();
-            state.band_rows = 0;
-        }
-        if let Some(kept) = state.coefficients.take() {
-            kept.write_scans(sink)?;
-        } else {
-            state.writer.flush();
-            sink.write_all(&state.writer.bytes)?;
-            state.writer.bytes.clear();
-        }
+            // A final partial MCU row still has to be coded: the format has no
+            // way to say "this image ends mid-block". `fill_planes` pads it by
+            // replicating the last real row.
+            if state.band_rows > 0 {
+                state.fill_planes();
+                state.encode_band();
+                state.band_rows = 0;
+            }
+            if let Some(kept) = state.coefficients.take() {
+                kept.write_scans(sink)?;
+            } else {
+                state.writer.flush();
+                sink.write_all(&state.writer.bytes)?;
+                state.writer.bytes.clear();
+            }
 
-        write_marker(marker::EOI, sink)?;
-        sink.flush()
+            write_marker(marker::EOI, sink)?;
+            sink.flush()
+        })
+    }
+
+    fn set_cancel(&mut self, cancel: otf_pixels_core::Cancel) {
+        self.cancel = cancel;
     }
 }
 

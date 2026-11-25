@@ -33,6 +33,8 @@ const MAX_DIMENSION: u32 = 65_536;
 /// Encodes an AVIF still.
 #[derive(Debug)]
 pub struct AvifEncoder {
+    /// What stops this codec's long work (ADR-0021).
+    cancel: otf_pixels_core::Cancel,
     state: Option<State>,
     options: EncodeOptions,
     /// The ICC profile for a `colr` of type `prof`, if any.
@@ -67,6 +69,7 @@ impl AvifEncoder {
     #[must_use]
     pub const fn from_options(options: &EncodeOptions) -> Self {
         Self {
+            cancel: otf_pixels_core::Cancel::never(),
             state: None,
             options: *options,
             icc: None,
@@ -177,30 +180,37 @@ impl Encoder for AvifEncoder {
     }
 
     fn finish(&mut self, sink: &mut dyn Sink) -> Result<()> {
-        let Some(state) = self.state.as_ref() else {
-            return Err(PixelsError::invalid_argument(
-                "sink",
-                "finish called before write_header",
-            ));
-        };
-        if state.rows_written < state.descriptor.height {
-            return Err(PixelsError::malformed(
-                "avif",
-                format!(
-                    "{} of {} rows were written",
-                    state.rows_written, state.descriptor.height
-                ),
-            ));
-        }
-        let bytes = encode(
-            state,
-            &self.options,
-            self.icc.as_deref(),
-            self.exif.as_deref(),
-            self.xmp.as_deref(),
-        )?;
-        sink.write_all(&bytes)?;
-        sink.flush()
+        let cancel = self.cancel.clone();
+        cancel.scope(|| {
+            let Some(state) = self.state.as_ref() else {
+                return Err(PixelsError::invalid_argument(
+                    "sink",
+                    "finish called before write_header",
+                ));
+            };
+            if state.rows_written < state.descriptor.height {
+                return Err(PixelsError::malformed(
+                    "avif",
+                    format!(
+                        "{} of {} rows were written",
+                        state.rows_written, state.descriptor.height
+                    ),
+                ));
+            }
+            let bytes = encode(
+                state,
+                &self.options,
+                self.icc.as_deref(),
+                self.exif.as_deref(),
+                self.xmp.as_deref(),
+            )?;
+            sink.write_all(&bytes)?;
+            sink.flush()
+        })
+    }
+
+    fn set_cancel(&mut self, cancel: otf_pixels_core::Cancel) {
+        self.cancel = cancel;
     }
 }
 

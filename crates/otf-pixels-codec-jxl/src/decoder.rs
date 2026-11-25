@@ -21,6 +21,8 @@ const MAX_COMPRESSED: usize = 256 * 1024 * 1024;
 /// Decodes a JPEG XL stream.
 #[derive(Debug)]
 pub struct JxlDecoder {
+    /// What stops this codec's long work (ADR-0021).
+    cancel: otf_pixels_core::Cancel,
     descriptor: ImageDescriptor,
     /// The codestream: until the first row is asked for, or for an
     /// animation until its last frame.
@@ -114,6 +116,7 @@ impl JxlDecoder {
         // space it was given.
         info.compression = Some(if header.xyb { "lossy" } else { "lossless" });
         Ok(Self {
+            cancel: otf_pixels_core::Cancel::never(),
             descriptor,
             codestream,
             pixels: None,
@@ -220,69 +223,79 @@ impl Decoder for JxlDecoder {
     /// The next displayed frame, as libjxl shows it; its duration is the
     /// one [`Decoder::animation`] reported.
     fn advance_frame(&mut self) -> Result<Option<FrameInfo>> {
-        let Some(animation) = self.animation.clone().filter(|_| !self.done) else {
-            self.row = self.descriptor.height;
-            return Ok(None);
-        };
-        if self.pixels.is_none() {
-            self.pixels = self.render_next()?;
-        }
-        match self.render_next()? {
-            Some(pixels) => {
-                self.pixels = Some(pixels);
-                self.frame += 1;
-                self.row = 0;
-                let duration = animation
-                    .frame_durations_ms
-                    .get(self.frame as usize)
-                    .copied()
-                    .unwrap_or(0);
-                Ok(Some(FrameInfo::new(self.frame, duration)))
-            }
-            None => {
+        let cancel = self.cancel.clone();
+        cancel.scope(|| {
+            let Some(animation) = self.animation.clone().filter(|_| !self.done) else {
                 self.row = self.descriptor.height;
-                self.codestream = Vec::new();
-                self.renderer = None;
-                self.done = true;
-                Ok(None)
+                return Ok(None);
+            };
+            if self.pixels.is_none() {
+                self.pixels = self.render_next()?;
             }
-        }
+            match self.render_next()? {
+                Some(pixels) => {
+                    self.pixels = Some(pixels);
+                    self.frame += 1;
+                    self.row = 0;
+                    let duration = animation
+                        .frame_durations_ms
+                        .get(self.frame as usize)
+                        .copied()
+                        .unwrap_or(0);
+                    Ok(Some(FrameInfo::new(self.frame, duration)))
+                }
+                None => {
+                    self.row = self.descriptor.height;
+                    self.codestream = Vec::new();
+                    self.renderer = None;
+                    self.done = true;
+                    Ok(None)
+                }
+            }
+        })
     }
 
     fn read_row(&mut self, out: &mut [u8]) -> Result<()> {
-        if self.row >= self.descriptor.height {
-            return Err(PixelsError::invalid_argument(
-                "out",
-                format!("all {} rows have already been read", self.descriptor.height),
-            ));
-        }
-        let row_bytes = self.descriptor.row_bytes();
-        if out.len() != row_bytes {
-            return Err(PixelsError::invalid_argument(
-                "out",
-                format!("row buffer is {} bytes, expected {row_bytes}", out.len()),
-            ));
-        }
-        if self.pixels.is_none() {
-            let pixels = self
-                .render_next()?
-                .ok_or_else(|| PixelsError::malformed("jxl", "no frame is displayed"))?;
-            self.pixels = Some(pixels);
-            if self.animation.is_none() {
-                // A still: the compressed file is no longer needed.
-                self.codestream = Vec::new();
-                self.renderer = None;
+        let cancel = self.cancel.clone();
+        cancel.scope(|| {
+            if self.row >= self.descriptor.height {
+                return Err(PixelsError::invalid_argument(
+                    "out",
+                    format!("all {} rows have already been read", self.descriptor.height),
+                ));
             }
-        }
-        let start = self.row as usize * row_bytes;
-        let row = self
-            .pixels
-            .as_deref()
-            .and_then(|p| p.get(start..start + row_bytes))
-            .ok_or_else(|| PixelsError::malformed("jxl", "decoded image is short"))?;
-        out.copy_from_slice(row);
-        self.row += 1;
-        Ok(())
+            let row_bytes = self.descriptor.row_bytes();
+            if out.len() != row_bytes {
+                return Err(PixelsError::invalid_argument(
+                    "out",
+                    format!("row buffer is {} bytes, expected {row_bytes}", out.len()),
+                ));
+            }
+            if self.pixels.is_none() {
+                let pixels = self
+                    .render_next()?
+                    .ok_or_else(|| PixelsError::malformed("jxl", "no frame is displayed"))?;
+                self.pixels = Some(pixels);
+                if self.animation.is_none() {
+                    // A still: the compressed file is no longer needed.
+                    self.codestream = Vec::new();
+                    self.renderer = None;
+                }
+            }
+            let start = self.row as usize * row_bytes;
+            let row = self
+                .pixels
+                .as_deref()
+                .and_then(|p| p.get(start..start + row_bytes))
+                .ok_or_else(|| PixelsError::malformed("jxl", "decoded image is short"))?;
+            out.copy_from_slice(row);
+            self.row += 1;
+            Ok(())
+        })
+    }
+
+    fn set_cancel(&mut self, cancel: otf_pixels_core::Cancel) {
+        self.cancel = cancel;
     }
 }
 

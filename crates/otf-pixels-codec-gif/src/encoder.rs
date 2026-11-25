@@ -25,6 +25,8 @@ use otf_pixels_compress::{build_palette, quantize_with};
 /// [`Encoder::set_animation`].
 #[derive(Debug)]
 pub struct GifEncoder {
+    /// What stops this codec's long work (ADR-0021).
+    cancel: otf_pixels_core::Cancel,
     /// How much quantization error is diffused, 0..=1.
     dither: f32,
     /// Palette entries to aim for, at most 256.
@@ -60,6 +62,7 @@ impl GifEncoder {
     #[must_use]
     pub const fn new() -> Self {
         Self {
+            cancel: otf_pixels_core::Cancel::never(),
             dither: 1.0,
             colours: 256,
             state: None,
@@ -129,6 +132,7 @@ impl GifEncoder {
             |colours| usize::from(colours).clamp(2, 256),
         );
         Self {
+            cancel: otf_pixels_core::Cancel::never(),
             dither: options.dither.unwrap_or(1.0).clamp(0.0, 1.0),
             colours,
             state: None,
@@ -220,10 +224,13 @@ impl Encoder for GifEncoder {
     }
 
     fn end_frame(&mut self, sink: &mut dyn Sink) -> Result<()> {
-        self.animator
-            .as_mut()
-            .ok_or_else(|| not_animated("end_frame"))?
-            .end_frame(sink)
+        let cancel = self.cancel.clone();
+        cancel.scope(|| {
+            self.animator
+                .as_mut()
+                .ok_or_else(|| not_animated("end_frame"))?
+                .end_frame(sink)
+        })
     }
 
     fn write_header(&mut self, desc: &ImageDescriptor, _sink: &mut dyn Sink) -> Result<()> {
@@ -297,69 +304,80 @@ impl Encoder for GifEncoder {
     }
 
     fn finish(&mut self, sink: &mut dyn Sink) -> Result<()> {
-        if let Some(animator) = self.animator.as_mut() {
-            return animator.finish(sink);
-        }
-        let Some(state) = self.state.as_mut() else {
-            return Err(PixelsError::malformed(
-                "gif",
-                "finish called before write_header",
-            ));
-        };
-        if state.rows_written != state.descriptor.height {
-            return Err(PixelsError::malformed(
-                "gif",
-                format!(
-                    "{} of {} rows written; a partial image is never emitted",
-                    state.rows_written, state.descriptor.height
-                ),
-            ));
-        }
+        let cancel = self.cancel.clone();
+        cancel.scope(|| {
+            if let Some(animator) = self.animator.as_mut() {
+                return animator.finish(sink);
+            }
+            let Some(state) = self.state.as_mut() else {
+                return Err(PixelsError::malformed(
+                    "gif",
+                    "finish called before write_header",
+                ));
+            };
+            if state.rows_written != state.descriptor.height {
+                return Err(PixelsError::malformed(
+                    "gif",
+                    format!(
+                        "{} of {} rows written; a partial image is never emitted",
+                        state.rows_written, state.descriptor.height
+                    ),
+                ));
+            }
 
-        let width = state.descriptor.width;
-        let height = state.descriptor.height;
-        let palette = build_palette(&state.rgb, self.colours);
-        let indices = quantize_with(&state.rgb, width as usize, &palette, self.dither);
-        let table = palette.padded();
-        let bits = palette.code_bits();
+            let width = state.descriptor.width;
+            let height = state.descriptor.height;
+            // Palette, quantization and LZW each run whole; the run's `Cancel`
+            // is checked between them (ADR-0021).
+            let palette = build_palette(&state.rgb, self.colours);
+            otf_pixels_core::Cancel::checkpoint()?;
+            let indices = quantize_with(&state.rgb, width as usize, &palette, self.dither);
+            otf_pixels_core::Cancel::checkpoint()?;
+            let table = palette.padded();
+            let bits = palette.code_bits();
 
-        let mut out: Vec<u8> = Vec::new();
-        out.extend_from_slice(&SIGNATURE_89A);
-        out.extend_from_slice(&(width as u16).to_le_bytes());
-        out.extend_from_slice(&(height as u16).to_le_bytes());
-        // Global table present, colour resolution 8 bits, table size 2^(n+1).
-        out.push(0x80 | 0x70 | ((bits - 1) as u8));
-        out.push(0); // background index
-        out.push(0); // pixel aspect ratio: unspecified
-        for entry in &table {
-            out.extend_from_slice(entry);
-        }
+            let mut out: Vec<u8> = Vec::new();
+            out.extend_from_slice(&SIGNATURE_89A);
+            out.extend_from_slice(&(width as u16).to_le_bytes());
+            out.extend_from_slice(&(height as u16).to_le_bytes());
+            // Global table present, colour resolution 8 bits, table size 2^(n+1).
+            out.push(0x80 | 0x70 | ((bits - 1) as u8));
+            out.push(0); // background index
+            out.push(0); // pixel aspect ratio: unspecified
+            for entry in &table {
+                out.extend_from_slice(entry);
+            }
 
-        // Image descriptor: one frame covering the whole canvas, no local
-        // table, not interlaced.
-        out.push(label::IMAGE);
-        out.extend_from_slice(&0_u16.to_le_bytes());
-        out.extend_from_slice(&0_u16.to_le_bytes());
-        out.extend_from_slice(&(width as u16).to_le_bytes());
-        out.extend_from_slice(&(height as u16).to_le_bytes());
-        out.push(0);
+            // Image descriptor: one frame covering the whole canvas, no local
+            // table, not interlaced.
+            out.push(label::IMAGE);
+            out.extend_from_slice(&0_u16.to_le_bytes());
+            out.extend_from_slice(&0_u16.to_le_bytes());
+            out.extend_from_slice(&(width as u16).to_le_bytes());
+            out.extend_from_slice(&(height as u16).to_le_bytes());
+            out.push(0);
 
-        // LZW's minimum code width must be at least 2, even for a 2-colour
-        // image: a width of 1 leaves no room for both the clear and end codes.
-        let minimum_width = bits.max(2);
-        out.push(minimum_width as u8);
-        let compressed = LzwEncoder::gif(minimum_width)
-            .map_err(crate::compress_error)?
-            .encode(&indices);
-        write_sub_blocks(&mut out, &compressed);
-        out.push(label::TRAILER);
+            // LZW's minimum code width must be at least 2, even for a 2-colour
+            // image: a width of 1 leaves no room for both the clear and end codes.
+            let minimum_width = bits.max(2);
+            out.push(minimum_width as u8);
+            let compressed = LzwEncoder::gif(minimum_width)
+                .map_err(crate::compress_error)?
+                .encode(&indices);
+            write_sub_blocks(&mut out, &compressed);
+            out.push(label::TRAILER);
 
-        sink.write_all(&out)?;
-        sink.flush()?;
+            sink.write_all(&out)?;
+            sink.flush()?;
 
-        // Release the raster now rather than at drop.
-        state.rgb = Vec::new();
-        Ok(())
+            // Release the raster now rather than at drop.
+            state.rgb = Vec::new();
+            Ok(())
+        })
+    }
+
+    fn set_cancel(&mut self, cancel: otf_pixels_core::Cancel) {
+        self.cancel = cancel;
     }
 }
 

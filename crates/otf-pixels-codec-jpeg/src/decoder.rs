@@ -126,6 +126,8 @@ struct Plane {
 /// way; the distinction is not visible through [`Decoder`].
 #[derive(Debug)]
 pub struct JpegDecoder<S: Source> {
+    /// What stops this codec's long work (ADR-0021).
+    cancel: otf_pixels_core::Cancel,
     inner: Box<Engine<S>>,
     /// The ICC profile from the `APP2` segments before the scan.
     icc: Option<Vec<u8>>,
@@ -175,6 +177,7 @@ impl<S: Source> JpegDecoder<S> {
         let xmp = inner.xmp.take();
         let info = std::mem::take(&mut inner.info);
         Ok(Self {
+            cancel: otf_pixels_core::Cancel::never(),
             inner,
             icc,
             exif,
@@ -241,7 +244,12 @@ impl<S: Source + std::fmt::Debug> Decoder for JpegDecoder<S> {
     }
 
     fn read_row(&mut self, out: &mut [u8]) -> Result<()> {
-        self.inner.read_row(out)
+        let cancel = self.cancel.clone();
+        cancel.scope(|| self.inner.read_row(out))
+    }
+
+    fn set_cancel(&mut self, cancel: otf_pixels_core::Cancel) {
+        self.cancel = cancel;
     }
 }
 
@@ -837,6 +845,7 @@ impl<S: Source> Engine<S> {
         let mut scan = self.scan.clone();
         let mut scans = 0;
         'scans: loop {
+            otf_pixels_core::Cancel::checkpoint()?;
             scans += 1;
             if scans > MAX_SCANS {
                 return Err(PixelsError::malformed(
