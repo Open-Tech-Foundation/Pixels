@@ -124,8 +124,8 @@
 //! Animations: with [`OpenOptions::animated`], GIF, WebP and JPEG XL are
 //! processed frame by frame (ADR-0020), and written to a format of one
 //! image only once [`Image::first_frame`], [`Image::frame`] or
-//! [`Image::into_strip`] says which still. GIF output writes the
-//! animation; WebP and JPEG XL output do not yet.
+//! [`Image::into_strip`] says which still. GIF and WebP output write the
+//! animation; JPEG XL output does not yet.
 
 use otf_pixels_core::{BufferSource, Op, Prefixed, Producer, TileBuf};
 use std::sync::Arc;

@@ -26,6 +26,9 @@ pub struct WebPEncoder {
     exif: Option<Vec<u8>>,
     /// The XMP packet to write as `XMP `, if any.
     xmp: Option<Vec<u8>>,
+    /// The loop count, once [`Encoder::set_animation`] asked for frames.
+    loop_count: Option<u32>,
+    animator: Option<crate::animate::Animator>,
 }
 
 impl Default for WebPEncoder {
@@ -61,8 +64,18 @@ impl WebPEncoder {
             icc: None,
             exif: None,
             xmp: None,
+            loop_count: None,
+            animator: None,
         }
     }
+}
+
+/// The refusal for a frame call on an encoder not told to animate.
+fn not_animated(call: &str) -> PixelsError {
+    PixelsError::invalid_argument(
+        "frame",
+        format!("`{call}` needs `set_animation` before the header"),
+    )
 }
 
 /// Refuse pixel formats WebP cannot carry: it is 8 bits per channel.
@@ -76,8 +89,37 @@ fn check_format(format: PixelFormat) -> Result<()> {
 }
 
 impl Encoder for WebPEncoder {
+    fn supports_animation(&self) -> bool {
+        true
+    }
+
+    fn set_animation(&mut self, loop_count: u32) -> Result<()> {
+        if self.state.is_some() || self.animator.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "animation",
+                "set_animation called after the header",
+            ));
+        }
+        self.loop_count = Some(loop_count);
+        Ok(())
+    }
+
+    fn begin_frame(&mut self, duration_ms: u32, _sink: &mut dyn Sink) -> Result<()> {
+        self.animator
+            .as_mut()
+            .ok_or_else(|| not_animated("begin_frame"))?
+            .begin_frame(duration_ms)
+    }
+
+    fn end_frame(&mut self, _sink: &mut dyn Sink) -> Result<()> {
+        self.animator
+            .as_mut()
+            .ok_or_else(|| not_animated("end_frame"))?
+            .end_frame()
+    }
+
     fn set_icc_profile(&mut self, profile: Option<&[u8]>) -> Result<()> {
-        if self.state.is_some() {
+        if self.state.is_some() || self.animator.is_some() {
             return Err(PixelsError::invalid_argument(
                 "profile",
                 "the ICC profile must be set before write_header",
@@ -88,7 +130,7 @@ impl Encoder for WebPEncoder {
     }
 
     fn set_exif(&mut self, exif: Option<&[u8]>) -> Result<()> {
-        if self.state.is_some() {
+        if self.state.is_some() || self.animator.is_some() {
             return Err(PixelsError::invalid_argument(
                 "exif",
                 "the EXIF block must be set before write_header",
@@ -99,7 +141,7 @@ impl Encoder for WebPEncoder {
     }
 
     fn set_xmp(&mut self, xmp: Option<&[u8]>) -> Result<()> {
-        if self.state.is_some() {
+        if self.state.is_some() || self.animator.is_some() {
             return Err(PixelsError::invalid_argument(
                 "xmp",
                 "the XMP packet must be set before write_header",
@@ -110,7 +152,7 @@ impl Encoder for WebPEncoder {
     }
 
     fn write_header(&mut self, desc: &ImageDescriptor, _sink: &mut dyn Sink) -> Result<()> {
-        if self.state.is_some() {
+        if self.state.is_some() || self.animator.is_some() {
             return Err(PixelsError::invalid_argument(
                 "descriptor",
                 "write_header called more than once",
@@ -129,6 +171,14 @@ impl Encoder for WebPEncoder {
         let capacity = desc
             .byte_len()
             .ok_or_else(|| PixelsError::malformed("webp", "image size overflows"))?;
+        if let Some(loop_count) = self.loop_count {
+            self.animator = Some(crate::animate::Animator::new(
+                desc,
+                loop_count,
+                self.options,
+            ));
+            return Ok(());
+        }
 
         // Nothing is written yet: the container length is not known until the
         // compressed body exists.
@@ -141,6 +191,9 @@ impl Encoder for WebPEncoder {
     }
 
     fn write_row(&mut self, row: &[u8], _sink: &mut dyn Sink) -> Result<()> {
+        if let Some(animator) = self.animator.as_mut() {
+            return animator.write_row(row);
+        }
         let Some(state) = self.state.as_mut() else {
             return Err(PixelsError::invalid_argument(
                 "row",
@@ -166,6 +219,14 @@ impl Encoder for WebPEncoder {
     }
 
     fn finish(&mut self, sink: &mut dyn Sink) -> Result<()> {
+        if let Some(animator) = self.animator.as_mut() {
+            return animator.finish(
+                self.icc.as_deref(),
+                self.exif.as_deref(),
+                self.xmp.as_deref(),
+                sink,
+            );
+        }
         let Some(state) = self.state.as_mut() else {
             return Err(PixelsError::invalid_argument(
                 "sink",
@@ -183,14 +244,8 @@ impl Encoder for WebPEncoder {
         }
 
         let options = self.options;
-        let effort = options.effort.unwrap_or(DEFAULT_EFFORT).min(6);
         let lossless = options.lossless || options.near_lossless;
-        let (body, alpha) = if lossless {
-            let near = options.near_lossless.then_some(options.quality);
-            encode_lossless(state, effort, near)
-        } else {
-            encode_lossy(state, options.quality, effort, options.alpha_quality)?
-        };
+        let (body, alpha) = encode_state(state, &options)?;
         let (width, height) = (state.descriptor.width, state.descriptor.height);
         // VP8L carries its own alpha; only a lossy ALPH chunk needs VP8X.
         let needs_vp8x = alpha && !lossless;
@@ -209,12 +264,39 @@ impl Encoder for WebPEncoder {
     }
 }
 
+/// The image chunks for `state` by `options`: `VP8L`, or `ALPH` and
+/// `VP8 `; and whether the image has transparency.
+fn encode_state(state: &State, options: &EncodeOptions) -> Result<(Vec<u8>, bool)> {
+    let effort = options.effort.unwrap_or(DEFAULT_EFFORT).min(6);
+    if options.lossless || options.near_lossless {
+        let near = options.near_lossless.then_some(options.quality);
+        Ok(encode_lossless(state, effort, near))
+    } else {
+        encode_lossy(state, options.quality, effort, options.alpha_quality)
+    }
+}
+
+/// The image chunks of one picture of `descriptor`, as a still's would be:
+/// an animation frame's.
+pub(crate) fn encode_image(
+    descriptor: &ImageDescriptor,
+    pixels: &[u8],
+    options: &EncodeOptions,
+) -> Result<(Vec<u8>, bool)> {
+    let state = State {
+        descriptor: *descriptor,
+        pixels: pixels.to_vec(),
+        rows_written: descriptor.height,
+    };
+    encode_state(&state, options)
+}
+
 /// libwebp's default `method`, and the search this encoder made before it
 /// took an effort.
 const DEFAULT_EFFORT: u8 = 4;
 
 /// A RIFF chunk: FourCC, little-endian size, payload, pad to even.
-fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], payload: &[u8]) {
+pub(crate) fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], payload: &[u8]) {
     out.extend_from_slice(kind);
     out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     out.extend_from_slice(payload);
@@ -224,7 +306,7 @@ fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], payload: &[u8]) {
 }
 
 /// Wrap chunks in the `RIFF`/`WEBP` header.
-fn riff(body: &[u8]) -> Vec<u8> {
+pub(crate) fn riff(body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(body.len() + 12);
     out.extend_from_slice(b"RIFF");
     out.extend_from_slice(&(body.len() as u32 + 4).to_le_bytes());

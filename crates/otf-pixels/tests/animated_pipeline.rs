@@ -548,3 +548,53 @@ fn a_webp_animation_converts_to_gif() {
         (30, 22)
     );
 }
+
+#[test]
+fn an_animation_written_as_lossless_webp_reads_back_exactly() {
+    // From every animated format: lossless WebP keeps each frame exactly,
+    // and its timing and loop count.
+    let lossless = EncodeOptions::default().with_lossless(true);
+    for fixture in [GIF, WEBP, JXL] {
+        let pipeline = || open(fixture, animated()).resize(21, 15);
+        let timing = pipeline().animation().unwrap().clone();
+        let frame_bytes = pipeline().descriptor().unwrap().byte_len().unwrap();
+        let (_, made) = write_frames(pipeline().output(Format::Raw, lossless), frame_bytes);
+
+        let webp = pipeline().output(Format::WebP, lossless).bytes().unwrap();
+        let back = Image::from_stream_with(std::io::Cursor::new(webp), animated()).unwrap();
+        assert!(back.is_animated(), "{fixture:?}");
+        assert_eq!(
+            back.animation().unwrap().frame_durations_ms,
+            timing.frame_durations_ms
+        );
+        assert_eq!(back.animation().unwrap().loop_count, timing.loop_count);
+        let back = back.to_pixel_format(PixelFormat::Rgba8);
+        let (_, read) = write_frames(back.output(Format::Raw, lossless), frame_bytes);
+        assert_eq!(read.len(), made.len(), "{fixture:?}");
+        for (k, ((_, ours), (_, theirs))) in read.iter().zip(&made).enumerate() {
+            let visible = |p: &[u8]| -> Vec<u8> {
+                p.chunks_exact(4)
+                    .flat_map(|q| {
+                        if q[3] == 0 {
+                            [0; 4]
+                        } else {
+                            [q[0], q[1], q[2], q[3]]
+                        }
+                    })
+                    .collect()
+            };
+            assert!(visible(ours) == visible(theirs), "{fixture:?} frame {k}");
+        }
+    }
+}
+
+#[test]
+fn a_lossy_webp_animation_is_written_by_default() {
+    let webp = open(GIF, animated())
+        .output(Format::WebP, EncodeOptions::default())
+        .bytes()
+        .unwrap();
+    let back = Image::from_stream_with(std::io::Cursor::new(webp), animated()).unwrap();
+    assert_eq!(back.frame_count(), 4);
+    assert_eq!(back.source_metadata().unwrap().compression, Some("lossy"));
+}

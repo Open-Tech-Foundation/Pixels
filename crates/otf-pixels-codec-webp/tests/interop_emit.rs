@@ -21,6 +21,8 @@
     reason = "tests operate on known-good values and assert shapes directly"
 )]
 
+mod common;
+
 use otf_pixels_codec_webp::{WebPDecoder, WebPEncoder};
 use otf_pixels_core::{Decoder, EncodeOptions, Encoder, ImageDescriptor, Limits, PixelFormat};
 
@@ -92,6 +94,57 @@ fn emit_webp_for_external_verification() {
                 std::fs::write(format!("{name}.raw"), &raster).unwrap();
                 std::fs::write(format!("{name}.ours"), decode(&webp)).unwrap();
             }
+        }
+    }
+}
+
+#[test]
+fn emit_animations_for_external_verification() {
+    // Each scene lossless, whose frames libwebp must show exactly as given,
+    // and lossy, whose frames it must show exactly as our decoder does. A
+    // `.meta` line: width, height, frames, loop count, then each duration.
+    let Ok(dir) = std::env::var("OTF_EMIT_DIR") else {
+        return;
+    };
+    if dir.is_empty() {
+        return;
+    }
+    for scene in common::scenes() {
+        for (mode, options) in [
+            ("lossless", common::lossless()),
+            ("lossy", EncodeOptions::default()),
+        ] {
+            let webp = common::encode(&scene, &scene.frames, &scene.durations, &options);
+            let mut decoder = WebPDecoder::new(&webp[..], Limits::default()).unwrap();
+            let channels = decoder.descriptor().pixel.channels();
+            let ours: Vec<u8> = otf_pixels_core::testing::read_frames(&mut decoder)
+                .unwrap()
+                .into_iter()
+                .flat_map(|(_, pixels)| {
+                    pixels
+                        .chunks_exact(channels)
+                        .flat_map(|p| [p[0], p[1], p[2], if channels == 4 { p[3] } else { 255 }])
+                        .collect::<Vec<u8>>()
+                })
+                .collect();
+            let expected = if mode == "lossless" {
+                scene.frames.concat()
+            } else {
+                ours
+            };
+            let name = format!("{dir}/anim_{}_{mode}", scene.name);
+            std::fs::write(format!("{name}.webp"), &webp).unwrap();
+            std::fs::write(format!("{name}.frames"), expected).unwrap();
+            let durations: Vec<String> = scene.durations.iter().map(u32::to_string).collect();
+            let meta = format!(
+                "{} {} {} {} {}",
+                scene.descriptor.width,
+                scene.descriptor.height,
+                scene.frames.len(),
+                scene.loop_count,
+                durations.join(" ")
+            );
+            std::fs::write(format!("{name}.meta"), meta).unwrap();
         }
     }
 }

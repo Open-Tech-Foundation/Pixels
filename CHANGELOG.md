@@ -53,6 +53,15 @@ versioning: [SemVer](https://semver.org/).
   `keep_duplicate_frames` (sharp's names). libgif, through Pillow, reads
   every frame back exactly (`scripts/check-gif-interop.sh`). A still GIF
   encodes to the same bytes as before.
+- Animated WebP output: `ANIM` and `ANMF` frames, lossy or lossless as for
+  a still. Each frame is the changed rectangle at even offsets, blended
+  over the frame before when every changed pixel is opaque (unchanged
+  pixels transparent, in a lossy frame only in whole unchanged 8x8
+  blocks), otherwise overwriting it; repeated frames merge unless
+  `keep_duplicate_frames`. libwebp, through Pillow, shows lossless frames
+  exactly as given and lossy ones exactly as this crate decodes them,
+  with their durations and loop count (`scripts/check-webp-interop.sh`).
+  Still WebP encodes to the same bytes as before.
 - JPEG XL implements the frame protocol: each displayed frame decodes in
   turn, blended from the reference frames earlier ones saved, checked
   against `djxl --output_frames` on five animations (lossless exactly,

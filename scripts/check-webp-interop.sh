@@ -63,6 +63,8 @@ def as_rgb(source, kind, width, height):
 for path in sorted(glob.glob(os.path.join(directory, "*.webp"))):
     name = os.path.basename(path)
     base = path[:-5]
+    if name.startswith("anim_"):
+        continue
     try:
         if name.startswith("vp8_"):
             _, actual = load(path)
@@ -94,6 +96,41 @@ for path in sorted(glob.glob(os.path.join(directory, "*.webp"))):
         print(f"FAILED {name}: {error}")
         continue
     ok += 1
+
+# Animations: every frame as libwebp's animation decoder composites it, its
+# duration and the loop count. Transparent pixels compare by alpha alone.
+for path in sorted(glob.glob(os.path.join(directory, "anim_*.webp"))):
+    name = os.path.basename(path)
+    width, height, count, loop, *durations = map(int, open(path[:-5] + ".meta").read().split())
+    expected = open(path[:-5] + ".frames", "rb").read()
+    size = width * height * 4
+    problems = []
+    try:
+        image = Image.open(path)
+        if getattr(image, "n_frames", 1) != count:
+            problems.append(f"{image.n_frames} frames, expected {count}")
+        if image.info.get("loop") != loop:
+            problems.append(f"loop {image.info.get('loop')}, expected {loop}")
+        for k in range(min(count, getattr(image, "n_frames", 1))):
+            image.seek(k)
+            # Pillow sets a WebP frame's duration when it loads the frame.
+            image.load()
+            if image.info.get("duration") != durations[k]:
+                problems.append(f"frame {k} lasts {image.info.get('duration')} ms, expected {durations[k]}")
+            actual = image.convert("RGBA").tobytes()
+            want = expected[k * size:(k + 1) * size]
+            for i in range(0, size, 4):
+                a, w = actual[i:i + 4], want[i:i + 4]
+                if a[3] != w[3] or (w[3] and a[:3] != w[:3]):
+                    problems.append(f"frame {k} pixel {i // 4}: {tuple(a)} vs {tuple(w)}")
+                    break
+    except Exception as error:
+        problems.append(f"rejected: {error}")
+    if problems:
+        failed += 1
+        print(f"FAILED {name}: " + "; ".join(problems))
+    else:
+        ok += 1
 
 if ok == 0:
     print("no WebP files were emitted; the test did not run")

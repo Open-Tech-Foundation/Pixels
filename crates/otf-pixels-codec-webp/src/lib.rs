@@ -16,6 +16,7 @@
 //! first byte is final.
 
 mod alpha;
+mod animate;
 mod decoder;
 mod encoder;
 mod preprocess;
