@@ -45,7 +45,7 @@ Estimates deliberately omitted — scope, not dates, is the commitment.
   and is recorded as such.
 
 ### M5 — GIF + TIFF (from scratch) — **complete**
-- GIF: LZW, palettes, frame disposal; single-frame encode + quantization. ✅
+- GIF: LZW, palettes, frame disposal; encode + quantization (animated since v2 item 5). ✅
 - TIFF: IFD, baseline tags, none/LZW/deflate/PackBits, strip + tiled; tiled
   TIFF wired to region random-access decode (the streaming showcase). ✅
 - **Exit**: giant tiled TIFF → thumbnail in constant memory, benchmarked
@@ -74,8 +74,8 @@ Estimates deliberately omitted — scope, not dates, is the commitment.
   (done; built with warnings denied); benchmark suite vs Bun.Image/sharp/
   libvips published in README (pending).
 - First release: 0.1.0, packaged and verified with `cargo package
-  --workspace`; the API is 0.x until the multi-frame pipeline and the
-  benchmarks land.
+  --workspace`; the API is 0.x until the benchmarks land (the multi-frame
+  pipeline has).
 - **Exit**: `otf-pixels` 1.0 on crates.io.
 
 ## v2
@@ -89,7 +89,7 @@ Ordered by expected value, each gated on its own ADR before work starts:
    rendering intents and non-sRGB targets remain.
 4. ~~**Progressive JPEG encode; WebP from scratch**~~ — both done: WebP
    (ADR-0014) and progressive JPEG output, with per-scan optimized tables.
-5. **Animation pipelines** — multi-frame GIF/WebP/JPEG XL, decode and
+5. ~~**Animation pipelines**~~ — done: GIF, WebP and JPEG XL, decode and
    encode, as a per-frame replay of one graph (ADR-0020). AVIF sequences
    stay out: they need AV1 inter coding.
 6. **ThumbHash placeholders** — cheap LQIP terminal.

@@ -101,6 +101,8 @@ versioning: [SemVer](https://semver.org/).
   any-angle rotate.
 
 ### Changed
+- README, ROADMAP and SPEC describe animation as supported: ROADMAP v2
+  item 5 is done.
 - An animated pipeline no longer fills the scheduler's tile cache with
   frames that will not be read again: each frame's tiles are dropped once
   it is written (`Scheduler::forget`, `TileCache::forget`). A 100-frame

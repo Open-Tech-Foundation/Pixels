@@ -107,10 +107,10 @@ Requires Rust 1.85+. Every codec is on by default; for a smaller build, use
 | --- | --- | --- |
 | **PNG** | All bit depths, palettes, transparency, interlaced | 8/16-bit, every filter |
 | **JPEG** | Baseline and progressive, scaled (1/2, 1/4, 1/8) | Baseline or progressive (per-scan optimized tables), chroma subsampling |
-| **WebP** | Lossy, lossless, alpha; first frame of animations | Lossy (default) or lossless |
+| **WebP** | Lossy, lossless, alpha; every frame of animations, as libwebp composites them | Lossy (default) or lossless; animations |
 | **AVIF** | Still images, 8/10/12-bit | Lossy, 8-bit |
-| **JPEG XL** | Every coding tool, lossy and lossless, JPEG recompression; first frame of animations | Lossy (VarDCT, XYB) or lossless; alpha lossless for now |
-| **GIF** | Every frame, interlace, disposal; first frame composited | Single frame, quantized palette |
+| **JPEG XL** | Every coding tool, lossy and lossless, JPEG recompression; every frame of animations | Lossy (VarDCT, XYB) or lossless; alpha lossless for now; animations |
+| **GIF** | Every frame, interlace, disposal | Quantized palette; animations, each frame only what changed |
 | **TIFF** | Baseline 6.0, strips and tiles, LZW/Deflate/PackBits; any page of a multi-page file | Strips or tiles, Deflate |
 | **Raw** | Caller-described pixels | Packed pixels |
 
@@ -126,6 +126,7 @@ The format is identified from the file's first bytes, never from its name.
 | Channels | `extract_channel`, `extract_channel_named`, `ensure_alpha`, `remove_alpha` |
 | Filters | `blur`, `sharpen`, `convolve` |
 | Compositing (gravity, tiling, sharp's 25 blend modes) | `composite_overlays`, `composite`, `composite_with` |
+| Animation (open with `OpenOptions::with_animated(true)`; every op applies to each frame) | `frame_count`, `first_frame`, `frame`, `into_strip`, `with_loop_count`, `with_frame_duration(s)`, `OpenOptions::with_frames` |
 | Output | `output(format, options)` then `bytes()` or `write(sink)` |
 
 Chaining never fails: an error is carried to `bytes()` or `write()` and
