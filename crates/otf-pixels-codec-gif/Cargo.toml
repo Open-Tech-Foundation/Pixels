@@ -20,3 +20,6 @@ otf-pixels-compress.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+otf-pixels-core = { workspace = true, features = ["testing"] }

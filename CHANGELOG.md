@@ -19,6 +19,9 @@ versioning: [SemVer](https://semver.org/).
   `Limit::MaxAnimationPixels`. The `testing` feature adds
   `FrameStubDecoder`, `FrameRecorder` and `read_frames` for checking
   codecs against the protocol.
+- GIF implements the frame protocol: `GifDecoder` advances frame by frame
+  with disposal applied, matching libgif's frames and the durations
+  `animation()` reports.
 - Rotation by any angle, sharp's `rotate(angle, { background })`:
   `Image::rotate` now takes any integer angle and `Image::rotate_with`
   any finite one, with `RotateOptions` for the background colour (opaque

@@ -23,7 +23,7 @@
 
 use otf_pixels_compress::LzwDecoder;
 use otf_pixels_core::{
-    Animation, Background, Codec, Comment, DecodeCapability, Decoder, Format,
+    Animation, Background, Codec, Comment, DecodeCapability, Decoder, Format, FrameInfo,
     ImageDescriptor as CoreDescriptor, Limits, PixelFormat, PixelsError, Result, Source,
     SourceInfo,
 };
@@ -66,8 +66,9 @@ pub struct Frame {
 
 /// Decodes a GIF stream.
 ///
-/// [`Decoder`] presents the first frame; [`GifDecoder::next_frame`] walks the
-/// rest. See the crate docs for why the split is where it is.
+/// [`Decoder::read_row`] serves the current frame composited onto the
+/// canvas, the first until [`Decoder::advance_frame`] moves on;
+/// [`GifDecoder::next_frame`] walks the frames as whole-canvas copies.
 #[derive(Debug)]
 pub struct GifDecoder<S: Source> {
     descriptor: CoreDescriptor,
@@ -85,8 +86,11 @@ pub struct GifDecoder<S: Source> {
     canvas: Vec<u8>,
     /// Whether the first frame has been composited yet.
     started: bool,
-    /// Rows of the first frame already served through [`Decoder::read_row`].
+    /// Rows of the current frame already served through
+    /// [`Decoder::read_row`].
     row: u32,
+    /// The index of the frame on the canvas, once one is.
+    frame: u32,
     /// Set when the trailer is reached, so `next_frame` stops.
     finished: bool,
     /// Pending disposal from the frame just drawn.
@@ -193,6 +197,7 @@ impl<S: Source> GifDecoder<S> {
             canvas: vec![0_u8; canvas_len],
             started: false,
             row: 0,
+            frame: 0,
             finished: false,
             pending: None,
             background,
@@ -217,6 +222,18 @@ impl<S: Source> GifDecoder<S> {
     /// Returns [`PixelsError::Malformed`] for a malformed block or a frame
     /// that does not fit its canvas, or [`PixelsError::Io`] on source failure.
     pub fn next_frame(&mut self) -> Result<Option<Frame>> {
+        Ok(self.draw_next()?.map(|control| Frame {
+            pixels: self.canvas.clone(),
+            width: self.descriptor.width,
+            height: self.descriptor.height,
+            delay_centiseconds: control.delay_centiseconds,
+            disposal: control.disposal,
+        }))
+    }
+
+    /// Composite the next frame onto the canvas, returning its graphic
+    /// control; `None` at the trailer.
+    fn draw_next(&mut self) -> Result<Option<GraphicControl>> {
         if self.finished {
             return Ok(None);
         }
@@ -225,11 +242,18 @@ impl<S: Source> GifDecoder<S> {
         };
         let result = self.decode_next(&mut source);
         self.source = Some(source);
-        result
+        let control = result?;
+        if control.is_some() {
+            if self.started {
+                self.frame += 1;
+            }
+            self.started = true;
+        }
+        Ok(control)
     }
 
     /// The body of [`GifDecoder::next_frame`], with the source borrowed out.
-    fn decode_next(&mut self, source: &mut Bytes) -> Result<Option<Frame>> {
+    fn decode_next(&mut self, source: &mut Bytes) -> Result<Option<GraphicControl>> {
         // Apply the previous frame's disposal before drawing this one. It
         // happens here rather than after drawing because `Previous` needs the
         // saved rectangle, and saving it is only worth doing if a later frame
@@ -260,8 +284,8 @@ impl<S: Source> GifDecoder<S> {
                     }
                 }
                 label::IMAGE => {
-                    let frame = self.decode_image(source, control)?;
-                    return Ok(Some(frame));
+                    self.decode_image(source, control)?;
+                    return Ok(Some(control));
                 }
                 other => {
                     return Err(PixelsError::malformed(
@@ -351,7 +375,7 @@ impl<S: Source> GifDecoder<S> {
     }
 
     /// Decode one image block and composite it onto the canvas.
-    fn decode_image(&mut self, source: &mut Bytes, control: GraphicControl) -> Result<Frame> {
+    fn decode_image(&mut self, source: &mut Bytes, control: GraphicControl) -> Result<()> {
         let mut bytes = [0_u8; 9];
         source.read_exact(&mut bytes)?;
         let image = ImageDescriptor::parse(&bytes)?;
@@ -405,15 +429,7 @@ impl<S: Source> GifDecoder<S> {
             saved,
             had_transparency: control.transparent.is_some(),
         });
-        self.started = true;
-
-        Ok(Frame {
-            pixels: self.canvas.clone(),
-            width: self.descriptor.width,
-            height: self.descriptor.height,
-            delay_centiseconds: control.delay_centiseconds,
-            disposal: control.disposal,
-        })
+        Ok(())
     }
 
     /// Copy a rectangle of the canvas, for `Disposal::Previous`.
@@ -506,7 +522,7 @@ impl<S: Source> GifDecoder<S> {
         if self.started {
             return Ok(());
         }
-        match self.next_frame()? {
+        match self.draw_next()? {
             Some(_) => Ok(()),
             None => Err(PixelsError::malformed("gif", "stream contains no frames")),
         }
@@ -634,6 +650,28 @@ impl<S: Source + std::fmt::Debug> Decoder for GifDecoder<S> {
 
     fn animation(&self) -> Option<Animation> {
         self.animation.clone()
+    }
+
+    /// The next frame composited onto the canvas, its disposal and the
+    /// previous frame's applied. Its duration is the one
+    /// [`Decoder::animation`] reported, so the two always agree.
+    fn advance_frame(&mut self) -> Result<Option<FrameInfo>> {
+        self.ensure_started()?;
+        match self.draw_next()? {
+            Some(control) => {
+                self.row = 0;
+                let duration = self
+                    .animation
+                    .as_ref()
+                    .and_then(|a| a.frame_durations_ms.get(self.frame as usize).copied())
+                    .unwrap_or(u32::from(control.delay_centiseconds) * 10);
+                Ok(Some(FrameInfo::new(self.frame, duration)))
+            }
+            None => {
+                self.row = self.descriptor.height;
+                Ok(None)
+            }
+        }
     }
 
     /// Palette, the first frame's interlace, the screen's background colour

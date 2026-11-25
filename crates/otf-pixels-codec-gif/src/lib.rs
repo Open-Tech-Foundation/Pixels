@@ -7,15 +7,16 @@
 //!
 //! # Frames and the engine
 //!
-//! [`Decoder`] yields one image, so [`GifDecoder`] presents the first frame
-//! composited onto the canvas. Every existing pipeline therefore works on a
-//! GIF unchanged, and the engine stays frame-unaware.
+//! [`GifDecoder`]'s rows are the current frame composited onto the canvas:
+//! the first, until [`Decoder::advance_frame`] moves to the next with
+//! disposal applied. That is the frame protocol the pipeline replays one
+//! graph through (ADR-0020); a caller that opens without asking for the
+//! animation reads the first frame and never advances.
 //!
-//! Callers who want the animation use [`GifDecoder::next_frame`], which walks
-//! the remaining frames and applies disposal between them. That keeps
-//! "animation pipelines are v2" honest: the decode is complete, and only the
-//! graph integration is deferred.
+//! [`GifDecoder::next_frame`] walks the frames as whole-canvas copies, for
+//! callers outside the pipeline.
 //!
+//! [`Decoder::advance_frame`]: otf_pixels_core::Decoder::advance_frame
 //! [`Decoder`]: otf_pixels_core::Decoder
 
 mod decoder;

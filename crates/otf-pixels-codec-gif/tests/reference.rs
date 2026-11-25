@@ -128,6 +128,75 @@ fn every_fixture_decodes_to_the_reference_pixels() {
 }
 
 #[test]
+fn the_frame_protocol_yields_the_reference_frames_with_their_timing() {
+    // `Decoder::advance_frame` is what the pipeline replays frames through
+    // (ADR-0020); it must agree with libgif frame for frame, and its
+    // durations with what `animation()` promised.
+    for reference in references() {
+        let bytes = read_fixture(&reference.name);
+        let mut decoder = GifDecoder::new(&bytes[..], Limits::default()).unwrap();
+        let promised = otf_pixels_core::Decoder::animation(&decoder)
+            .map_or_else(|| vec![0], |a| a.frame_durations_ms);
+        let frames = otf_pixels_core::testing::read_frames(&mut decoder).unwrap();
+        assert_eq!(frames.len(), reference.frames.len(), "{}", reference.name);
+        for (index, ((info, pixels), expected)) in frames.iter().zip(&reference.frames).enumerate()
+        {
+            assert_eq!(info.index as usize, index, "{}", reference.name);
+            assert_eq!(
+                fnv1a64(pixels),
+                *expected,
+                "{} frame {index}",
+                reference.name
+            );
+            if promised.len() > 1 {
+                assert_eq!(
+                    info.duration_ms, promised[index],
+                    "{} frame {index}",
+                    reference.name
+                );
+            }
+        }
+        assert_eq!(
+            otf_pixels_core::Decoder::advance_frame(&mut decoder).unwrap(),
+            None
+        );
+    }
+}
+
+#[test]
+fn advancing_mid_frame_skips_to_the_next_frames_top() {
+    let bytes = read_fixture("animation");
+    let reference = references()
+        .into_iter()
+        .find(|r| r.name == "animation")
+        .unwrap();
+    let mut decoder = GifDecoder::new(&bytes[..], Limits::default()).unwrap();
+    let mut row = vec![0; 20 * 4];
+    // Three rows of frame 0, none of frame 1, then all of frame 2.
+    for _ in 0..3 {
+        otf_pixels_core::Decoder::read_row(&mut decoder, &mut row).unwrap();
+    }
+    assert_eq!(
+        otf_pixels_core::Decoder::advance_frame(&mut decoder)
+            .unwrap()
+            .unwrap()
+            .index,
+        1
+    );
+    let info = otf_pixels_core::Decoder::advance_frame(&mut decoder)
+        .unwrap()
+        .unwrap();
+    assert_eq!(info.index, 2);
+    let mut pixels = Vec::new();
+    for _ in 0..20 {
+        otf_pixels_core::Decoder::read_row(&mut decoder, &mut row).unwrap();
+        pixels.extend_from_slice(&row);
+    }
+    assert_eq!(fnv1a64(&pixels), reference.frames[2]);
+    assert!(otf_pixels_core::Decoder::read_row(&mut decoder, &mut row).is_err());
+}
+
+#[test]
 fn interlaced_and_non_interlaced_decode_identically() {
     // The strongest interlace check available: the same image, both ways. A
     // row emitted twice or in the wrong pass shows up here and nowhere else
