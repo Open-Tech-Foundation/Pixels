@@ -32,6 +32,7 @@ than silent divergence — this replaces the previous DECISIONS.md practice.
 | [0018](0018-own-progressive-jpeg.md) | Own progressive JPEG decode | Accepted |
 | [0019](0019-own-jpeg-xl.md) | Own JPEG XL, encoder first | Accepted |
 | [0020](0020-animation-as-per-frame-replay.md) | Animation as a per-frame replay of one graph | Accepted |
+| [0021](0021-cooperative-cancellation.md) | Cooperative cancellation through one `Cancel` | Accepted |
 
 Deferred (no ADR yet, decide when reached): tile cache eviction policy
 details, fusion pass design, error taxonomy granularity.
