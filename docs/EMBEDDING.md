@@ -90,7 +90,7 @@ any allocation.
 | `extract` | `crop` |
 | `extend({ top, right, bottom, left, extendWith, background })` | `extend(Extend::new(top, right, bottom, left).extend_with(ExtendWith::..).with_background(rgba))`; `extend(n)` is `Extend::uniform(n)`; `extendWith` is `Background`, `Copy`, `Repeat` or `Mirror` |
 | `trim({ background, threshold, lineArt })` | `trim(Trim::default().with_background(rgba).with_threshold(t)?.line_art(..))`; `info.trimOffsetLeft`/`Top` are `Image::trim_offset()`, negated. `trim` runs the pipeline before it when called and holds the result in memory, so put it after a reducing resize |
-| `rotate()` (auto) / `rotate(90)` | `auto_orient` / `rotate(degrees)`, multiples of 90 (other angles are `InvalidArgument` in v1) |
+| `rotate()` (auto) / `rotate(angle, { background })` | `auto_orient` / `rotate(degrees)` for an integer angle, `rotate_with(degrees, RotateOptions::default().with_background(rgba).with_interpolator(..))` for any angle. Multiples of 90 are exact; other angles resample bilinearly by default onto the rotated bounding box, as libvips does, but in premultiplied alpha, so edges over a transparent background do not darken. A translucent background adds alpha, as for `extend` |
 | `flip` / `flop` | `flip` / `flop` |
 | `modulate`, `blur`, `sharpen`, `convolve` | same names; `modulate({ lightness })` is `Modulate::with_lightness`, added to luma rather than Lab L* |
 | `negate({ alpha })`, `greyscale()`, `tint(rgb)`, `threshold(t, { greyscale })` | `negate(alpha)`, `greyscale()`, `tint(r, g, b)`, `threshold(t, greyscale)`. `greyscale` keeps three channels, as sharp's does; `threshold` keeps the input's channel count (sharp returns one); `tint` works in YCbCr (sharp: Lab), so colours are close, not identical |

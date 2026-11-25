@@ -6,6 +6,21 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Rotation by any angle, sharp's `rotate(angle, { background })`:
+  `Image::rotate` now takes any integer angle and `Image::rotate_with`
+  any finite one, with `RotateOptions` for the background colour (opaque
+  black by default) and the `Interpolator` (nearest, bilinear by default,
+  or Catmull-Rom bicubic). The output is the rotated image's bounding box,
+  as in libvips; interpolation is premultiplied, so edges over a
+  transparent background do not darken; a translucent background adds
+  alpha. Multiples of 90 stay exact quarter turns. The op is
+  `otf_pixels_ops::RotateArbitrary`.
+
+### Changed
+- `Image::rotate` with an angle that is not a multiple of 90 rotates
+  instead of failing with `InvalidArgument`.
+
 ## [0.5.0] - 2026-10-21
 
 ### Added

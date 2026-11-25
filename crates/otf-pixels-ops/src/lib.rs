@@ -11,7 +11,7 @@
 //! # Scope
 //!
 //! The full v1 op set from SPEC §Core ops is here: [`Resize`], [`Crop`],
-//! [`Rotate`], [`Flip`], [`Flop`], [`Modulate`], [`Convolve`], [`Composite`],
+//! [`Rotate`] (with [`RotateArbitrary`] for any angle), [`Flip`], [`Flop`], [`Modulate`], [`Convolve`], [`Composite`],
 //! [`ExtractChannel`] and [`Flatten`], with sharp's [`Extend`] and the
 //! per-pixel adjustments in `adjust`. [`Trim`] is the exception: its output
 //! shape depends on pixel values, so it searches computed pixels rather
@@ -63,6 +63,7 @@ mod pointwise;
 mod resample;
 mod resize;
 mod rotate;
+mod rotate_arbitrary;
 mod trim;
 
 pub use adjust::{EnsureAlpha, Gamma, Greyscale, Linear, Negate, Recomb, Threshold, Tint};
@@ -76,4 +77,5 @@ pub use icc::{Conversion, ToSrgb, Unconvertible};
 pub use pointwise::{ExtractChannel, Flatten, Modulate};
 pub use resize::{Fit, Position, Resize, ResizeOptions};
 pub use rotate::{Quarter, Rotate};
+pub use rotate_arbitrary::{Interpolator, RotateArbitrary, RotateOptions};
 pub use trim::Trim;

@@ -14,7 +14,7 @@
 //! SPEC §Core ops says multiples of 90 degrees, and that restriction is what
 //! keeps this exact. An arbitrary angle needs resampling, which means a filter,
 //! an edge policy and an output-size convention — three decisions that belong
-//! to a `rotate_arbitrary` op rather than being smuggled in here.
+//! to [`crate::RotateArbitrary`] rather than being smuggled in here.
 
 use otf_pixels_core::{
     AccessPattern, ImageDescriptor, Op, PixelsError, Region, Result, Tile, TileMut,

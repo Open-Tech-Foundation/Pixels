@@ -140,9 +140,9 @@ pub use otf_pixels_core::{
 };
 pub use otf_pixels_ops::{
     Blend, Composite, Conversion, ConvertFormat, Convolve, Crop, EnsureAlpha, Extend, ExtendWith,
-    ExtractChannel, Filter, Fit, Flatten, Flip, Flop, Gamma, Greyscale, Kernel, Linear, Modulate,
-    Negate, Placement, Position, Quarter, Recomb, Resize, ResizeOptions, Rotate, Threshold, Tint,
-    ToSrgb, Trim, Unconvertible,
+    ExtractChannel, Filter, Fit, Flatten, Flip, Flop, Gamma, Greyscale, Interpolator, Kernel,
+    Linear, Modulate, Negate, Placement, Position, Quarter, Recomb, Resize, ResizeOptions, Rotate,
+    RotateArbitrary, RotateOptions, Threshold, Tint, ToSrgb, Trim, Unconvertible,
 };
 
 #[cfg(feature = "raw")]
@@ -671,12 +671,42 @@ impl Image {
         }
     }
 
-    /// Rotate by `degrees`, which must be a multiple of 90.
+    /// Rotate clockwise by `degrees` (sharp's `rotate(angle)`).
+    ///
+    /// A multiple of 90 is an exact quarter turn. Any other angle resamples
+    /// bilinearly onto a canvas that holds the whole rotated image, with the
+    /// uncovered corners opaque black, as sharp does; see
+    /// [`Image::rotate_with`] to choose the background and filter.
     #[must_use]
     pub fn rotate(self, degrees: i32) -> Self {
-        match Rotate::degrees(degrees) {
-            Ok(op) => self.apply(Arc::new(op)),
-            Err(error) => Self::failed(error),
+        self.rotate_with(f64::from(degrees), RotateOptions::default())
+    }
+
+    /// Rotate clockwise by any angle, with explicit background and filter
+    /// (sharp's `rotate(angle, { background })`).
+    ///
+    /// A multiple of 90 is still an exact quarter turn, so `options` do not
+    /// matter for it. As for [`Image::extend`], a translucent background on
+    /// an image without alpha adds an opaque alpha channel first. An angle
+    /// that is not finite is an error, surfaced at the terminal.
+    #[must_use]
+    pub fn rotate_with(self, degrees: f64, options: RotateOptions) -> Self {
+        if degrees.is_finite() && degrees % 90.0 == 0.0 {
+            // In range for i32 once reduced to one turn.
+            let quarter = (degrees % 360.0) as i32;
+            return match Rotate::degrees(quarter) {
+                Ok(op) => self.apply(Arc::new(op)),
+                Err(error) => Self::failed(error),
+            };
+        }
+        let op = match RotateArbitrary::new(degrees, options) {
+            Ok(op) => op,
+            Err(error) => return Self::failed(error),
+        };
+        if options.background()[3] < 255 {
+            self.ensure_alpha(1.0).apply(Arc::new(op))
+        } else {
+            self.apply(Arc::new(op))
         }
     }
 

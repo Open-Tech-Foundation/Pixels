@@ -36,7 +36,7 @@
 
 use otf_pixels::{
     Blend, EncodeOptions, Filter, Fit, Format, Image, ImageDescriptor, Kernel, Modulate,
-    PixelFormat, PlanOptions, ResizeOptions, Result, SchedulerOptions,
+    PixelFormat, PlanOptions, ResizeOptions, Result, RotateOptions, SchedulerOptions,
 };
 
 /// A deterministic image with structure at several scales, so a resize bug
@@ -293,7 +293,10 @@ fn ops_that_reject_their_arguments_surface_at_the_terminal() {
 
     let cases: [Case; 4] = [
         ("resize to zero", Box::new(|i: Image| i.resize(0, 10))),
-        ("rotate 45", Box::new(|i: Image| i.rotate(45))),
+        (
+            "rotate by a non-finite angle",
+            Box::new(|i: Image| i.rotate_with(f64::NAN, RotateOptions::default())),
+        ),
         (
             "blur with a negative sigma",
             Box::new(|i: Image| i.blur(-1.0)),

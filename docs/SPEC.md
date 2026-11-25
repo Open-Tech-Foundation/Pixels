@@ -98,7 +98,7 @@ alpha convert internally.
 |---|---|
 | `resize(w, h, opts)` | `fit: fill \| inside \| outside \| cover \| contain` (sharp's meanings; cover crops centred, contain pads centred with `background`); `without_enlargement`; filters: lanczos3 (default), lanczos2, mitchell, catmull-rom, box, bilinear, nearest |
 | `crop(x, y, w, h)` | zero-cost region remap |
-| `rotate(deg)` | multiples of 90 |
+| `rotate(deg)` | multiples of 90 are exact; any other angle resamples (nearest, bilinear default, bicubic) onto the rotated bounding box, uncovered corners in `background` |
 | `flip()` / `flop()` | vertical / horizontal mirror |
 | `modulate(opts)` | brightness, saturation, hue |
 | `convolve(kernel)` | arbitrary small kernels; blur/sharpen presets |
