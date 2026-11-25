@@ -42,6 +42,17 @@ versioning: [SemVer](https://semver.org/).
   animated overlay is refused. `Output::write_with_encoder` and
   `bytes_via_reference_with` take an encoder from outside the crate.
   `max_frames` and `max_animation_pixels` are checked at open.
+- Animated GIF output: an animated pipeline written as GIF keeps every
+  frame, its timing and the loop count. Each frame is the rectangle that
+  changed, unchanged pixels left transparent so the frame beneath shows;
+  a frame that must clear pixels has the frame before restore to
+  background; the first frame's palette is the global table, reused by
+  later frames within sharp's `interPaletteMaxError`; delays are rounded
+  on the running total; repeated frames merge into the one before. New
+  `EncodeOptions`: `inter_frame_max_error`, `inter_palette_max_error` and
+  `keep_duplicate_frames` (sharp's names). libgif, through Pillow, reads
+  every frame back exactly (`scripts/check-gif-interop.sh`). A still GIF
+  encodes to the same bytes as before.
 - JPEG XL implements the frame protocol: each displayed frame decodes in
   turn, blended from the reference frames earlier ones saved, checked
   against `djxl --output_frames` on five animations (lossless exactly,

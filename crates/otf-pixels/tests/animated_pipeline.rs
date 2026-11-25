@@ -480,3 +480,71 @@ fn clones_of_an_animated_pipeline_run_independently() {
     );
     assert_eq!(first, third);
 }
+
+/// RGBA with every pixel GIF cannot draw (alpha under one half) as zero.
+fn as_gif_shows(rgba: &[u8]) -> Vec<u8> {
+    rgba.chunks_exact(4)
+        .flat_map(|p| {
+            if p[3] < 128 {
+                [0, 0, 0, 0]
+            } else {
+                [p[0], p[1], p[2], 255]
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn an_animation_written_as_gif_reads_back_frame_for_frame() {
+    // The GIF fixture's frames fit a palette, so with no dithering and no
+    // palette reuse each frame must come back exactly as the pipeline made
+    // it, timing and loop count included.
+    let options = EncodeOptions::default()
+        .with_colours(256)
+        .unwrap()
+        .with_dither(0.0)
+        .unwrap()
+        .with_inter_palette_max_error(0.0)
+        .unwrap();
+    let pipeline = || open(GIF, animated()).flop();
+    let timing = pipeline().animation().unwrap().clone();
+    let frame_bytes = pipeline().descriptor().unwrap().byte_len().unwrap();
+    let (_, made) = write_frames(pipeline().output(Format::Raw, options), frame_bytes);
+
+    let gif = pipeline().output(Format::Gif, options).bytes().unwrap();
+    let back = Image::from_stream_with(std::io::Cursor::new(gif.clone()), animated()).unwrap();
+    assert!(back.is_animated());
+    assert_eq!(back.animation().unwrap().loop_count, timing.loop_count);
+    assert_eq!(
+        back.animation().unwrap().frame_durations_ms,
+        timing.frame_durations_ms
+    );
+    let (_, read) = write_frames(back.output(Format::Raw, options), frame_bytes);
+    assert_eq!(read.len(), made.len());
+    for (k, ((_, ours), (_, theirs))) in read.iter().zip(&made).enumerate() {
+        assert!(*ours == as_gif_shows(theirs), "frame {k}");
+    }
+}
+
+#[test]
+fn a_webp_animation_converts_to_gif() {
+    let gif = open(WEBP, animated())
+        .resize(30, 22)
+        .output(Format::Gif, EncodeOptions::default())
+        .bytes()
+        .unwrap();
+    let back = Image::from_stream_with(std::io::Cursor::new(gif), animated()).unwrap();
+    let source = open(WEBP, animated());
+    assert_eq!(back.frame_count(), source.frame_count());
+    assert_eq!(
+        back.animation().unwrap().duration_ms(),
+        source.animation().unwrap().duration_ms()
+    );
+    assert_eq!(
+        (
+            back.descriptor().unwrap().width,
+            back.descriptor().unwrap().height
+        ),
+        (30, 22)
+    );
+}

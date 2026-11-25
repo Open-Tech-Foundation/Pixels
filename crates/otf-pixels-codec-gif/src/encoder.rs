@@ -1,8 +1,8 @@
-//! The GIF encoder: single frame, with palette quantization.
+//! The GIF encoder: palette quantization, one frame or an animation.
 //!
-//! SPEC §Formats fixes the scope: "encode is single-frame + palette
-//! quantization. Animation pipelines are v2." An encoder that accepted frames
-//! would need a frame model in the engine, which is the thing v2 is for.
+//! A still is one frame covering the canvas, translucency composited onto
+//! black. After [`Encoder::set_animation`], frames are written as the
+//! changes between them (`animate`), with GIF's one-index transparency.
 //!
 //! # Memory
 //!
@@ -21,7 +21,8 @@ use otf_pixels_core::{
 use crate::format::{SIGNATURE_89A, label, write_sub_blocks};
 use otf_pixels_compress::{build_palette, quantize_with};
 
-/// Encodes a single-frame GIF.
+/// Encodes a GIF: a still, or an animation after
+/// [`Encoder::set_animation`].
 #[derive(Debug)]
 pub struct GifEncoder {
     /// How much quantization error is diffused, 0..=1.
@@ -29,6 +30,14 @@ pub struct GifEncoder {
     /// Palette entries to aim for, at most 256.
     colours: usize,
     state: Option<State>,
+    /// The loop count, once [`Encoder::set_animation`] asked for frames.
+    loop_count: Option<u32>,
+    /// sharp's `interFrameMaxError`, `interPaletteMaxError` and
+    /// `keepDuplicateFrames`.
+    frame_error: f32,
+    palette_error: f32,
+    keep_duplicates: bool,
+    animator: Option<crate::animate::Animator>,
 }
 
 /// Everything fixed once the descriptor is known.
@@ -54,6 +63,11 @@ impl GifEncoder {
             dither: 1.0,
             colours: 256,
             state: None,
+            loop_count: None,
+            frame_error: 0.0,
+            palette_error: 3.0,
+            keep_duplicates: false,
+            animator: None,
         }
     }
 
@@ -118,6 +132,11 @@ impl GifEncoder {
             dither: options.dither.unwrap_or(1.0).clamp(0.0, 1.0),
             colours,
             state: None,
+            loop_count: None,
+            frame_error: options.inter_frame_max_error,
+            palette_error: options.inter_palette_max_error,
+            keep_duplicates: options.keep_duplicate_frames,
+            animator: None,
         }
     }
 
@@ -169,9 +188,46 @@ fn append_as_rgb(row: &[u8], format: PixelFormat, out: &mut Vec<u8>) -> Result<(
     Ok(())
 }
 
+/// The refusal for a frame call on an encoder not told to animate.
+fn not_animated(call: &str) -> PixelsError {
+    PixelsError::invalid_argument(
+        "frame",
+        format!("`{call}` needs `set_animation` before the header"),
+    )
+}
+
 impl Encoder for GifEncoder {
+    fn supports_animation(&self) -> bool {
+        true
+    }
+
+    fn set_animation(&mut self, loop_count: u32) -> Result<()> {
+        if self.state.is_some() || self.animator.is_some() {
+            return Err(PixelsError::invalid_argument(
+                "animation",
+                "set_animation called after the header",
+            ));
+        }
+        self.loop_count = Some(loop_count);
+        Ok(())
+    }
+
+    fn begin_frame(&mut self, duration_ms: u32, _sink: &mut dyn Sink) -> Result<()> {
+        self.animator
+            .as_mut()
+            .ok_or_else(|| not_animated("begin_frame"))?
+            .begin_frame(duration_ms)
+    }
+
+    fn end_frame(&mut self, sink: &mut dyn Sink) -> Result<()> {
+        self.animator
+            .as_mut()
+            .ok_or_else(|| not_animated("end_frame"))?
+            .end_frame(sink)
+    }
+
     fn write_header(&mut self, desc: &ImageDescriptor, _sink: &mut dyn Sink) -> Result<()> {
-        if self.state.is_some() {
+        if self.state.is_some() || self.animator.is_some() {
             return Err(PixelsError::invalid_argument(
                 "descriptor",
                 "write_header called more than once",
@@ -190,6 +246,18 @@ impl Encoder for GifEncoder {
         let mut probe = Vec::new();
         append_as_rgb(&[], desc.pixel, &mut probe)?;
 
+        if let Some(loop_count) = self.loop_count {
+            let settings = crate::animate::Settings {
+                colours: self.colours,
+                dither: self.dither,
+                frame_error: self.frame_error,
+                palette_error: self.palette_error,
+                keep_duplicates: self.keep_duplicates,
+            };
+            self.animator = Some(crate::animate::Animator::new(desc, loop_count, settings));
+            return Ok(());
+        }
+
         // Nothing is written yet: the palette is not known until every pixel
         // has been seen, and the palette is part of the header.
         self.state = Some(State {
@@ -201,6 +269,9 @@ impl Encoder for GifEncoder {
     }
 
     fn write_row(&mut self, row: &[u8], _sink: &mut dyn Sink) -> Result<()> {
+        if let Some(animator) = self.animator.as_mut() {
+            return animator.write_row(row);
+        }
         let Some(state) = self.state.as_mut() else {
             return Err(PixelsError::invalid_argument(
                 "row",
@@ -226,6 +297,9 @@ impl Encoder for GifEncoder {
     }
 
     fn finish(&mut self, sink: &mut dyn Sink) -> Result<()> {
+        if let Some(animator) = self.animator.as_mut() {
+            return animator.finish(sink);
+        }
         let Some(state) = self.state.as_mut() else {
             return Err(PixelsError::malformed(
                 "gif",

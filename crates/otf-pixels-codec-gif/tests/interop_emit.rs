@@ -21,6 +21,8 @@
     reason = "tests operate on known-good values and assert shapes directly"
 )]
 
+mod common;
+
 use otf_pixels_codec_gif::GifEncoder;
 use otf_pixels_core::{Encoder, ImageDescriptor, PixelFormat};
 
@@ -63,6 +65,54 @@ fn emit_gifs_for_external_verification() {
             std::fs::write(format!("{name}.gif"), &gif).unwrap();
             std::fs::write(format!("{name}.rgb"), &raster).unwrap();
         }
+    }
+}
+
+#[test]
+fn emit_animations_for_external_verification() {
+    // Animations whose frames a palette holds exactly, so libgif must show
+    // each frame as it was given; a `.meta` line carries the canvas, frame
+    // count, loop count and the delays, in ms, a reader should report.
+    let Ok(dir) = std::env::var("OTF_EMIT_DIR") else {
+        return;
+    };
+    if dir.is_empty() {
+        return;
+    }
+    for scene in common::scenes() {
+        let gif = common::encode(
+            &scene.descriptor,
+            &scene.frames,
+            &scene.durations,
+            scene.loop_count,
+            &common::exact(),
+        );
+        let name = format!("{dir}/anim_{}", scene.name);
+        std::fs::write(format!("{name}.gif"), &gif).unwrap();
+        std::fs::write(format!("{name}.rgba"), scene.frames.concat()).unwrap();
+        // Delays as written: centiseconds rounded on the running total.
+        let mut total = 0;
+        let mut written = 0;
+        let delays: Vec<String> = scene
+            .durations
+            .iter()
+            .map(|d| {
+                total += d;
+                let cs = (total + 5) / 10;
+                let delay = (cs - written) * 10;
+                written = cs;
+                delay.to_string()
+            })
+            .collect();
+        let meta = format!(
+            "{} {} {} {} {}",
+            scene.descriptor.width,
+            scene.descriptor.height,
+            scene.frames.len(),
+            scene.loop_count,
+            delays.join(" ")
+        );
+        std::fs::write(format!("{name}.meta"), meta).unwrap();
     }
 }
 

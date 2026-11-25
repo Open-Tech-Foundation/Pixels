@@ -1,9 +1,8 @@
 //! GIF codec for `otf-pixels`, implemented from scratch.
 //!
 //! Decode covers the whole format: all frames, both interlace layouts,
-//! transparency, and every disposal method. Encode is single-frame with
-//! palette quantization, which is SPEC §Formats' stated v1 scope — animation
-//! *pipelines* are v2.
+//! transparency, and every disposal method. Encode quantizes to a palette,
+//! a still or an animation whose frames hold only what changed.
 //!
 //! # Frames and the engine
 //!
@@ -19,6 +18,7 @@
 //! [`Decoder::advance_frame`]: otf_pixels_core::Decoder::advance_frame
 //! [`Decoder`]: otf_pixels_core::Decoder
 
+mod animate;
 mod decoder;
 mod encoder;
 mod format;

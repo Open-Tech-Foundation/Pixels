@@ -353,6 +353,21 @@ pub struct EncodeOptions {
     /// first, sharpened by later scans, and usually a little smaller. The
     /// encoder then holds the image's coefficients rather than streaming.
     pub progressive: bool,
+    /// For an animated GIF, how far, 0–32, a pixel may differ from what the
+    /// previous frame left on screen and still be left showing instead of
+    /// drawn again (sharp's `interFrameMaxError`): the largest difference in
+    /// any channel. 0, the default, redraws every pixel that changed.
+    pub inter_frame_max_error: f32,
+    /// For an animated GIF, how much error, 0–256, mapping a frame onto the
+    /// global palette may add before the frame gets a palette of its own
+    /// (sharp's `interPaletteMaxError`, default 3): the root-mean-square
+    /// distance from each drawn pixel to its nearest palette entry, beyond
+    /// the frame's own palette's.
+    pub inter_palette_max_error: f32,
+    /// For an animated GIF or WebP, write a frame identical to the one
+    /// before as a frame of its own rather than adding its duration to that
+    /// one (sharp's `keepDuplicateFrames`). Off by default.
+    pub keep_duplicate_frames: bool,
 }
 
 /// Check `value` lies in `range`, naming `name` if not.
@@ -455,6 +470,45 @@ impl EncodeOptions {
         Ok(self)
     }
 
+    /// These options with an animated GIF's `interFrameMaxError`, 0..=32.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::InvalidArgument`] outside 0..=32.
+    pub fn with_inter_frame_max_error(mut self, error: f32) -> Result<Self> {
+        if !(0.0..=32.0).contains(&error) {
+            return Err(PixelsError::invalid_argument(
+                "inter_frame_max_error",
+                format!("must be in 0..=32, got {error}"),
+            ));
+        }
+        self.inter_frame_max_error = error;
+        Ok(self)
+    }
+
+    /// These options with an animated GIF's `interPaletteMaxError`, 0..=256.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PixelsError::InvalidArgument`] outside 0..=256.
+    pub fn with_inter_palette_max_error(mut self, error: f32) -> Result<Self> {
+        if !(0.0..=256.0).contains(&error) {
+            return Err(PixelsError::invalid_argument(
+                "inter_palette_max_error",
+                format!("must be in 0..=256, got {error}"),
+            ));
+        }
+        self.inter_palette_max_error = error;
+        Ok(self)
+    }
+
+    /// These options keeping duplicate animation frames, or merging them.
+    #[must_use]
+    pub const fn with_keep_duplicate_frames(mut self, keep: bool) -> Self {
+        self.keep_duplicate_frames = keep;
+        self
+    }
+
     /// These options with a lossy WebP alpha quality, 0..=100.
     ///
     /// # Errors
@@ -533,6 +587,9 @@ impl Default for EncodeOptions {
             keep_exif: false,
             keep_xmp: false,
             progressive: false,
+            inter_frame_max_error: 0.0,
+            inter_palette_max_error: 3.0,
+            keep_duplicate_frames: false,
         }
     }
 }

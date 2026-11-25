@@ -46,8 +46,13 @@ implementation detail and may change without notice.
   frames reads the whole stream at open. Every animated decoder yields each
   frame composited onto the canvas through `Decoder::advance_frame`,
   matching libgif, libwebp and libjxl frame by frame.
-- GIF v1 scope: full decode (all frames, disposal handled); encode is
-  single-frame + palette quantization. Animation pipelines are v2.
+- GIF scope: full decode (all frames, disposal handled); encode quantizes
+  to a palette, a still or an animation. An animation's frames hold only
+  the rectangle that changed, unchanged pixels transparent; a frame that
+  must clear pixels has the previous frame restore to background; the
+  first frame's palette is global and reused within
+  `inter_palette_max_error`; delays round on the running total; duplicate
+  frames merge unless `keep_duplicate_frames`.
 - WebP v1 scope: decode covers lossy, lossless and alpha, owned and matching
   libwebp exactly (colour conversion included). Encode is **lossy by default**
   at `EncodeOptions::quality`, mapped to the quantizer as libwebp maps it,
