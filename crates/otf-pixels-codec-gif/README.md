@@ -15,7 +15,7 @@
 </div>
 
 > Decodes every GIF frame, interlace layout and disposal method, and encodes a
-> single frame with a quantized palette.
+> still or an animation with a quantized palette.
 
 > [!TIP]
 > **Building an app or a server?** Use [`otf-pixels`](https://crates.io/crates/otf-pixels) instead:
@@ -46,8 +46,8 @@ encoder.finish(&mut out)?;
 
 | Area | Support |
 | --- | --- |
-| Decode | All frames, interlace, transparency, disposal; the engine sees the first frame composited |
-| Encode | One frame, palette quantization to up to 256 colours |
+| Decode | All frames, interlace, transparency, disposal; each frame composited onto the canvas (`Decoder::advance_frame`) |
+| Encode | A still, or an animation whose frames hold only what changed; palette quantization to up to 256 colours, the global palette reused within `interPaletteMaxError` |
 | Checked against | libgif, both directions |
 
 ## API

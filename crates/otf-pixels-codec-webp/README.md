@@ -47,8 +47,8 @@ encoder.finish(&mut out)?;
 
 | Area | Support |
 | --- | --- |
-| Decode | Lossy, lossless, alpha; an animation's first frame |
-| Encode | Lossy at a quality (default), or lossless |
+| Decode | Lossy, lossless, alpha; every frame of an animation, composited as libwebp does |
+| Encode | Lossy at a quality (default), or lossless; animations as `ANIM`/`ANMF`, each frame the changed rectangle |
 | Checked against | libwebp: decodes match exactly, and libwebp reads back every file written |
 
 ## API

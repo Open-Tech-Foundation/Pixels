@@ -49,9 +49,9 @@ encoder.finish(&mut out)?;
 | Area | Support |
 | --- | --- |
 | Decode | Every coding tool: Modular (all predictors, MA trees, RCT, palette, squeeze), VarDCT (all 27 block types, chroma from luma, progressive passes, LF frames), ANS and prefix codes with LZ77, patches, splines, noise, Gaborish, the edge-preserving filter, upsampling, extra channels, blending; JPEG recompression with chroma subsampling; the container (`jxlc`, `jxlp`, `Exif`) and ICC profiles |
-| Decode output | Gray, GrayA, RGB or RGBA at 8 or 16 bits (float samples as F32); an animation's first displayed frame, with its frames and timing reported; orientation, EXIF and ICC reported |
-| Encode | Lossy VarDCT in XYB (the default; `quality` maps to distance as `cjxl` maps it, 90 is distance 1) or lossless Modular; grey or RGB at 8 or 16 bits; a bare codestream |
-| Not yet | Lossy alpha (images with alpha are written lossless); encoder ANS, learned trees, larger transforms, adaptive quantization and filters; animation encode; region decode |
+| Decode output | Gray, GrayA, RGB or RGBA at 8 or 16 bits (float samples as F32); every displayed frame of an animation in turn, as libjxl composites it; orientation, EXIF and ICC reported |
+| Encode | Lossy VarDCT in XYB (the default; `quality` maps to distance as `cjxl` maps it, 90 is distance 1) or lossless Modular; grey or RGB at 8 or 16 bits; a bare codestream; animations, later frames cropped to what changed |
+| Not yet | Lossy alpha (images with alpha are written lossless); encoder ANS, learned trees, larger transforms, adaptive quantization and filters; region decode |
 | Differs from `djxl` | XYB images come out as sRGB and report no ICC profile, where `djxl` converts to the embedded profile; premultiplied alpha is divided out, where `djxl` writes the premultiplied values; orientation is reported, not applied |
 | Checked against | libjxl: 24 files `cjxl` writes across its tools decode to `djxl`'s pixels, lossless exactly and lossy within one level (`tests/reference.rs`); every file written decodes in `djxl`, lossless bit-exactly (`scripts/check-jxl-interop.sh`) |
 | Size | A 960x600 photo, lossless: 266 KB (PNG 327 KB, `cjxl -e3` 245 KB, `-e7` 218 KB); at distance 1: 40 KB at 42.4 dB PSNR (`cjxl -e7` 38.6 KB at 42.7 dB) |
