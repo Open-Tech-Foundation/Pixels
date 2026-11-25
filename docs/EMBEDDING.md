@@ -71,7 +71,8 @@ decodes nothing. What opening does by default, each switchable on
 |---|---|---|
 | `auto_orient` | on | EXIF / HEIF orientation applied, so `metadata()` reports upright dimensions |
 | `to_srgb` | on | an ICC profile is converted to sRGB (matrix/TRC profiles) and dropped |
-| `animated` | off | an animation's first frame is the image; see below |
+| `animated` | off | an animation's first frame is the image; on, every frame is processed; see below |
+| `first_frame`, `frame_count` | 0, all | which frames of an animation (sharp's `page`, `pages`); `with_frames(first, count)` |
 | `page` | 0 | which page of a multi-page TIFF to open; `Image::pages()` counts them |
 | `limits` | 268 MP | images over `max_pixels` fail at the header with `LimitExceeded` |
 
@@ -137,14 +138,25 @@ output keeps all metadata.
 
 ## Animation
 
-v1 processes an animation's first frame, as sharp does by default.
-`Image::animation()` reports what the file holds (frame count, loop count,
-per-frame durations), so the host can decide: serve the original untouched,
-refuse it, or accept the still. Expose an `animated` option in the host API
-from the start and pass it to `OpenOptions::with_animated`. Until the
-multi-frame pipeline exists, it fails as `Unsupported` on animated input
-instead of returning a still, so code written against the option keeps its
-meaning when frames arrive.
+Opened plainly, an animation's first frame is the image, as sharp does by
+default, and `Image::animation()` reports what the file holds (frame
+count, loop count, per-frame durations). With
+`OpenOptions::with_animated(true)` (sharp's `animated: true`), GIF, WebP
+and JPEG XL are processed frame by frame: every op chained on is applied to
+each frame (ADR-0020), `Image::is_animated()` and `frame_count()` say so,
+and `with_frames(first, count)` picks frames (sharp's `page` and `pages`).
+`trim` cuts the box holding every frame's content; `stats` covers every
+frame.
+
+Writing an animated pipeline to a format that holds one image (PNG, JPEG,
+TIFF, AVIF, raw) is `Unsupported`, unlike sharp, which stacks the frames
+silently. The host states which still it wants: `first_frame()` or
+`frame(i)` for one frame, `into_strip()` for all of them stacked top to
+bottom (sharp's result). Built-in encoders do not yet write animated GIF,
+WebP or JPEG XL; `Output::write_with_encoder` takes an encoder of the
+host's own. An animated file is held in memory, compressed, so each pass
+over its frames decodes it afresh; `Limits::with_max_frames` and
+`with_max_animation_pixels` bound the work.
 
 ## Errors
 

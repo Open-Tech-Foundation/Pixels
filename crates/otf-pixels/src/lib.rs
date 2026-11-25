@@ -121,9 +121,11 @@
 //!   keeps them ([`EncodeOptions::keep_exif`], [`EncodeOptions::keep_xmp`]),
 //!   so location data is stripped from uploads by default.
 //!
-//! Not yet: multi-frame (animated) pipelines. They will arrive as an
-//! addition, not a change: [`OpenOptions::animated`] is already reserved
-//! for them.
+//! Animations: with [`OpenOptions::animated`], GIF, WebP and JPEG XL are
+//! processed frame by frame (ADR-0020), and written to a format of one
+//! image only once [`Image::first_frame`], [`Image::frame`] or
+//! [`Image::into_strip`] says which still. Not yet: writing animated GIF,
+//! WebP or JPEG XL with the built-in encoders.
 
 use otf_pixels_core::{BufferSource, Op, Prefixed, Producer, TileBuf};
 use std::sync::Arc;
@@ -191,15 +193,32 @@ pub struct OpenOptions {
     /// output, and [`Image::to_srgb`] converts later. A profile this cannot
     /// convert is kept either way.
     pub to_srgb: bool,
-    /// Ask for every frame of an animated image rather than the first.
+    /// Process every frame of an animated GIF, WebP or JPEG XL rather than
+    /// the first (sharp's `animated`, ADR-0020).
     ///
-    /// Reserved for the multi-frame pipeline, which is not implemented yet:
-    /// set, opening an animated GIF or WebP fails with
-    /// [`PixelsError::Unsupported`] rather than quietly processing one
-    /// frame, so code written against it today states its intent and starts
-    /// working when frames do. Off by default, as in sharp: the first frame
-    /// is the image, and [`Image::animation`] says what was left out.
+    /// Each op chained onto the image is applied to every frame. The result
+    /// can be written to a format that holds an animation; writing it to one
+    /// that holds a single image is [`PixelsError::Unsupported`] until
+    /// [`Image::first_frame`], [`Image::frame`] or [`Image::into_strip`] says
+    /// which still is wanted — nothing is flattened silently. A still opens
+    /// either way. Off by default, as in sharp: the first frame is the
+    /// image, and [`Image::animation`] says what was left out.
+    ///
+    /// The file is held in memory, compressed, so that every pass over the
+    /// frames — the output, and [`Image::trim`] and [`Image::stats`] before
+    /// it — decodes it afresh.
     pub animated: bool,
+    /// The first frame of an animation to read, 0 being the first (sharp's
+    /// `page` for an animated image).
+    ///
+    /// Without `animated`, that frame is the still the image is. A frame past
+    /// the end, or a frame number for a format without frames, is
+    /// [`PixelsError::InvalidArgument`].
+    pub first_frame: u32,
+    /// How many frames to read from `first_frame` on, `None` for the rest
+    /// (sharp's `pages`, where -1 is all). Needs `animated` for more than
+    /// one.
+    pub frame_count: Option<u32>,
     /// Which page of a multi-page document to open, 0 being the first.
     ///
     /// Only TIFF has pages; [`Image::pages`] says how many a file holds.
@@ -228,6 +247,15 @@ impl OpenOptions {
     #[must_use]
     pub const fn with_animated(mut self, animated: bool) -> Self {
         self.animated = animated;
+        self
+    }
+
+    /// The defaults with the frame range replaced: `count` frames from
+    /// `first` on, `None` for the rest (sharp's `page` and `pages`).
+    #[must_use]
+    pub const fn with_frames(mut self, first: u32, count: Option<u32>) -> Self {
+        self.first_frame = first;
+        self.frame_count = count;
         self
     }
 
@@ -260,6 +288,8 @@ impl Default for OpenOptions {
             auto_orient: true,
             to_srgb: true,
             animated: false,
+            first_frame: 0,
+            frame_count: None,
             page: 0,
             limits: Limits::default(),
         }
@@ -306,6 +336,147 @@ pub struct Image {
     density: Option<Density>,
     /// What the source file said about itself, for a decoded image.
     source: Option<Arc<SourceMetadata>>,
+    /// The animated source, when the image was opened with
+    /// [`OpenOptions::animated`] and has frames left to process.
+    frames: Option<Arc<Frames>>,
+}
+
+/// The frames of an animated pipeline (ADR-0020): how to decode the file
+/// again, which node of the graph its source is, and which frames to
+/// replay.
+#[derive(Clone)]
+struct Frames {
+    /// A fresh decoder over the in-memory file, at frame 0.
+    open: Arc<dyn Fn() -> Result<Box<dyn Decoder>> + Send + Sync>,
+    /// The template graph's node for the animated source.
+    source: otf_pixels_core::NodeId,
+    /// The first frame replayed, in the file's numbering.
+    first: u32,
+    /// How long each replayed frame shows.
+    durations: Vec<u32>,
+    /// How many times the animation plays, 0 for forever.
+    loop_count: u32,
+}
+
+impl std::fmt::Debug for Frames {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Frames")
+            .field("first", &self.first)
+            .field("durations", &self.durations)
+            .field("loop_count", &self.loop_count)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Frames {
+    /// How many frames are replayed.
+    fn count(&self) -> u32 {
+        self.durations.len() as u32
+    }
+
+    /// A fresh decoder, on frame `first + index` once it is read.
+    fn decoder_at(&self, index: u32) -> Result<Box<dyn Decoder>> {
+        Ok(Box::new(SkipFrames::new(
+            (self.open)()?,
+            self.first + index,
+        )))
+    }
+
+    /// Run `template` once per frame, over a fresh decode of the file:
+    /// `each` gets the frame's position in the replay and its graph.
+    fn replay(
+        &self,
+        template: &otf_pixels_core::Image,
+        mut each: impl FnMut(usize, &otf_pixels_core::Image) -> Result<()>,
+    ) -> Result<()> {
+        let source = Arc::new(otf_pixels_core::DecodedSource::new(self.decoder_at(0)?));
+        let replay = otf_pixels_core::FrameReplay::new(
+            template,
+            self.source,
+            Arc::clone(&source) as Arc<dyn Producer>,
+        )?;
+        for k in 0..self.count() {
+            if k > 0 && source.advance_frame()?.is_none() {
+                return Err(PixelsError::malformed(
+                    "animation",
+                    format!("the file ended after {k} of {} frames", self.count()),
+                ));
+            }
+            each(k as usize, &replay.graph()?)?;
+        }
+        Ok(())
+    }
+}
+
+/// A decoder that starts `skip` frames in: the frames before are composited
+/// on the way (a later frame may build on them) and never shown.
+#[derive(Debug)]
+struct SkipFrames {
+    inner: Box<dyn Decoder>,
+    skip: u32,
+}
+
+impl SkipFrames {
+    fn new(inner: Box<dyn Decoder>, skip: u32) -> Self {
+        Self { inner, skip }
+    }
+
+    /// Reach the first frame shown, once.
+    fn arrive(&mut self) -> Result<()> {
+        while self.skip > 0 {
+            if self.inner.advance_frame()?.is_none() {
+                return Err(PixelsError::malformed(
+                    "animation",
+                    "the file has fewer frames than its header counted",
+                ));
+            }
+            self.skip -= 1;
+        }
+        Ok(())
+    }
+}
+
+impl Decoder for SkipFrames {
+    fn descriptor(&self) -> ImageDescriptor {
+        self.inner.descriptor()
+    }
+    fn capability(&self) -> otf_pixels_core::DecodeCapability {
+        self.inner.capability()
+    }
+    fn orientation(&self) -> Orientation {
+        self.inner.orientation()
+    }
+    fn animation(&self) -> Option<Animation> {
+        self.inner.animation()
+    }
+    fn icc_profile(&self) -> Option<&[u8]> {
+        self.inner.icc_profile()
+    }
+    fn exif(&self) -> Option<&[u8]> {
+        self.inner.exif()
+    }
+    fn xmp(&self) -> Option<&[u8]> {
+        self.inner.xmp()
+    }
+    fn source_info(&self) -> SourceInfo {
+        self.inner.source_info()
+    }
+    fn advance_frame(&mut self) -> Result<Option<FrameInfo>> {
+        self.arrive()?;
+        self.inner.advance_frame()
+    }
+    fn read_row(&mut self, out: &mut [u8]) -> Result<()> {
+        self.arrive()?;
+        self.inner.read_row(out)
+    }
+    fn read_region(
+        &mut self,
+        region: Region,
+        out: &mut otf_pixels_core::TileMut<'_>,
+    ) -> Result<()> {
+        self.arrive()?;
+        self.inner.read_region(region, out)
+    }
 }
 
 impl Image {
@@ -449,6 +620,16 @@ impl Image {
                 ),
             ));
         }
+        // Frames asked for: an animated format is read into memory, so every
+        // pass over its frames can decode it afresh (ADR-0020).
+        #[cfg(any(feature = "gif", feature = "webp", feature = "jxl"))]
+        if (options.animated || options.first_frame > 0 || options.frame_count.is_some())
+            && matches!(codec.format(), Format::Gif | Format::WebP | Format::Jxl)
+        {
+            let bytes = read_all(stream)?;
+            let decoder = open_bytes(codec.format(), Arc::clone(&bytes), options.limits)?;
+            return Self::decoded(decoder, codec.format(), options, Some(bytes));
+        }
         // Unused when no decoding codec is compiled in, which is a legitimate
         // if degenerate build rather than a mistake.
         let _ = (&stream, options);
@@ -457,37 +638,37 @@ impl Image {
             #[cfg(feature = "png")]
             Format::Png => {
                 let decoder = PngDecoder::new(stream, options.limits)?;
-                Self::decoded(Box::new(decoder), Format::Png, options)
+                Self::decoded(Box::new(decoder), Format::Png, options, None)
             }
             #[cfg(feature = "gif")]
             Format::Gif => {
                 let decoder = GifDecoder::new(stream, options.limits)?;
-                Self::decoded(Box::new(decoder), Format::Gif, options)
+                Self::decoded(Box::new(decoder), Format::Gif, options, None)
             }
             #[cfg(feature = "jpeg")]
             Format::Jpeg => {
                 let decoder = JpegDecoder::new(stream, options.limits)?;
-                Self::decoded(Box::new(decoder), Format::Jpeg, options)
+                Self::decoded(Box::new(decoder), Format::Jpeg, options, None)
             }
             #[cfg(feature = "tiff")]
             Format::Tiff => {
                 let decoder = TiffDecoder::with_page(stream, options.limits, options.page)?;
-                Self::decoded(Box::new(decoder), Format::Tiff, options)
+                Self::decoded(Box::new(decoder), Format::Tiff, options, None)
             }
             #[cfg(feature = "webp")]
             Format::WebP => {
                 let decoder = WebPDecoder::new(stream, options.limits)?;
-                Self::decoded(Box::new(decoder), Format::WebP, options)
+                Self::decoded(Box::new(decoder), Format::WebP, options, None)
             }
             #[cfg(feature = "avif")]
             Format::Avif => {
                 let decoder = AvifDecoder::new(stream, options.limits)?;
-                Self::decoded(Box::new(decoder), Format::Avif, options)
+                Self::decoded(Box::new(decoder), Format::Avif, options, None)
             }
             #[cfg(feature = "jxl")]
             Format::Jxl => {
                 let decoder = JxlDecoder::new(stream, options.limits)?;
-                Self::decoded(Box::new(decoder), Format::Jxl, options)
+                Self::decoded(Box::new(decoder), Format::Jxl, options, None)
             }
             other => Err(PixelsError::unsupported(format!(
                 "{other} was detected but no decoder for it is compiled in"
@@ -508,7 +689,12 @@ impl Image {
         feature = "avif",
         feature = "jxl"
     ))]
-    fn decoded(decoder: Box<dyn Decoder>, format: Format, options: OpenOptions) -> Result<Self> {
+    fn decoded(
+        decoder: Box<dyn Decoder>,
+        format: Format,
+        options: OpenOptions,
+        bytes: Option<Arc<[u8]>>,
+    ) -> Result<Self> {
         let orientation = decoder.orientation();
         let icc = decoder.icc_profile().map(Vec::from);
         let animation = decoder.animation().map(Arc::new);
@@ -522,12 +708,41 @@ impl Image {
         if let Some(block) = exif.as_mut().filter(|_| options.auto_orient) {
             Orientation::Normal.write_to_exif_block(block);
         }
-        if options.animated && animation.is_some() {
-            return Err(PixelsError::unsupported(format!(
-                "{format}: multi-frame (animated) pipelines are not implemented yet; \
-                 open with `animated` off to process the first frame"
-            )));
+        // Which frames: `first_frame` on, `frame_count` of them.
+        let total = animation.as_ref().map_or(1, |a| a.frame_count);
+        let first = options.first_frame;
+        if first >= total {
+            return Err(PixelsError::invalid_argument(
+                "first_frame",
+                format!("frame {first} was asked for, but the {format} has {total}"),
+            ));
         }
+        let available = total - first;
+        let count = options
+            .frame_count
+            .unwrap_or(if options.animated { available } else { 1 });
+        if count == 0 || count > available {
+            return Err(PixelsError::invalid_argument(
+                "frame_count",
+                format!("{count} frames from frame {first} were asked for, but {available} remain"),
+            ));
+        }
+        if count > 1 && !options.animated {
+            return Err(PixelsError::invalid_argument(
+                "frame_count",
+                "more than one frame needs `animated`",
+            ));
+        }
+        if count > 1 {
+            options
+                .limits
+                .check_animation(count, stored.width, stored.height)?;
+        }
+        let decoder: Box<dyn Decoder> = if first > 0 {
+            Box::new(SkipFrames::new(decoder, first))
+        } else {
+            decoder
+        };
         let source = SourceMetadata::new(
             format,
             stored,
@@ -540,6 +755,27 @@ impl Image {
             info,
         );
         let mut image = Self::from_decoder(decoder, format).with_icc_profile(icc);
+        if count > 1 {
+            let (Some(bytes), Some(timing)) = (bytes, animation.as_deref()) else {
+                return Err(PixelsError::graph(
+                    "an animation was opened without its bytes",
+                ));
+            };
+            let limits = options.limits;
+            let open = move || open_bytes(format, Arc::clone(&bytes), limits);
+            let span = first as usize..(first + count) as usize;
+            image.frames = Some(Arc::new(Frames {
+                open: Arc::new(open),
+                source: image.graph()?.node().id(),
+                first,
+                durations: timing
+                    .frame_durations_ms
+                    .get(span)
+                    .unwrap_or_default()
+                    .to_vec(),
+                loop_count: timing.loop_count,
+            }));
+        }
         image.animation = animation;
         image.pages = pages;
         image.exif = exif.map(Arc::from);
@@ -578,6 +814,7 @@ impl Image {
             xmp: None,
             density: None,
             source: None,
+            frames: None,
             inner: Ok(otf_pixels_core::Image::from_producer(producer, format)),
         }
     }
@@ -946,6 +1183,9 @@ impl Image {
 
     /// [`Image::trim`], with its error surfaced.
     fn trimmed(self, options: Trim) -> Result<Self> {
+        if let Some(frames) = self.frames.clone() {
+            return self.trimmed_frames(&frames, options);
+        }
         let format = self.metadata()?.format;
         // Rewritten as a terminal would, so a resize before the trim still
         // decodes a JPEG at a reduced size.
@@ -986,6 +1226,145 @@ impl Image {
             xmp: self.xmp,
             density: self.density,
             source: self.source,
+            frames: None,
+        })
+    }
+
+    /// [`Image::trim`] of an animation: the box that holds every frame's
+    /// content, cut from each frame. A frame that is all background adds
+    /// nothing; an animation that is all background is left as it is.
+    fn trimmed_frames(self, frames: &Frames, options: Trim) -> Result<Self> {
+        let template = self.graph()?.clone();
+        let descriptor = template.descriptor();
+        let mut union: Option<(u32, u32, u32, u32)> = None;
+        frames.replay(&template, |_, graph| {
+            let pixels = render(graph)?;
+            if let Some(kept) = options.find(&pixels.as_tile()?)? {
+                let (right, bottom) = (kept.x + kept.width, kept.y + kept.height);
+                union = Some(
+                    union.map_or((kept.x, kept.y, right, bottom), |(l, t, r, b)| {
+                        (l.min(kept.x), t.min(kept.y), r.max(right), b.max(bottom))
+                    }),
+                );
+            }
+            Ok(())
+        })?;
+        let Some((left, top, right, bottom)) = union else {
+            return Ok(Self {
+                trim_offset: Some((0, 0)),
+                ..self
+            });
+        };
+        let cut = Region::new(left, top, right - left, bottom - top);
+        if cut == descriptor.region() {
+            return Ok(Self {
+                trim_offset: Some((0, 0)),
+                ..self
+            });
+        }
+        let mut cropped = self.crop(cut.x, cut.y, cut.width, cut.height);
+        cropped.trim_offset = Some((cut.x, cut.y));
+        Ok(cropped)
+    }
+
+    /// Whether this pipeline processes an animation frame by frame: opened
+    /// with [`OpenOptions::animated`], with more than one frame selected,
+    /// and not yet turned into a still.
+    #[must_use]
+    pub fn is_animated(&self) -> bool {
+        self.frames.is_some()
+    }
+
+    /// How many frames this pipeline produces: 1 for a still.
+    #[must_use]
+    pub fn frame_count(&self) -> u32 {
+        self.frames.as_ref().map_or(1, |f| f.count())
+    }
+
+    /// The first frame of an animated pipeline, as a still; a still as it
+    /// is. Shorthand for [`Image::frame`]`(0)`.
+    #[must_use]
+    pub fn first_frame(self) -> Self {
+        self.frame(0)
+    }
+
+    /// Frame `index` of an animated pipeline (counted from the first frame
+    /// selected), with every op so far applied, as a still: what a format
+    /// that holds one image can be given. A still has only frame 0.
+    ///
+    /// The ops chained after this see one image, so they run once.
+    #[must_use]
+    pub fn frame(self, index: u32) -> Self {
+        self.framed(index).unwrap_or_else(Self::failed)
+    }
+
+    fn framed(self, index: u32) -> Result<Self> {
+        let Some(frames) = self.frames.clone() else {
+            if index == 0 {
+                return Ok(self);
+            }
+            self.graph()?;
+            return Err(PixelsError::invalid_argument(
+                "index",
+                format!("frame {index} of a still was asked for; it has only frame 0"),
+            ));
+        };
+        if index >= frames.count() {
+            return Err(PixelsError::invalid_argument(
+                "index",
+                format!(
+                    "frame {index} was asked for, but {} are selected",
+                    frames.count()
+                ),
+            ));
+        }
+        let source = otf_pixels_core::DecodedSource::new(frames.decoder_at(index)?);
+        let graph = otf_pixels_core::rebind_source(self.graph()?, frames.source, Arc::new(source))?;
+        Ok(Self {
+            inner: Ok(graph),
+            frames: None,
+            ..self
+        })
+    }
+
+    /// Every frame of an animated pipeline, with every op so far applied,
+    /// stacked top to bottom into one still: the first frame's rows, then
+    /// the second's, and so on — a sprite sheet, and what sharp hands a
+    /// format that holds one image. A still is returned as it is.
+    ///
+    /// The ops chained after this see the strip, so a resize scales the
+    /// whole sheet. Like [`Image::trim`], building it runs the frames before
+    /// it, and the strip is held in memory.
+    #[must_use]
+    pub fn into_strip(self) -> Self {
+        self.stripped().unwrap_or_else(Self::failed)
+    }
+
+    fn stripped(self) -> Result<Self> {
+        let Some(frames) = self.frames.clone() else {
+            return Ok(self);
+        };
+        let template = self.graph()?.clone();
+        let frame = template.descriptor();
+        let height = frame
+            .height
+            .checked_mul(frames.count())
+            .ok_or_else(|| PixelsError::invalid_argument("frames", "the strip is too tall"))?;
+        let descriptor = frame.resized(frame.width, height)?;
+        let strip = StripSource {
+            descriptor,
+            frames,
+            template,
+            pixels: std::sync::OnceLock::new(),
+        };
+        let format = self.metadata()?.format;
+        Ok(Self {
+            inner: Ok(otf_pixels_core::Image::from_producer(
+                Arc::new(strip),
+                format,
+            )),
+            frames: None,
+            ..self
         })
     }
 
@@ -1039,7 +1418,13 @@ impl Image {
             self.trim_offset,
             self.exif,
         );
-        let (xmp, density, source) = (self.xmp, self.density, self.source);
+        let (xmp, density, source, frames) = (self.xmp, self.density, self.source, self.frames);
+        if overlay.frames.is_some() {
+            return Self::failed(PixelsError::unsupported(
+                "an animated overlay is not composited frame by frame; \
+                 pass `overlay.first_frame()` (or `frame(i)`) for a still one",
+            ));
+        }
         let (base, over) = match (self.inner, overlay.inner) {
             (Ok(base), Ok(over)) => (base, over),
             // The first error wins, matching how a single chain behaves.
@@ -1056,6 +1441,7 @@ impl Image {
             xmp,
             density,
             source,
+            frames,
         }
     }
 
@@ -1076,15 +1462,17 @@ impl Image {
             xmp: None,
             density: None,
             source: None,
+            frames: None,
         }
     }
 
     /// The source file's animation, if it has more than one frame.
     ///
-    /// The pipeline processes the first frame, so this describes what the
-    /// file holds rather than what will be written: frame count, loop count
-    /// and per-frame durations, for a caller to decide whether a still is
-    /// what it wants (see [`OpenOptions::animated`]).
+    /// This describes what the file holds — frame count, loop count and
+    /// per-frame durations — whatever the pipeline does with it: opened
+    /// plainly, the pipeline processes the first frame; with
+    /// [`OpenOptions::animated`], [`Image::frame_count`] says how many it
+    /// processes.
     #[must_use]
     pub fn animation(&self) -> Option<&Animation> {
         self.animation.as_deref()
@@ -1240,12 +1628,18 @@ impl Image {
     /// Pixel statistics of this pipeline's result (sharp's `stats()`): per
     /// channel extremes, sums, mean and deviation, whether it is opaque, its
     /// entropy and sharpness, and its dominant colour. A terminal: it runs
-    /// the pipeline.
+    /// the pipeline. For an animation, the statistics cover every frame, as
+    /// of [`Image::into_strip`].
     ///
     /// # Errors
     ///
     /// As [`Output::bytes`].
     pub fn stats(&self) -> Result<Stats> {
+        if self.frames.is_some() {
+            // Every frame, as sharp's statistics cover its stacked frames:
+            // positions are in the strip.
+            return self.clone().into_strip().stats();
+        }
         let descriptor = self.descriptor()?;
         let pixels = self
             .clone()
@@ -1277,6 +1671,7 @@ impl Image {
             xmp: self.xmp,
             density: self.density,
             source: self.source,
+            frames: self.frames,
             inner: match self.inner {
                 Ok(image) => image.apply(op).map_err(Arc::new),
                 // An earlier failure short-circuits: later ops never run.
@@ -1515,14 +1910,37 @@ impl Output {
     /// # Errors
     ///
     /// As [`Output::write`].
-    pub fn write_with_stats(self, mut sink: impl Sink) -> Result<RunStats> {
+    pub fn write_with_stats(self, sink: impl Sink) -> Result<RunStats> {
+        let mut encoder = encoder_for(self.format, self.options)?;
+        self.write_with_encoder(encoder.as_mut(), sink)
+    }
+
+    /// Stream to `sink` through `encoder` instead of the one the format
+    /// names: the extension point for an encoder living outside this crate,
+    /// as [`Image::from_decoder`] is for decoders. The format still decides
+    /// the pixel format the pipeline is converted to.
+    ///
+    /// An animated pipeline ([`Image::is_animated`]) is written frame by
+    /// frame when `encoder` [supports animation](Encoder::supports_animation).
+    ///
+    /// # Errors
+    ///
+    /// As [`Output::write`], and [`PixelsError::Unsupported`] for an
+    /// animated pipeline and an encoder of one image.
+    pub fn write_with_encoder(
+        self,
+        encoder: &mut dyn Encoder,
+        mut sink: impl Sink,
+    ) -> Result<RunStats> {
+        if let Some(frames) = self.image.frames.clone() {
+            return self.write_frames(&frames, encoder, &mut sink, false);
+        }
         // Rewritten before an evaluator is chosen, so the scheduler and the
         // reference evaluator are handed the same graph and keep agreeing.
         let encodable = self.image.clone().encodable_as(self.format);
         let (image, reduction) = otf_pixels_core::shrink_on_load(encodable.graph()?)?;
         let descriptor = image.descriptor();
-        let mut encoder = encoder_for(self.format, self.options)?;
-        self.describe(encoder.as_mut())?;
+        self.describe(encoder)?;
         encoder.write_header(&descriptor, &mut sink)?;
 
         // The scheduler delivers tiles; an encoder wants whole rows in order.
@@ -1562,19 +1980,96 @@ impl Output {
     ///
     /// As [`Output::bytes`].
     pub fn bytes_via_reference(self) -> Result<Vec<u8>> {
+        let mut encoder = encoder_for(self.format, self.options)?;
+        self.bytes_via_reference_with(encoder.as_mut())
+    }
+
+    /// [`Output::bytes_via_reference`] through `encoder`, as
+    /// [`Output::write_with_encoder`] is to [`Output::write`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Output::write_with_encoder`].
+    pub fn bytes_via_reference_with(self, encoder: &mut dyn Encoder) -> Result<Vec<u8>> {
+        if let Some(frames) = self.image.frames.clone() {
+            let mut sink = Vec::new();
+            self.write_frames(&frames, encoder, &mut sink, true)?;
+            return Ok(sink);
+        }
         // The same rewrite the scheduled path applies. Without it the oracle
         // would evaluate a different graph and the two would disagree wherever
         // shrink-on-load fired — which would look like a scheduler bug.
         let encodable = self.image.clone().encodable_as(self.format);
         let (image, _) = otf_pixels_core::shrink_on_load(encodable.graph()?)?;
         let descriptor = image.descriptor();
-        let mut encoder = encoder_for(self.format, self.options)?;
-        self.describe(encoder.as_mut())?;
+        self.describe(encoder)?;
         let mut sink = Vec::with_capacity(descriptor.byte_len().unwrap_or_default());
         encoder.write_header(&descriptor, &mut sink)?;
         otf_pixels_core::evaluate_rows(&image, |_, row| encoder.write_row(row, &mut sink))?;
         encoder.finish(&mut sink)?;
         Ok(sink)
+    }
+
+    /// Write every frame of an animated pipeline through `encoder`, on the
+    /// scheduler or, with `reference`, the reference evaluator.
+    fn write_frames(
+        &self,
+        frames: &Frames,
+        encoder: &mut dyn Encoder,
+        sink: &mut dyn Sink,
+        reference: bool,
+    ) -> Result<RunStats> {
+        if !encoder.supports_animation() {
+            return Err(PixelsError::unsupported(format!(
+                "{} holds one image, and this pipeline has {} frames: call \
+                 `first_frame()` or `frame(i)` for one of them, or `into_strip()` \
+                 for all of them stacked; or write an animated format",
+                self.format,
+                frames.count()
+            )));
+        }
+        let template = self
+            .image
+            .clone()
+            .encodable_as(self.format)
+            .graph()?
+            .clone();
+        let descriptor = template.descriptor();
+        encoder.set_animation(frames.loop_count)?;
+        self.describe(encoder)?;
+        encoder.write_header(&descriptor, sink)?;
+        let scheduler = if reference {
+            None
+        } else {
+            Some(match (&self.shared, self.scheduler) {
+                (Some(shared), _) => Arc::clone(shared),
+                (None, Some(options)) => Arc::new(Scheduler::new(options)?),
+                (None, None) => default_scheduler()?,
+            })
+        };
+        let mut total = RunStats::default();
+        frames.replay(&template, |k, graph| {
+            let duration = frames.durations.get(k).copied().unwrap_or(0);
+            encoder.begin_frame(duration, sink)?;
+            match &scheduler {
+                Some(scheduler) => {
+                    let mut rows = RowAssembler::new(descriptor);
+                    let stats = scheduler.run(graph, |region, tile| {
+                        rows.accept(region, tile, &mut |row| encoder.write_row(row, sink))
+                    })?;
+                    rows.finish(&mut |row| encoder.write_row(row, sink))?;
+                    total.output_tiles += stats.output_tiles;
+                    total.materialized_nodes += stats.materialized_nodes;
+                    total.peak_bytes = total.peak_bytes.max(stats.peak_bytes);
+                }
+                None => {
+                    otf_pixels_core::evaluate_rows(graph, |_, row| encoder.write_row(row, sink))?;
+                }
+            }
+            encoder.end_frame(sink)
+        })?;
+        encoder.finish(sink)?;
+        Ok(total)
     }
 
     /// Run the pipeline, collecting encoded bytes into a [`Vec`].
@@ -1594,6 +2089,77 @@ impl Output {
         let mut buffer = Vec::with_capacity(hint);
         self.write(&mut buffer)?;
         Ok(buffer)
+    }
+}
+
+/// Run `graph` on the default scheduler into one buffer.
+fn render(graph: &otf_pixels_core::Image) -> Result<TileBuf> {
+    let mut pixels = TileBuf::for_image(&graph.descriptor())?;
+    {
+        let mut view = pixels.as_tile_mut()?;
+        default_scheduler()?.run(graph, |region, tile| {
+            otf_pixels_core::copy_region(tile, &mut view, region)
+        })?;
+    }
+    Ok(pixels)
+}
+
+/// [`Image::into_strip`]'s source: every frame of a replay, stacked, built
+/// the first time any of it is asked for.
+#[derive(Debug)]
+struct StripSource {
+    descriptor: ImageDescriptor,
+    frames: Arc<Frames>,
+    template: otf_pixels_core::Image,
+    /// The strip, or why it could not be built.
+    pixels: std::sync::OnceLock<std::result::Result<Arc<TileBuf>, Arc<PixelsError>>>,
+}
+
+impl StripSource {
+    fn build(&self) -> Result<TileBuf> {
+        let mut strip = TileBuf::for_image(&self.descriptor)?;
+        let height = self.template.descriptor().height;
+        {
+            let mut view = strip.as_tile_mut()?;
+            self.frames.replay(&self.template, |k, graph| {
+                let frame = render(graph)?;
+                let frame = frame.as_tile()?;
+                for y in 0..height {
+                    let (Some(from), Some(to)) =
+                        (frame.row(y), view.row_mut(y + height * k as u32))
+                    else {
+                        return Err(PixelsError::graph("a strip row is missing"));
+                    };
+                    to.copy_from_slice(from);
+                }
+                Ok(())
+            })?;
+        }
+        Ok(strip)
+    }
+}
+
+impl Producer for StripSource {
+    fn name(&self) -> &'static str {
+        "strip"
+    }
+
+    fn descriptor(&self) -> ImageDescriptor {
+        self.descriptor
+    }
+
+    fn capability(&self) -> otf_pixels_core::DecodeCapability {
+        // Held whole once built.
+        otf_pixels_core::DecodeCapability::Regions
+    }
+
+    fn produce(&self, region: Region, output: &mut otf_pixels_core::TileMut<'_>) -> Result<()> {
+        let pixels = self
+            .pixels
+            .get_or_init(|| self.build().map(Arc::new).map_err(Arc::new))
+            .as_ref()
+            .map_err(rebuild)?;
+        otf_pixels_core::copy_region(&pixels.as_tile()?, output, region)
     }
 }
 
@@ -1706,6 +2272,55 @@ impl RowAssembler {
 ///
 /// Raw is deliberately absent: it has no magic bytes, so it can only be
 /// requested, never detected. Adding it here would make it match everything.
+#[cfg(any(feature = "gif", feature = "webp", feature = "jxl"))]
+/// The most compressed bytes of an animation held in memory.
+const MAX_ANIMATION_BYTES: usize = 512 * 1024 * 1024;
+
+#[cfg(any(feature = "gif", feature = "webp", feature = "jxl"))]
+/// Read the rest of `stream`, for an animation decoded more than once.
+fn read_all(mut stream: impl Source) -> Result<Arc<[u8]>> {
+    let mut bytes = Vec::new();
+    let mut chunk = vec![0_u8; 64 * 1024];
+    loop {
+        match stream.read(&mut chunk)? {
+            0 => return Ok(Arc::from(bytes)),
+            n => bytes.extend_from_slice(chunk.get(..n).unwrap_or_default()),
+        }
+        if bytes.len() > MAX_ANIMATION_BYTES {
+            return Err(PixelsError::unsupported(format!(
+                "animations over {} MiB are not read",
+                MAX_ANIMATION_BYTES >> 20
+            )));
+        }
+    }
+}
+
+#[cfg(any(
+    feature = "png",
+    feature = "gif",
+    feature = "jpeg",
+    feature = "tiff",
+    feature = "webp",
+    feature = "avif",
+    feature = "jxl"
+))]
+/// A decoder for an in-memory file of an animated `format`.
+fn open_bytes(format: Format, bytes: Arc<[u8]>, limits: Limits) -> Result<Box<dyn Decoder>> {
+    let cursor = std::io::Cursor::new(bytes);
+    let _ = (&cursor, limits);
+    match format {
+        #[cfg(feature = "gif")]
+        Format::Gif => Ok(Box::new(GifDecoder::new(cursor, limits)?)),
+        #[cfg(feature = "webp")]
+        Format::WebP => Ok(Box::new(WebPDecoder::new(cursor, limits)?)),
+        #[cfg(feature = "jxl")]
+        Format::Jxl => Ok(Box::new(JxlDecoder::new(cursor, limits)?)),
+        other => Err(PixelsError::unsupported(format!(
+            "{other} was detected but no decoder for it is compiled in"
+        ))),
+    }
+}
+
 fn sniffing_codecs() -> Vec<Box<dyn Codec>> {
     let codecs: Vec<Box<dyn Codec>> = vec![
         #[cfg(feature = "png")]

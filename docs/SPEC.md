@@ -34,15 +34,18 @@ implementation detail and may change without notice.
   block or chunk is reported as absent. EXIF and XMP are written only when
   an output keeps them, density when set or kept; see EMBEDDING.md for
   where each format puts them. PNG text after the image data is not read.
-- Animation (GIF, WebP, JPEG XL): v1 processes the **first frame**, as sharp does by
-  default, and reports what the file holds through `Image::animation` (frame
-  count, loop count, per-frame durations). `OpenOptions::animated` is reserved
-  for the multi-frame pipeline: set, an animated input is refused as
-  `Unsupported` rather than flattened. Counting GIF frames reads the whole
-  stream at open; its compressed bytes are buffered (at most 512 MiB).
-  Every animated decoder already yields each frame composited onto the
-  canvas through `Decoder::advance_frame`, matching libgif, libwebp and
-  libjxl frame by frame (ADR-0020).
+- Animation (GIF, WebP, JPEG XL): opened plainly, the **first frame** is the
+  image, as sharp does by default, and `Image::animation` reports what the
+  file holds (frame count, loop count, per-frame durations). With
+  `OpenOptions::animated`, the pipeline replays one graph per frame
+  (ADR-0020); `OpenOptions::with_frames` picks frames. An animated pipeline
+  written to a format of one image is `Unsupported` until `first_frame`,
+  `frame(i)` or `into_strip` says which still; `trim` and `stats` cover every
+  frame; an animated overlay is refused. The file is held in memory,
+  compressed (at most 512 MiB), and decoded afresh per pass; counting GIF
+  frames reads the whole stream at open. Every animated decoder yields each
+  frame composited onto the canvas through `Decoder::advance_frame`,
+  matching libgif, libwebp and libjxl frame by frame.
 - GIF v1 scope: full decode (all frames, disposal handled); encode is
   single-frame + palette quantization. Animation pipelines are v2.
 - WebP v1 scope: decode covers lossy, lossless and alpha, owned and matching

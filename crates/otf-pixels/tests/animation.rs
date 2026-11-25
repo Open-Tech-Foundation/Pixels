@@ -1,9 +1,9 @@
 //! Animated input through the public facade.
 //!
-//! v1 processes an animation's first frame, as sharp does by default, and
-//! says so: [`Image::animation`] reports what the file holds, and asking for
-//! every frame ([`OpenOptions::animated`]) is refused until the multi-frame
-//! pipeline exists, rather than quietly handing back a still.
+//! Opened plainly, an animation is its first frame, as sharp does by
+//! default, and [`Image::animation`] reports what the file holds. Opened
+//! with [`OpenOptions::animated`], every frame is processed; the frame
+//! pipeline itself is checked in `animated_pipeline.rs`.
 
 #![cfg(all(feature = "gif", feature = "webp", feature = "png", feature = "raw"))]
 #![allow(
@@ -58,18 +58,28 @@ fn stills_report_no_animation() {
 }
 
 #[test]
-fn asking_for_every_frame_is_refused_until_frames_are_supported() {
+fn an_animated_pipeline_says_which_still_to_write_rather_than_flattening() {
     let animated = OpenOptions::default().with_animated(true);
-    for (codec, name) in [
-        ("gif", "animation.gif"),
-        ("webp", "animated/anim_timing.webp"),
+    for (codec, name, frames) in [
+        ("gif", "animation.gif", 4),
+        ("webp", "animated/anim_timing.webp", 3),
     ] {
-        let error = Image::open_with(codec_fixture(codec, name), animated).unwrap_err();
+        let image = Image::open_with(codec_fixture(codec, name), animated).unwrap();
+        assert!(image.is_animated(), "{name}");
+        assert_eq!(image.frame_count(), frames, "{name}");
+        let error = image
+            .output(Format::Png, EncodeOptions::default())
+            .bytes()
+            .unwrap_err();
         assert_eq!(error.code(), ErrorCode::Unsupported, "{name}");
-        assert!(error.to_string().contains("animated"), "{error}");
+        for hint in ["first_frame()", "frame(i)", "into_strip()"] {
+            assert!(error.to_string().contains(hint), "{error}");
+        }
     }
-    // A still opens either way: there is only one frame to give.
-    assert!(Image::open_with(codec_fixture("gif", "static.gif"), animated).is_ok());
+    // A still opens either way, and is not animated.
+    let still = Image::open_with(codec_fixture("gif", "static.gif"), animated).unwrap();
+    assert!(!still.is_animated());
+    assert_eq!(still.frame_count(), 1);
 }
 
 #[test]

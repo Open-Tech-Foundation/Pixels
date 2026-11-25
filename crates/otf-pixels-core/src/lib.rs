@@ -53,6 +53,7 @@ mod codec;
 mod error;
 mod eval;
 pub mod exif;
+mod frames;
 mod geometry;
 mod graph;
 mod io;
@@ -76,6 +77,7 @@ pub use codec::{
 };
 pub use error::{ErrorCode, Limit, PixelsError, Result};
 pub use eval::{demand, evaluate, evaluate_rows};
+pub use frames::{FrameReplay, rebind_source};
 pub use geometry::{ImageDescriptor, Limits, Region};
 pub use graph::{Image, Node, NodeId};
 pub use io::{Prefixed, Sink, Source};

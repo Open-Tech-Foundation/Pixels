@@ -177,6 +177,16 @@ impl Image {
         }
     }
 
+    /// An image rooted at `node`, reporting this image's container format:
+    /// a handle on a sub-graph of this one.
+    #[must_use]
+    pub(crate) fn with_node(&self, node: Arc<Node>) -> Self {
+        Self {
+            node,
+            format: self.format,
+        }
+    }
+
     /// The graph node this handle points at.
     #[must_use]
     pub fn node(&self) -> &Arc<Node> {

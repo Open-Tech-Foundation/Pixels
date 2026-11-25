@@ -147,6 +147,38 @@ impl DecodedSource {
         }
     }
 
+    /// Move the decoder to the next frame of an animation
+    /// ([`Decoder::advance_frame`]) and start producing it from its first
+    /// row; `None` once there are no more.
+    ///
+    /// A graph that was read for the previous frame must not be run again
+    /// over this source: the scheduler caches tiles by node, so its tiles
+    /// would be the old frame's. Rebuild it with [`crate::FrameReplay`],
+    /// which gives every node above the source a fresh identity.
+    ///
+    /// # Errors
+    ///
+    /// As [`Decoder::advance_frame`], or [`PixelsError::Malformed`] if an
+    /// earlier read already failed.
+    pub fn advance_frame(&self) -> Result<Option<crate::FrameInfo>> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| PixelsError::graph("decoder state was poisoned by a panicking thread"))?;
+        let DecodeState::Reading { decoder, cursor } = &mut *state else {
+            if let DecodeState::Failed(detail) = &*state {
+                return Err(PixelsError::malformed("stream", detail.clone()));
+            }
+            return Err(PixelsError::graph("decoder state changed unexpectedly"));
+        };
+        let next = decoder.advance_frame()?;
+        *cursor = 0;
+        if let Ok(mut window) = self.window.lock() {
+            *window = None;
+        }
+        Ok(next)
+    }
+
     /// The shape currently being produced.
     ///
     /// A poisoned lock still holds a valid descriptor — the value is `Copy`

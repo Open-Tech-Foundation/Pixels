@@ -29,6 +29,19 @@ versioning: [SemVer](https://semver.org/).
   an error when it is reached, not when the file opens.
 - Fuzz targets for GIF and WebP decode, walking every frame of an
   animation (`gif_decode`, `webp_decode`), run by `scripts/fuzz.sh`.
+- The multi-frame pipeline (ADR-0020): with `OpenOptions::animated`,
+  every op chained onto a GIF, WebP or JPEG XL animation applies to each
+  frame, one graph replayed per frame with fresh node identities (core's
+  `FrameReplay`, `rebind_source`, `DecodedSource::advance_frame`).
+  `OpenOptions::with_frames(first, count)` picks frames (sharp's `page`
+  and `pages`); `Image::is_animated`, `frame_count`, `first_frame`,
+  `frame(i)` and `into_strip` (the frames stacked into one still); `trim`
+  cuts the box holding every frame; `stats` covers every frame. Writing an
+  animation to a format of one image is `Unsupported` until a still is
+  chosen. A still overlay is evaluated once and drawn on every frame; an
+  animated overlay is refused. `Output::write_with_encoder` and
+  `bytes_via_reference_with` take an encoder from outside the crate.
+  `max_frames` and `max_animation_pixels` are checked at open.
 - JPEG XL implements the frame protocol: each displayed frame decodes in
   turn, blended from the reference frames earlier ones saved, checked
   against `djxl --output_frames` on five animations (lossless exactly,
@@ -50,6 +63,8 @@ versioning: [SemVer](https://semver.org/).
   any-angle rotate.
 
 ### Changed
+- `OpenOptions::animated` works instead of being refused: an animated GIF,
+  WebP or JPEG XL opened with it is processed frame by frame.
 - ADR-0020 records how animation will work: one graph replayed per
   frame, GIF/WebP/JPEG XL read and written, and no silent flattening to a
   still format (`first_frame` or `into_strip` must be asked for).

@@ -58,6 +58,8 @@ jxl = ["dep:otf-pixels-codec-jxl"]
 # outside this workspace.
 image = { version = "0.25", default-features = false }
 fast_image_resize = "6"
+# The frame-protocol test doubles (`testing::read_frames`).
+otf-pixels-core = { workspace = true, features = ["testing"] }
 
 [[bench]]
 name = "ops"
