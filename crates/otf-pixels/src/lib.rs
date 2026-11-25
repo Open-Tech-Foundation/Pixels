@@ -2134,6 +2134,8 @@ impl Output {
                     let stats = scheduler.run(graph, |region, tile| {
                         rows.accept(region, tile, &mut |row| encoder.write_row(row, sink))
                     })?;
+                    // This frame's graph never runs again.
+                    scheduler.forget(graph);
                     rows.finish(&mut |row| encoder.write_row(row, sink))?;
                     total.output_tiles += stats.output_tiles;
                     total.materialized_nodes += stats.materialized_nodes;
@@ -2172,12 +2174,15 @@ impl Output {
 /// Run `graph` on the default scheduler into one buffer.
 fn render(graph: &otf_pixels_core::Image) -> Result<TileBuf> {
     let mut pixels = TileBuf::for_image(&graph.descriptor())?;
+    let scheduler = default_scheduler()?;
     {
         let mut view = pixels.as_tile_mut()?;
-        default_scheduler()?.run(graph, |region, tile| {
+        scheduler.run(graph, |region, tile| {
             otf_pixels_core::copy_region(tile, &mut view, region)
         })?;
     }
+    // Rendered whole, so nothing of it is asked for again.
+    scheduler.forget(graph);
     Ok(pixels)
 }
 

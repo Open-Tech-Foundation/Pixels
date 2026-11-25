@@ -213,6 +213,18 @@ impl Scheduler {
         &self.cache
     }
 
+    /// Drop the cached tiles of every node in `image`'s graph: for a graph
+    /// that will not run again, such as an animation's frame once written
+    /// (each frame is a graph of fresh nodes, so its tiles would only take
+    /// up the cache's budget). Other pipelines' tiles stay.
+    pub fn forget(&self, image: &Image) {
+        let nodes = dependency_order(image.node())
+            .iter()
+            .map(|node| node.id())
+            .collect();
+        self.cache.forget(&nodes);
+    }
+
     /// Evaluate `image`, handing each output tile to `consume` in order.
     ///
     /// `consume` is called on the calling thread, in tile order, so a sink may

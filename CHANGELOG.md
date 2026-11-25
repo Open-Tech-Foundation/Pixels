@@ -101,6 +101,10 @@ versioning: [SemVer](https://semver.org/).
   any-angle rotate.
 
 ### Changed
+- An animated pipeline no longer fills the scheduler's tile cache with
+  frames that will not be read again: each frame's tiles are dropped once
+  it is written (`Scheduler::forget`, `TileCache::forget`). A 100-frame
+  480x270 GIF resized and re-encoded peaks at 11 MB instead of 80.
 - `OpenOptions::animated` works instead of being refused: an animated GIF,
   WebP or JPEG XL opened with it is processed frame by frame.
 - ADR-0020 records how animation will work: one graph replayed per

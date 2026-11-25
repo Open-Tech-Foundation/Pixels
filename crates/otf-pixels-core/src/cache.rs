@@ -206,6 +206,24 @@ impl TileCache {
         self.lock().stats
     }
 
+    /// Drop every tile of the nodes in `nodes`, which no run will ask for
+    /// again: an animation's frame, once written (ADR-0020). Other
+    /// pipelines' tiles stay.
+    pub fn forget(&self, nodes: &std::collections::HashSet<crate::NodeId>) {
+        let mut inner = self.lock();
+        let gone: Vec<(TileKey, u64, usize)> = inner
+            .entries
+            .iter()
+            .filter(|(key, _)| nodes.contains(&key.node))
+            .map(|(key, entry)| (*key, entry.tick, entry.bytes))
+            .collect();
+        for (key, tick, bytes) in gone {
+            inner.entries.remove(&key);
+            inner.recency.remove(&tick);
+            inner.bytes -= bytes;
+        }
+    }
+
     /// Drop every retained tile, keeping the accumulated statistics.
     pub fn clear(&self) {
         let mut inner = self.lock();
@@ -475,5 +493,28 @@ mod tests {
         // The cache still works.
         assert!(cache.get(&k).is_some());
         cache.insert(key(Region::from_size(8, 1)), tile(8));
+    }
+
+    #[test]
+    fn forgetting_nodes_drops_only_their_tiles() {
+        let cache = TileCache::new(1 << 20);
+        let a = fresh_node_id();
+        let b = fresh_node_id();
+        let tile = || {
+            std::sync::Arc::new(
+                TileBuf::zeroed(Region::new(0, 0, 4, 4), crate::PixelFormat::Gray8).unwrap(),
+            )
+        };
+        cache.insert(TileKey::new(a, Region::new(0, 0, 4, 4)), tile());
+        cache.insert(TileKey::new(a, Region::new(4, 0, 4, 4)), tile());
+        cache.insert(TileKey::new(b, Region::new(0, 0, 4, 4)), tile());
+        cache.forget(&std::iter::once(a).collect());
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.bytes_used(), 16);
+        assert!(
+            cache
+                .get(&TileKey::new(b, Region::new(0, 0, 4, 4)))
+                .is_some()
+        );
     }
 }
