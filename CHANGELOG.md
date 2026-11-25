@@ -24,6 +24,8 @@ versioning: [SemVer](https://semver.org/).
   any-angle rotate.
 
 ### Changed
+- The `otf-pixels` crate docs no longer list arbitrary-angle rotation as
+  missing.
 - `Image::rotate` with an angle that is not a multiple of 90 rotates
   instead of failing with `InvalidArgument`.
 

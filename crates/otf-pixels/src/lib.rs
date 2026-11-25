@@ -121,9 +121,9 @@
 //!   keeps them ([`EncodeOptions::keep_exif`], [`EncodeOptions::keep_xmp`]),
 //!   so location data is stripped from uploads by default.
 //!
-//! Not yet: multi-frame (animated) pipelines and arbitrary-angle rotation.
-//! Each will arrive as an addition, not a change:
-//! [`OpenOptions::animated`] is already reserved for the first.
+//! Not yet: multi-frame (animated) pipelines. They will arrive as an
+//! addition, not a change: [`OpenOptions::animated`] is already reserved
+//! for them.
 
 use otf_pixels_core::{BufferSource, Op, Prefixed, Producer, TileBuf};
 use std::sync::Arc;
