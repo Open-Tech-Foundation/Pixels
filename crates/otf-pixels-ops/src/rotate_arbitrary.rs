@@ -13,137 +13,37 @@
 //! - **An output size.** The bounding box of the rotated input, as libvips
 //!   and sharp give it: `w·|cos θ| + h·|sin θ|` by `w·|sin θ| + h·|cos θ|`,
 //!   rounded up so that no corner is cut off. The rotation is about the
-//!   centre of both images.
+//!   centre of both images, so the picture sits centred on the canvas.
 //!
-//! Positive angles turn clockwise, as for [`crate::Rotate`] and sharp.
-//!
-//! # Alpha
-//!
-//! Interpolation runs on premultiplied samples and is divided back out, for
-//! the reason [`crate::Composite`] gives: interpolating straight alpha bleeds
-//! the colour of transparent pixels into their neighbours, which shows as a
-//! dark fringe along the edge of an image rotated over a transparent
-//! background.
+//! Positive angles turn clockwise, as for [`crate::Rotate`] and sharp. The
+//! resampling, alpha handling included, is [`crate::Affine`]'s; a rotation
+//! differs from the equivalent affine only in centring its result exactly.
 
 use std::sync::OnceLock;
 
 use otf_pixels_core::{
-    AccessPattern, ImageDescriptor, Op, PixelFormat, PixelsError, Region, Result, Sample, Tile,
-    TileMut, dispatch_sample,
+    AccessPattern, ImageDescriptor, Op, PixelsError, Region, Result, Tile, TileMut,
 };
 
-use crate::resize::background_pixel;
+use crate::transform::{Interpolator, Mapping, resample, side, sole};
 
-/// The most channels a pixel format has.
-const MAX_CHANNELS: usize = 4;
-
-/// How [`RotateArbitrary`] reads the input between pixel centres: the subset
-/// of sharp's `interpolator`s that apply to a rotation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-#[non_exhaustive]
-pub enum Interpolator {
-    /// The nearest input pixel; hard edges, no new colours.
-    Nearest,
-    /// Linear between the four nearest pixels — libvips' default for
-    /// `rotate`, and so sharp's.
-    #[default]
-    Bilinear,
-    /// Catmull-Rom over the sixteen nearest pixels: sharper than bilinear,
-    /// with a slight overshoot at hard edges that is clamped for integer
-    /// formats.
-    Bicubic,
-}
-
-impl Interpolator {
-    /// The taps along one axis for source coordinate `at`, as
-    /// `(first index, weights)`; unused weights are zero.
-    fn taps(self, at: f64) -> (i64, [f32; 4]) {
-        match self {
-            Self::Nearest => ((at + 0.5).floor() as i64, [1.0, 0.0, 0.0, 0.0]),
-            Self::Bilinear => {
-                let base = at.floor();
-                let t = (at - base) as f32;
-                (base as i64, [1.0 - t, t, 0.0, 0.0])
-            }
-            Self::Bicubic => {
-                let base = at.floor();
-                let t = (at - base) as f32;
-                let (t2, t3) = (t * t, t * t * t);
-                // Catmull-Rom, a = -0.5; the four weights sum to one.
-                (
-                    base as i64 - 1,
-                    [
-                        0.5 * (-t3 + 2.0 * t2 - t),
-                        0.5 * (3.0 * t3 - 5.0 * t2 + 2.0),
-                        0.5 * (-3.0 * t3 + 4.0 * t2 + t),
-                        0.5 * (t3 - t2),
-                    ],
-                )
-            }
-        }
-    }
-
-    /// How many taps [`Self::taps`] uses.
-    const fn width(self) -> usize {
-        match self {
-            Self::Nearest => 1,
-            Self::Bilinear => 2,
-            Self::Bicubic => 4,
-        }
-    }
-}
-
-/// The geometry of one rotation against one input size.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Geometry {
-    input: (u32, u32),
-    output: (u32, u32),
-    cos: f64,
-    sin: f64,
-}
-
-impl Geometry {
-    fn new(radians: f64, width: u32, height: u32) -> Result<Self> {
-        let (sin, cos) = radians.sin_cos();
-        let (w, h) = (f64::from(width), f64::from(height));
-        // Up to a hair under: 30 degrees of a 100-pixel side is 86.6025...,
-        // and 45 degrees of an even square can land within an ulp of an
-        // integer that rounding error must not push one pixel further.
-        let side = |v: f64| -> Result<u32> {
-            let v = (v - 1e-9).ceil().max(1.0);
-            if v > f64::from(u32::MAX) {
-                return Err(PixelsError::invalid_argument(
-                    "degrees",
-                    "the rotated image is too large",
-                ));
-            }
-            Ok(v as u32)
-        };
-        let output = (
-            side(w * cos.abs() + h * sin.abs())?,
-            side(w * sin.abs() + h * cos.abs())?,
-        );
-        Ok(Self {
-            input: (width, height),
-            output,
-            cos,
-            sin,
-        })
-    }
-
-    /// The input coordinate, in pixel-index space, that output pixel
-    /// `(x, y)`'s centre comes from.
-    fn source(&self, x: f64, y: f64) -> (f64, f64) {
-        let dx = x + 0.5 - f64::from(self.output.0) / 2.0;
-        let dy = y + 0.5 - f64::from(self.output.1) / 2.0;
+/// The mapping of a clockwise turn by `radians` of a `width` x `height`
+/// image about its centre.
+fn mapping(radians: f64, width: u32, height: u32) -> Result<Mapping> {
+    let (sin, cos) = radians.sin_cos();
+    let (w, h) = (f64::from(width), f64::from(height));
+    let output = (
+        side(w * cos.abs() + h * sin.abs(), "degrees")?,
+        side(w * sin.abs() + h * cos.abs(), "degrees")?,
+    );
+    Ok(Mapping {
+        input: (width, height),
+        output,
         // The inverse of a clockwise turn in y-down coordinates.
-        let u = dx * self.cos + dy * self.sin;
-        let v = -dx * self.sin + dy * self.cos;
-        (
-            u + f64::from(self.input.0) / 2.0 - 0.5,
-            v + f64::from(self.input.1) / 2.0 - 0.5,
-        )
-    }
+        inverse: [cos, sin, -sin, cos],
+        before: (-f64::from(output.0) / 2.0, -f64::from(output.1) / 2.0),
+        after: (w / 2.0, h / 2.0),
+    })
 }
 
 /// Options for [`RotateArbitrary`]: sharp's `rotate(angle, { background })`,
@@ -202,7 +102,7 @@ impl RotateOptions {
 pub struct RotateArbitrary {
     degrees: f64,
     options: RotateOptions,
-    bound: OnceLock<Geometry>,
+    bound: OnceLock<Mapping>,
 }
 
 impl Clone for RotateArbitrary {
@@ -253,7 +153,7 @@ impl RotateArbitrary {
     }
 
     /// Bind to `input`'s size, or check it matches the size already bound.
-    fn bind(&self, input: &ImageDescriptor) -> Result<Geometry> {
+    fn bind(&self, input: &ImageDescriptor) -> Result<Mapping> {
         if let Some(geometry) = self.bound.get() {
             if geometry.input != (input.width, input.height) {
                 return Err(PixelsError::graph(format!(
@@ -267,16 +167,9 @@ impl RotateArbitrary {
         // Reduced to one turn first, so a large angle loses no precision in
         // the conversion to radians.
         let radians = self.degrees.rem_euclid(360.0).to_radians();
-        let geometry = Geometry::new(radians, input.width, input.height)?;
+        let geometry = mapping(radians, input.width, input.height)?;
         Ok(*self.bound.get_or_init(|| geometry))
     }
-}
-
-/// Fetch the sole input descriptor.
-fn sole(inputs: &[ImageDescriptor]) -> Result<&ImageDescriptor> {
-    inputs
-        .first()
-        .ok_or_else(|| PixelsError::graph("`rotate` takes one input, got none"))
 }
 
 impl Op for RotateArbitrary {
@@ -292,58 +185,14 @@ impl Op for RotateArbitrary {
     }
 
     fn output_descriptor(&self, inputs: &[ImageDescriptor]) -> Result<ImageDescriptor> {
-        let input = sole(inputs)?;
-        let geometry = self.bind(input)?;
-        input.resized(geometry.output.0, geometry.output.1)
+        let input = sole(inputs, "rotate")?;
+        let mapping = self.bind(input)?;
+        input.resized(mapping.output.0, mapping.output.1)
     }
 
     fn input_regions(&self, output: Region, inputs: &[ImageDescriptor]) -> Result<Vec<Region>> {
-        let input = sole(inputs)?;
-        let geometry = self.bind(input)?;
-
-        // A rotated rectangle's bounding box is spanned by its corners, so
-        // the four corner pixel centres bound every centre in the tile.
-        let (x0, y0) = (f64::from(output.x), f64::from(output.y));
-        let x1 = x0 + f64::from(output.width.saturating_sub(1));
-        let y1 = y0 + f64::from(output.height.saturating_sub(1));
-        let corners = [
-            geometry.source(x0, y0),
-            geometry.source(x1, y0),
-            geometry.source(x0, y1),
-            geometry.source(x1, y1),
-        ];
-        let (mut low_u, mut high_u, mut low_v, mut high_v) = (
-            f64::INFINITY,
-            f64::NEG_INFINITY,
-            f64::INFINITY,
-            f64::NEG_INFINITY,
-        );
-        for (u, v) in corners {
-            low_u = low_u.min(u);
-            high_u = high_u.max(u);
-            low_v = low_v.min(v);
-            high_v = high_v.max(v);
-        }
-
-        // Widened by the filter's reach, and a pixel more for rounding.
-        let reach = 3.0;
-        let span = |low: f64, high: f64, size: u32| -> Option<(u32, u32)> {
-            let last = f64::from(size) - 1.0;
-            let start = (low.floor() - reach).max(0.0);
-            let end = (high.floor() + reach).min(last);
-            (start <= end).then(|| (start as u32, end as u32 + 1))
-        };
-        Ok(vec![match (
-            span(low_u, high_u, input.width),
-            span(low_v, high_v, input.height),
-        ) {
-            (Some((left, right)), Some((top, bottom))) => {
-                Region::new(left, top, right - left, bottom - top)
-            }
-            // A tile of pure background still has to name a valid
-            // region, so it asks for one pixel it will not read.
-            _ => Region::new(0, 0, 1, 1),
-        }])
+        let mapping = self.bind(sole(inputs, "rotate")?)?;
+        Ok(vec![mapping.demand(output)])
     }
 
     fn access_pattern(&self) -> AccessPattern {
@@ -353,186 +202,18 @@ impl Op for RotateArbitrary {
     }
 
     fn compute(&self, inputs: &[Tile<'_>], output: &mut TileMut<'_>) -> Result<()> {
-        let input = inputs
-            .first()
-            .ok_or_else(|| PixelsError::graph("`rotate` takes one input tile, got none"))?;
-        if input.pixel() != output.pixel() {
-            return Err(PixelsError::graph(format!(
-                "`rotate` input is {} but output is {}",
-                input.pixel(),
-                output.pixel()
-            )));
-        }
-        let geometry = *self.bound.get().ok_or_else(|| {
+        let mapping = self.bound.get().ok_or_else(|| {
             PixelsError::graph("`rotate` ran before its output shape was computed")
         })?;
-        let format = output.pixel();
-        if format.channels() > MAX_CHANNELS {
-            return Err(PixelsError::unsupported(format!(
-                "rotate handles up to {MAX_CHANNELS} channels, {format} has {}",
-                format.channels()
-            )));
-        }
-        dispatch_sample!(format.sample_kind(), S => {
-            rotate_tile::<S>(&geometry, self.options, input, output, format)
-        })
+        resample(
+            "rotate",
+            mapping,
+            self.options.background,
+            self.options.interpolator,
+            inputs,
+            output,
+        )
     }
-}
-
-/// Reading and writing one sample type as `f32` in its own scale.
-trait Value: Sample {
-    fn load(bytes: &[u8], index: usize) -> f32;
-    fn store(value: f32, into: &mut Vec<u8>);
-    fn full_scale() -> f32;
-}
-
-impl Value for u8 {
-    fn load(bytes: &[u8], index: usize) -> f32 {
-        bytes.get(index).map_or(0.0, |&v| f32::from(v))
-    }
-    fn store(value: f32, into: &mut Vec<u8>) {
-        into.push((value.clamp(0.0, 255.0) + 0.5) as u8);
-    }
-    fn full_scale() -> f32 {
-        255.0
-    }
-}
-
-impl Value for u16 {
-    fn load(bytes: &[u8], index: usize) -> f32 {
-        let at = index * 2;
-        bytes
-            .get(at..at + 2)
-            .and_then(|b| b.try_into().ok())
-            .map_or(0.0, |b| f32::from(u16::from_ne_bytes(b)))
-    }
-    fn store(value: f32, into: &mut Vec<u8>) {
-        into.extend_from_slice(&((value.clamp(0.0, 65535.0) + 0.5) as u16).to_ne_bytes());
-    }
-    fn full_scale() -> f32 {
-        65535.0
-    }
-}
-
-impl Value for f32 {
-    fn load(bytes: &[u8], index: usize) -> f32 {
-        let at = index * 4;
-        bytes
-            .get(at..at + 4)
-            .and_then(|b| b.try_into().ok())
-            .map_or(0.0, f32::from_ne_bytes)
-    }
-    fn store(value: f32, into: &mut Vec<u8>) {
-        into.extend_from_slice(&value.to_ne_bytes());
-    }
-    fn full_scale() -> f32 {
-        1.0
-    }
-}
-
-/// Premultiply `pixel` in place when the format has alpha.
-fn premultiply(pixel: &mut [f32; MAX_CHANNELS], channels: usize, alpha: bool, full: f32) {
-    if alpha {
-        let a = pixel.get(channels - 1).map_or(1.0, |&a| a / full);
-        for value in pixel.iter_mut().take(channels - 1) {
-            *value *= a;
-        }
-    }
-}
-
-/// Resample one output tile.
-fn rotate_tile<S: Value>(
-    geometry: &Geometry,
-    options: RotateOptions,
-    input: &Tile<'_>,
-    output: &mut TileMut<'_>,
-    format: PixelFormat,
-) -> Result<()> {
-    let channels = format.channels();
-    let alpha = format.has_alpha();
-    let full = S::full_scale();
-    let interpolator = options.interpolator;
-    let taps = interpolator.width();
-    let source = input.region();
-    let region = output.region();
-    let (width, height) = (i64::from(geometry.input.0), i64::from(geometry.input.1));
-
-    let background = {
-        let bytes = background_pixel(format, options.background);
-        let mut pixel = [0.0_f32; MAX_CHANNELS];
-        for (c, slot) in pixel.iter_mut().enumerate().take(channels) {
-            *slot = S::load(&bytes, c);
-        }
-        premultiply(&mut pixel, channels, alpha, full);
-        pixel
-    };
-
-    // One input pixel, premultiplied, or the background if it lies outside
-    // the image (or, defensively, outside the tile that was delivered).
-    let fetch = |x: i64, y: i64| -> [f32; MAX_CHANNELS] {
-        if x < 0 || y < 0 || x >= width || y >= height {
-            return background;
-        }
-        let (x, y) = (x as u32, y as u32);
-        if x < source.x || x >= source.x + source.width {
-            return background;
-        }
-        let Some(row) = input.row(y) else {
-            return background;
-        };
-        let first = (x - source.x) as usize * channels;
-        let mut pixel = [0.0_f32; MAX_CHANNELS];
-        for (c, slot) in pixel.iter_mut().enumerate().take(channels) {
-            *slot = S::load(row, first + c);
-        }
-        premultiply(&mut pixel, channels, alpha, full);
-        pixel
-    };
-
-    let mut row_out = Vec::with_capacity(region.width as usize * format.bytes_per_pixel());
-    for y in region.y..region.y + region.height {
-        row_out.clear();
-        for x in region.x..region.x + region.width {
-            let (u, v) = geometry.source(f64::from(x), f64::from(y));
-            let (first_x, weights_x) = interpolator.taps(u);
-            let (first_y, weights_y) = interpolator.taps(v);
-
-            let mut sum = [0.0_f32; MAX_CHANNELS];
-            for (j, &wy) in weights_y.iter().enumerate().take(taps) {
-                let mut line = [0.0_f32; MAX_CHANNELS];
-                for (i, &wx) in weights_x.iter().enumerate().take(taps) {
-                    let pixel = fetch(first_x + i as i64, first_y + j as i64);
-                    // All four lanes: the unused ones stay zero.
-                    for (acc, value) in line.iter_mut().zip(pixel) {
-                        *acc += wx * value;
-                    }
-                }
-                for (acc, value) in sum.iter_mut().zip(line) {
-                    *acc += wy * value;
-                }
-            }
-
-            if alpha {
-                let a = sum.get(channels - 1).map_or(full, |a| a.clamp(0.0, full));
-                let scale = if a > 0.0 { full / a } else { 0.0 };
-                for &value in sum.iter().take(channels - 1) {
-                    S::store(value * scale, &mut row_out);
-                }
-                S::store(a, &mut row_out);
-            } else {
-                for &value in sum.iter().take(channels) {
-                    S::store(value, &mut row_out);
-                }
-            }
-        }
-        if let Some(target) = output.row_mut(y) {
-            let len = target.len().min(row_out.len());
-            if let (Some(to), Some(from)) = (target.get_mut(..len), row_out.get(..len)) {
-                to.copy_from_slice(from);
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -546,7 +227,7 @@ fn rotate_tile<S: Value>(
 mod tests {
     use super::*;
     use crate::{Quarter, Rotate};
-    use otf_pixels_core::TileBuf;
+    use otf_pixels_core::{PixelFormat, TileBuf};
 
     fn apply(
         op: &dyn Op,

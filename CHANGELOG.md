@@ -16,6 +16,12 @@ versioning: [SemVer](https://semver.org/).
   transparent background do not darken; a translucent background adds
   alpha. Multiples of 90 stay exact quarter turns. The op is
   `otf_pixels_ops::RotateArbitrary`.
+- sharp's `affine(matrix, options)`: `Image::affine([a, b, c, d],
+  AffineOptions)` scales, shears, mirrors or rotates by any non-singular
+  2x2 matrix in one resample, onto the transformed bounding box as in
+  libvips, with sharp's `background`, `idx`/`idy`, `odx`/`ody` and
+  `interpolator` (bicubic by default). It shares its resampler with the
+  any-angle rotate.
 
 ### Changed
 - `Image::rotate` with an angle that is not a multiple of 90 rotates

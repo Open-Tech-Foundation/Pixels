@@ -1,4 +1,4 @@
-//! sharp's `rotate(angle)` for any angle, through the facade.
+//! sharp's `rotate(angle)` for any angle, and `affine`, through the facade.
 //!
 //! The resampling itself is checked in `otf-pixels-ops`; this checks
 //! `Image::rotate` and `Image::rotate_with` reach it (or the exact quarter
@@ -14,7 +14,8 @@
 )]
 
 use otf_pixels::{
-    EncodeOptions, Format, Image, ImageDescriptor, Interpolator, PixelFormat, RotateOptions,
+    AffineOptions, EncodeOptions, Format, Image, ImageDescriptor, Interpolator, PixelFormat,
+    RotateOptions,
 };
 
 /// A 37x23 image in `pixel`, every pixel different.
@@ -141,4 +142,82 @@ fn a_rotation_streams_from_a_forward_only_decoder() {
     )
     .unwrap();
     assert_eq!(raw(decoded.rotate(200)), raw(in_memory.rotate(200)));
+}
+
+#[test]
+fn affine_shears_onto_the_bounding_box() {
+    // X = x + y/2: 37 + 23/2 = 48.5, rounded up.
+    let sheared = image(PixelFormat::Rgb8).affine([1.0, 0.5, 0.0, 1.0], AffineOptions::default());
+    assert_eq!(size(&sheared), (49, 23));
+    let pixels = raw(sheared);
+    // The top-right corner is uncovered: sharp's opaque black.
+    assert_eq!(&pixels[48 * 3..49 * 3], [0, 0, 0]);
+}
+
+#[test]
+fn affine_mirrors_exactly() {
+    let mirrored = image(PixelFormat::Rgba8).affine(
+        [-1.0, 0.0, 0.0, 1.0],
+        AffineOptions::default().with_interpolator(Interpolator::Bilinear),
+    );
+    // Premultiplied resampling drops the colour of a fully transparent
+    // pixel, so compare the rest.
+    let got = raw(mirrored);
+    let expected = raw(image(PixelFormat::Rgba8).flop());
+    for (g, e) in got.chunks_exact(4).zip(expected.chunks_exact(4)) {
+        if e[3] > 0 {
+            assert_eq!(g, e);
+        }
+    }
+}
+
+#[test]
+fn affine_with_a_translucent_background_adds_alpha() {
+    let sheared = image(PixelFormat::Rgb8).affine(
+        [1.0, 0.0, 0.4, 1.0],
+        AffineOptions::default().with_background([0, 0, 0, 0]),
+    );
+    assert_eq!(sheared.descriptor().unwrap().pixel, PixelFormat::Rgba8);
+    let (width, _) = size(&sheared);
+    let pixels = raw(sheared);
+    // Y = 0.4x + y: the bottom-left corner is uncovered and transparent.
+    let height = pixels.len() / 4 / width as usize;
+    let at = (height - 1) * width as usize * 4;
+    assert_eq!(pixels[at + 3], 0);
+}
+
+#[test]
+fn a_singular_matrix_fails_at_the_terminal() {
+    let result = image(PixelFormat::Rgb8)
+        .affine([1.0, 2.0, 0.5, 1.0], AffineOptions::default())
+        .output(Format::Raw, EncodeOptions::default())
+        .bytes();
+    assert!(result.is_err());
+}
+
+#[test]
+fn affine_through_the_scheduler_matches_the_reference() {
+    for format in [PixelFormat::Rgb8, PixelFormat::GrayA8, PixelFormat::Rgba16] {
+        for options in [
+            AffineOptions::default(),
+            AffineOptions::default()
+                .with_interpolator(Interpolator::Bilinear)
+                .with_input_offset(0.5, 0.25)
+                .with_output_offset(-1.5, 3.0)
+                .with_background([10, 20, 30, 128]),
+        ] {
+            let pipeline = || {
+                image(format)
+                    .resize(120, 80)
+                    .affine([0.9, 0.4, -0.3, 1.2], options)
+                    .blur(1.0)
+                    .output(Format::Raw, EncodeOptions::default())
+            };
+            assert_eq!(
+                pipeline().threads(4).bytes().unwrap(),
+                pipeline().bytes_via_reference().unwrap(),
+                "{format} {options:?}"
+            );
+        }
+    }
 }

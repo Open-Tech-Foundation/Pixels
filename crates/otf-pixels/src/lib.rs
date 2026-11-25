@@ -139,10 +139,11 @@ pub use otf_pixels_core::{
     evaluate as evaluate_reference,
 };
 pub use otf_pixels_ops::{
-    Blend, Composite, Conversion, ConvertFormat, Convolve, Crop, EnsureAlpha, Extend, ExtendWith,
-    ExtractChannel, Filter, Fit, Flatten, Flip, Flop, Gamma, Greyscale, Interpolator, Kernel,
-    Linear, Modulate, Negate, Placement, Position, Quarter, Recomb, Resize, ResizeOptions, Rotate,
-    RotateArbitrary, RotateOptions, Threshold, Tint, ToSrgb, Trim, Unconvertible,
+    Affine, AffineOptions, Blend, Composite, Conversion, ConvertFormat, Convolve, Crop,
+    EnsureAlpha, Extend, ExtendWith, ExtractChannel, Filter, Fit, Flatten, Flip, Flop, Gamma,
+    Greyscale, Interpolator, Kernel, Linear, Modulate, Negate, Placement, Position, Quarter,
+    Recomb, Resize, ResizeOptions, Rotate, RotateArbitrary, RotateOptions, Threshold, Tint, ToSrgb,
+    Trim, Unconvertible,
 };
 
 #[cfg(feature = "raw")]
@@ -700,6 +701,28 @@ impl Image {
             };
         }
         let op = match RotateArbitrary::new(degrees, options) {
+            Ok(op) => op,
+            Err(error) => return Self::failed(error),
+        };
+        if options.background()[3] < 255 {
+            self.ensure_alpha(1.0).apply(Arc::new(op))
+        } else {
+            self.apply(Arc::new(op))
+        }
+    }
+
+    /// Transform by the matrix `[[a, b], [c, d]]`, given as `[a, b, c, d]`
+    /// (sharp's `affine(matrix, options)`): an input point `(x, y)` goes to
+    /// `(a·x + b·y, c·x + d·y)`, onto a canvas that holds all of it.
+    ///
+    /// Scaling, shear, mirroring and rotation, alone or combined, resampled
+    /// once; see [`Affine`]. As for [`Image::extend`], a translucent
+    /// background on an image without alpha adds an opaque alpha channel
+    /// first. A singular or non-finite matrix is an error, surfaced at the
+    /// terminal.
+    #[must_use]
+    pub fn affine(self, matrix: [f64; 4], options: AffineOptions) -> Self {
+        let op = match Affine::new(matrix, options) {
             Ok(op) => op,
             Err(error) => return Self::failed(error),
         };

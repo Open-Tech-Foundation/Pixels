@@ -100,6 +100,7 @@ alpha convert internally.
 | `crop(x, y, w, h)` | zero-cost region remap |
 | `rotate(deg)` | multiples of 90 are exact; any other angle resamples (nearest, bilinear default, bicubic) onto the rotated bounding box, uncovered corners in `background` |
 | `flip()` / `flop()` | vertical / horizontal mirror |
+| `affine(matrix, opts)` | any non-singular 2x2 matrix onto its bounding box; input/output offsets, `background`, nearest/bilinear/bicubic |
 | `modulate(opts)` | brightness, saturation, hue |
 | `convolve(kernel)` | arbitrary small kernels; blur/sharpen presets |
 | `composite(other, x, y, blend)` | source-over minimum; more blend modes as capacity allows |

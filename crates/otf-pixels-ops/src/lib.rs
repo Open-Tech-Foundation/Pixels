@@ -12,7 +12,7 @@
 //!
 //! The full v1 op set from SPEC §Core ops is here: [`Resize`], [`Crop`],
 //! [`Rotate`] (with [`RotateArbitrary`] for any angle), [`Flip`], [`Flop`], [`Modulate`], [`Convolve`], [`Composite`],
-//! [`ExtractChannel`] and [`Flatten`], with sharp's [`Extend`] and the
+//! [`ExtractChannel`] and [`Flatten`], with sharp's [`Extend`] and [`Affine`] and the
 //! per-pixel adjustments in `adjust`. [`Trim`] is the exception: its output
 //! shape depends on pixel values, so it searches computed pixels rather
 //! than being an op.
@@ -52,6 +52,7 @@
 //! even while the evaluator only ever asks for whole images.
 
 mod adjust;
+mod affine;
 mod composite;
 mod convert;
 mod convolve;
@@ -64,9 +65,11 @@ mod resample;
 mod resize;
 mod rotate;
 mod rotate_arbitrary;
+mod transform;
 mod trim;
 
 pub use adjust::{EnsureAlpha, Gamma, Greyscale, Linear, Negate, Recomb, Threshold, Tint};
+pub use affine::{Affine, AffineOptions};
 pub use composite::{Blend, Composite, Placement};
 pub use convert::ConvertFormat;
 pub use convolve::{Convolve, Kernel};
@@ -77,5 +80,6 @@ pub use icc::{Conversion, ToSrgb, Unconvertible};
 pub use pointwise::{ExtractChannel, Flatten, Modulate};
 pub use resize::{Fit, Position, Resize, ResizeOptions};
 pub use rotate::{Quarter, Rotate};
-pub use rotate_arbitrary::{Interpolator, RotateArbitrary, RotateOptions};
+pub use rotate_arbitrary::{RotateArbitrary, RotateOptions};
+pub use transform::Interpolator;
 pub use trim::Trim;
